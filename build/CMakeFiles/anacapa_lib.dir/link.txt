@@ -1,0 +1,2 @@
+/Library/Developer/CommandLineTools/usr/bin/ar qc libanacapa_lib.a CMakeFiles/anacapa_lib.dir/src/accel/BVHBackend.cpp.o CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.o CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o
+/Library/Developer/CommandLineTools/usr/bin/ranlib libanacapa_lib.a

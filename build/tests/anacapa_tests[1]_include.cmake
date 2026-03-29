@@ -1,0 +1,5 @@
+if(EXISTS "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests[1]_tests.cmake")
+  include("/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests[1]_tests.cmake")
+else()
+  add_test(anacapa_tests_NOT_BUILT anacapa_tests_NOT_BUILT)
+endif()
