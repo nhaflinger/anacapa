@@ -92,7 +92,10 @@ struct Camera {
     // Generate a ray for pixel (px, py) with sub-pixel offset (u, v) in [0,1)
     Ray generateRay(uint32_t px, uint32_t py, float u, float v) const {
         float s = (static_cast<float>(px) + u) / static_cast<float>(imageWidth);
-        float t = (static_cast<float>(py) + v) / static_cast<float>(imageHeight);
+        // Flip py: row 0 is the top of the image, but lowerLeftCorner + vertical*0
+        // is the bottom of the frustum. Invert so the image isn't upside-down.
+        float t = (static_cast<float>(imageHeight - 1 - py) + v)
+                / static_cast<float>(imageHeight);
         Vec3f dir = lowerLeftCorner + horizontal*s + vertical*t - origin;
         return Ray{origin, normalize(dir)};
     }

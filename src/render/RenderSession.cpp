@@ -8,8 +8,17 @@
 #include <spdlog/spdlog.h>
 #include <cassert>
 #include <chrono>
+#include <cmath>
 
 namespace anacapa {
+
+// Rotate a point around the Y axis by `degrees`, about the given pivot.
+static Vec3f rotateY(Vec3f p, Vec3f pivot, float degrees) {
+    float rad = degrees * 3.14159265f / 180.f;
+    float c   = std::cos(rad), s = std::sin(rad);
+    Vec3f q   = p - pivot;
+    return pivot + Vec3f{ c*q.x + s*q.z, q.y, -s*q.x + c*q.z };
+}
 
 RenderSession::RenderSession(RenderSettings settings)
     : m_settings(std::move(settings))
@@ -17,14 +26,20 @@ RenderSession::RenderSession(RenderSettings settings)
 
 // ---------------------------------------------------------------------------
 // Cornell Box — hardcoded for Phase 1
-// Classic Cornell box: white walls, red left, green right, white light above.
+//
+// Coordinate system:
+//   x ∈ [-1, 1]  (left wall = -1 red, right wall = +1 green)
+//   y ∈ [-1, 1]  (floor = -1, ceiling = +1)
+//   z ∈ [ 0, 2]  (open face at z=0 toward camera, back wall at z=2)
+//
+// All quads wound CCW when viewed from inside — normals face inward.
 // ---------------------------------------------------------------------------
 void RenderSession::buildCornellBox() {
     // -- Materials --
-    auto white  = std::make_unique<LambertianMaterial>(Spectrum{0.73f, 0.73f, 0.73f});
-    auto red    = std::make_unique<LambertianMaterial>(Spectrum{0.65f, 0.05f, 0.05f});
-    auto green  = std::make_unique<LambertianMaterial>(Spectrum{0.12f, 0.45f, 0.15f});
-    auto light  = std::make_unique<EmissiveMaterial>(
+    auto white = std::make_unique<LambertianMaterial>(Spectrum{0.73f, 0.73f, 0.73f});
+    auto red   = std::make_unique<LambertianMaterial>(Spectrum{0.65f, 0.05f, 0.05f});
+    auto green = std::make_unique<LambertianMaterial>(Spectrum{0.12f, 0.45f, 0.15f});
+    auto light = std::make_unique<EmissiveMaterial>(
         Spectrum{0.f}, Spectrum{15.f, 15.f, 15.f});
 
     const IMaterial* pWhite = white.get();
@@ -37,39 +52,61 @@ void RenderSession::buildCornellBox() {
     m_materials.push_back(std::move(green));
     m_materials.push_back(std::move(light));
 
-    // Helper: add a quad as two triangles
+    // addQuad: vertices in CCW order viewed from the direction the normal faces.
+    // Explicit inward normal passed so there's no winding ambiguity.
     auto addQuad = [&](Vec3f v0, Vec3f v1, Vec3f v2, Vec3f v3,
-                       const IMaterial* mat) {
+                       Vec3f inwardNormal,
+                       const IMaterial* mat) -> uint32_t {
         MeshDesc mesh;
         mesh.positions = {v0, v1, v2, v3};
-        Vec3f e1 = v1 - v0, e2 = v2 - v0;
-        Vec3f n  = safeNormalize(cross(e1, e2));
-        mesh.normals   = {n, n, n, n};
-        mesh.uvs       = {{0,0},{1,0},{1,1},{0,1}};
-        mesh.indices   = {0,1,2, 0,2,3};
-
-        uint32_t id = m_geomPool.addMesh(std::move(mesh));
-        // Map material pointer — we use meshID as material index
+        Vec3f n = safeNormalize(inwardNormal);
+        mesh.normals = {n, n, n, n};
+        mesh.uvs     = {{0,0},{1,0},{1,1},{0,1}};
+        mesh.indices = {0,1,2, 0,2,3};
+        uint32_t id  = m_geomPool.addMesh(std::move(mesh));
         (void)mat;
         return id;
     };
 
-    // Cornell box spans [-1,1] in x and y, [0,2] in z (camera looks down -z)
-    // Floor
-    uint32_t floorID  = addQuad({-1,-1, 0},{1,-1, 0},{1,-1,2},{-1,-1,2}, pWhite);
-    // Ceiling
-    uint32_t ceilID   = addQuad({-1, 1, 0},{-1,1,2},{1,1,2},{1,1,0},     pWhite);
-    // Back wall
-    uint32_t backID   = addQuad({-1,-1,2},{1,-1,2},{1,1,2},{-1,1,2},     pWhite);
-    // Left wall (red)
-    uint32_t leftID   = addQuad({-1,-1,0},{-1,-1,2},{-1,1,2},{-1,1,0},   pRed);
-    // Right wall (green)
-    uint32_t rightID  = addQuad({1,-1,0},{1,1,0},{1,1,2},{1,-1,2},       pGreen);
-    // Light quad (emissive patch on ceiling)
-    uint32_t lightID  = addQuad({-0.3f,0.99f,0.9f},{0.3f,0.99f,0.9f},
-                                 {0.3f,0.99f,1.1f},{-0.3f,0.99f,1.1f},   pLight);
+    // addBox: axis-aligned box from pMin to pMax, all faces using mat.
+    // Returns the material pointer so the caller can register it.
+    auto addBox = [&](Vec3f lo, Vec3f hi, const IMaterial* mat) {
+        float x0=lo.x, x1=hi.x, y0=lo.y, y1=hi.y, z0=lo.z, z1=hi.z;
+        auto reg = [&](uint32_t id) {
+            if (id >= m_scene.materials.size())
+                m_scene.materials.resize(id + 1, nullptr);
+            m_scene.materials[id] = mat;
+        };
+        // Floor of box — normal +y
+        reg(addQuad({x0,y0,z0},{x1,y0,z0},{x1,y0,z1},{x0,y0,z1}, {0, 1,0}, mat));
+        // Ceiling of box — normal -y
+        reg(addQuad({x0,y1,z1},{x1,y1,z1},{x1,y1,z0},{x0,y1,z0}, {0,-1,0}, mat));
+        // Front face — normal -z
+        reg(addQuad({x0,y0,z0},{x0,y1,z0},{x1,y1,z0},{x1,y0,z0}, {0,0,-1}, mat));
+        // Back face — normal +z
+        reg(addQuad({x1,y0,z1},{x1,y1,z1},{x0,y1,z1},{x0,y0,z1}, {0,0, 1}, mat));
+        // Left face — normal +x
+        reg(addQuad({x0,y0,z1},{x0,y1,z1},{x0,y1,z0},{x0,y0,z0}, { 1,0,0}, mat));
+        // Right face — normal -x
+        reg(addQuad({x1,y0,z0},{x1,y1,z0},{x1,y1,z1},{x1,y0,z1}, {-1,0,0}, mat));
+    };
 
-    // -- Scene materials array (indexed by meshID) --
+    // -- Room walls --
+    // Floor: y=-1, normal +y
+    uint32_t floorID = addQuad({-1,-1,0},{1,-1,0},{1,-1,2},{-1,-1,2}, {0, 1,0}, pWhite);
+    // Ceiling: y=+1, normal -y
+    uint32_t ceilID  = addQuad({-1, 1,2},{1, 1,2},{1, 1,0},{-1, 1,0}, {0,-1,0}, pWhite);
+    // Back wall: z=2, normal -z
+    uint32_t backID  = addQuad({-1,-1,2},{-1,1,2},{1,1,2},{1,-1,2},   {0,0,-1}, pWhite);
+    // Left wall (red): x=-1, normal +x
+    uint32_t leftID  = addQuad({-1,-1,2},{-1,1,2},{-1,1,0},{-1,-1,0}, { 1,0,0}, pRed);
+    // Right wall (green): x=+1, normal -x
+    uint32_t rightID = addQuad({1,-1,0},{1,1,0},{1,1,2},{1,-1,2},     {-1,0,0}, pGreen);
+    // Ceiling light patch: slightly below y=1, normal -y (faces down into room)
+    uint32_t lightID = addQuad({-0.25f,0.999f,0.85f},{0.25f,0.999f,0.85f},
+                                {0.25f,0.999f,1.15f},{-0.25f,0.999f,1.15f},
+                                {0,-1,0}, pLight);
+
     m_scene.materials.resize(m_geomPool.numMeshes(), nullptr);
     m_scene.materials[floorID] = pWhite;
     m_scene.materials[ceilID]  = pWhite;
@@ -78,17 +115,51 @@ void RenderSession::buildCornellBox() {
     m_scene.materials[rightID] = pGreen;
     m_scene.materials[lightID] = pLight;
 
-    // -- Area light --
+    // -- Interior blocks (rotated around Y axis) --
+    // addRotatedBox: builds an axis-aligned box then rotates all vertices
+    // around the box's center (at floor level) by `yDeg` degrees.
+    auto addRotatedBox = [&](Vec3f lo, Vec3f hi, float yDeg, const IMaterial* mat) {
+        // Pivot at the horizontal center of the box, on the floor
+        Vec3f pivot = { (lo.x + hi.x) * 0.5f, lo.y, (lo.z + hi.z) * 0.5f };
+
+        auto rv = [&](Vec3f p) { return rotateY(p, pivot, yDeg); };
+
+        float x0=lo.x, x1=hi.x, y0=lo.y, y1=hi.y, z0=lo.z, z1=hi.z;
+
+        // Each face: 4 rotated verts + pre-rotated inward normal
+        auto face = [&](Vec3f a, Vec3f b, Vec3f c, Vec3f d, Vec3f n) {
+            Vec3f rn = rotateY(pivot + n, pivot, yDeg) - pivot; // rotate normal too
+            uint32_t id = addQuad(rv(a), rv(b), rv(c), rv(d), rn, mat);
+            if (id >= m_scene.materials.size())
+                m_scene.materials.resize(id + 1, nullptr);
+            m_scene.materials[id] = mat;
+        };
+
+        face({x0,y0,z0},{x1,y0,z0},{x1,y0,z1},{x0,y0,z1}, { 0, 1, 0}); // floor
+        face({x0,y1,z1},{x1,y1,z1},{x1,y1,z0},{x0,y1,z0}, { 0,-1, 0}); // top
+        face({x0,y0,z0},{x0,y1,z0},{x1,y1,z0},{x1,y0,z0}, { 0, 0,-1}); // front
+        face({x1,y0,z1},{x1,y1,z1},{x0,y1,z1},{x0,y0,z1}, { 0, 0, 1}); // back
+        face({x0,y0,z1},{x0,y1,z1},{x0,y1,z0},{x0,y0,z0}, { 1, 0, 0}); // left
+        face({x1,y0,z0},{x1,y1,z0},{x1,y1,z1},{x1,y0,z1}, {-1, 0, 0}); // right
+    };
+
+    // Tall block — right side, rotated 15° CCW (classic Cornell box angle)
+    addRotatedBox({ 0.10f, -1.0f, 0.55f}, { 0.65f,  0.0f, 1.10f}, -15.f, pWhite);
+
+    // Short block — left side, rotated 18° CW (classic Cornell box angle)
+    addRotatedBox({-0.65f, -1.0f, 0.80f}, {-0.10f, -0.5f, 1.35f},  18.f, pWhite);
+
+    // -- Area light (ILight for direct sampling) --
     auto areaLight = std::make_unique<AreaLight>(
-        Vec3f{0.f, 0.99f, 1.0f},   // center
-        Vec3f{0.3f, 0.f, 0.f},      // u half-extent
-        Vec3f{0.f, 0.f, 0.1f},      // v half-extent
+        Vec3f{0.f, 0.999f, 1.0f},    // center (matches the ceiling patch)
+        Vec3f{0.25f, 0.f, 0.f},       // u half-extent
+        Vec3f{0.f,  0.f, 0.15f},      // v half-extent
         Spectrum{15.f, 15.f, 15.f}
     );
     m_scene.lights.push_back(areaLight.get());
     m_lights.push_back(std::move(areaLight));
 
-    m_scene.envRadiance = {0.f, 0.f, 0.f};
+    m_scene.envRadiance = {};
 }
 
 // ---------------------------------------------------------------------------
