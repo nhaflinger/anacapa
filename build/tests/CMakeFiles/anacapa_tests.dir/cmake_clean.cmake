@@ -1,6 +1,8 @@
 file(REMOVE_RECURSE
   "CMakeFiles/anacapa_tests.dir/unit/test_allocator.cpp.o"
   "CMakeFiles/anacapa_tests.dir/unit/test_allocator.cpp.o.d"
+  "CMakeFiles/anacapa_tests.dir/unit/test_bdpt.cpp.o"
+  "CMakeFiles/anacapa_tests.dir/unit/test_bdpt.cpp.o.d"
   "CMakeFiles/anacapa_tests.dir/unit/test_bvh.cpp.o"
   "CMakeFiles/anacapa_tests.dir/unit/test_bvh.cpp.o.d"
   "CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o"

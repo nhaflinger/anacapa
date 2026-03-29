@@ -6,7 +6,7 @@ CXX_DEFINES = -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB
 
 CXX_INCLUDES = -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest
 
-CXX_FLAGSarm64 = -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk
+CXX_FLAGSarm64 = -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk
 
-CXX_FLAGS = -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk
+CXX_FLAGS = -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk
 

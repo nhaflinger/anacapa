@@ -1021,6 +1021,7 @@ CMakeFiles/anacapa.dir/src/main.cpp.o
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdarg.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stddef.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdint.h
+ /Library/Developer/CommandLineTools/usr/lib/clang/17/share/asan_ignorelist.txt
  /Users/douglascreel/dev/anacapa/build/_deps/cli11-src/include/CLI/App.hpp
  /Users/douglascreel/dev/anacapa/build/_deps/cli11-src/include/CLI/Argv.hpp
  /Users/douglascreel/dev/anacapa/build/_deps/cli11-src/include/CLI/CLI.hpp

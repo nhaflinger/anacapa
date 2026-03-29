@@ -13,14 +13,17 @@
 
 namespace anacapa {
 
+enum class IntegratorType { Path, BDPT };
+
 struct RenderSettings {
-    uint32_t    imageWidth     = 800;
-    uint32_t    imageHeight    = 600;
-    uint32_t    samplesPerPixel = 64;
-    uint32_t    maxDepth       = 8;
-    uint32_t    tileSize       = 64;
-    uint32_t    numThreads     = 0;   // 0 = hardware_concurrency
-    std::string outputPath     = "out.exr";
+    uint32_t       imageWidth      = 800;
+    uint32_t       imageHeight     = 800;
+    uint32_t       samplesPerPixel = 64;
+    uint32_t       maxDepth        = 8;
+    uint32_t       tileSize        = 64;
+    uint32_t       numThreads      = 0;   // 0 = hardware_concurrency
+    std::string    outputPath      = "out.exr";
+    IntegratorType integrator      = IntegratorType::BDPT;
 };
 
 // ---------------------------------------------------------------------------

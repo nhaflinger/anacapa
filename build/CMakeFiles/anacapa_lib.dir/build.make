@@ -97,10 +97,38 @@ CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.s"
 	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /Users/douglascreel/dev/anacapa/src/film/Film.cpp -o CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.s
 
+CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o: CMakeFiles/anacapa_lib.dir/flags.make
+CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o: /Users/douglascreel/dev/anacapa/src/integrator/BDPTIntegrator.cpp
+CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o: CMakeFiles/anacapa_lib.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o -MF CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o.d -o CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o -c /Users/douglascreel/dev/anacapa/src/integrator/BDPTIntegrator.cpp
+
+CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.i"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /Users/douglascreel/dev/anacapa/src/integrator/BDPTIntegrator.cpp > CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.i
+
+CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.s"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /Users/douglascreel/dev/anacapa/src/integrator/BDPTIntegrator.cpp -o CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.s
+
+CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o: CMakeFiles/anacapa_lib.dir/flags.make
+CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o: /Users/douglascreel/dev/anacapa/src/integrator/MISWeight.cpp
+CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o: CMakeFiles/anacapa_lib.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o -MF CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o.d -o CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o -c /Users/douglascreel/dev/anacapa/src/integrator/MISWeight.cpp
+
+CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.i"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /Users/douglascreel/dev/anacapa/src/integrator/MISWeight.cpp > CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.i
+
+CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.s"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /Users/douglascreel/dev/anacapa/src/integrator/MISWeight.cpp -o CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.s
+
 CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o: CMakeFiles/anacapa_lib.dir/flags.make
 CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o: /Users/douglascreel/dev/anacapa/src/integrator/PathIntegrator.cpp
 CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o: CMakeFiles/anacapa_lib.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o"
 	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o -MF CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o.d -o CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o -c /Users/douglascreel/dev/anacapa/src/integrator/PathIntegrator.cpp
 
 CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.i: cmake_force
@@ -114,7 +142,7 @@ CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.s: cmake_force
 CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o: CMakeFiles/anacapa_lib.dir/flags.make
 CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o: /Users/douglascreel/dev/anacapa/src/render/RenderSession.cpp
 CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o: CMakeFiles/anacapa_lib.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o"
 	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o -MF CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o.d -o CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o -c /Users/douglascreel/dev/anacapa/src/render/RenderSession.cpp
 
 CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.i: cmake_force
@@ -129,6 +157,8 @@ CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.s: cmake_force
 anacapa_lib_OBJECTS = \
 "CMakeFiles/anacapa_lib.dir/src/accel/BVHBackend.cpp.o" \
 "CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.o" \
+"CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o" \
+"CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o" \
 "CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o" \
 "CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o"
 
@@ -137,11 +167,13 @@ anacapa_lib_EXTERNAL_OBJECTS =
 
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/accel/BVHBackend.cpp.o
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.o
+libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o
+libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/build.make
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Linking CXX static library libanacapa_lib.a"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Linking CXX static library libanacapa_lib.a"
 	$(CMAKE_COMMAND) -P CMakeFiles/anacapa_lib.dir/cmake_clean_target.cmake
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/anacapa_lib.dir/link.txt --verbose=$(VERBOSE)
 

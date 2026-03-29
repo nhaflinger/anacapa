@@ -209,6 +209,30 @@ unit/test_allocator.cpp.s:
 	cd /Users/douglascreel/dev/anacapa/build && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/anacapa_tests.dir/build.make tests/CMakeFiles/anacapa_tests.dir/unit/test_allocator.cpp.s
 .PHONY : unit/test_allocator.cpp.s
 
+unit/test_bdpt.o: unit/test_bdpt.cpp.o
+.PHONY : unit/test_bdpt.o
+
+# target to build an object file
+unit/test_bdpt.cpp.o:
+	cd /Users/douglascreel/dev/anacapa/build && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/anacapa_tests.dir/build.make tests/CMakeFiles/anacapa_tests.dir/unit/test_bdpt.cpp.o
+.PHONY : unit/test_bdpt.cpp.o
+
+unit/test_bdpt.i: unit/test_bdpt.cpp.i
+.PHONY : unit/test_bdpt.i
+
+# target to preprocess a source file
+unit/test_bdpt.cpp.i:
+	cd /Users/douglascreel/dev/anacapa/build && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/anacapa_tests.dir/build.make tests/CMakeFiles/anacapa_tests.dir/unit/test_bdpt.cpp.i
+.PHONY : unit/test_bdpt.cpp.i
+
+unit/test_bdpt.s: unit/test_bdpt.cpp.s
+.PHONY : unit/test_bdpt.s
+
+# target to generate assembly for a file
+unit/test_bdpt.cpp.s:
+	cd /Users/douglascreel/dev/anacapa/build && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/anacapa_tests.dir/build.make tests/CMakeFiles/anacapa_tests.dir/unit/test_bdpt.cpp.s
+.PHONY : unit/test_bdpt.cpp.s
+
 unit/test_bvh.o: unit/test_bvh.cpp.o
 .PHONY : unit/test_bvh.o
 
@@ -298,6 +322,9 @@ help:
 	@echo "... unit/test_allocator.o"
 	@echo "... unit/test_allocator.i"
 	@echo "... unit/test_allocator.s"
+	@echo "... unit/test_bdpt.o"
+	@echo "... unit/test_bdpt.i"
+	@echo "... unit/test_bdpt.s"
 	@echo "... unit/test_bvh.o"
 	@echo "... unit/test_bvh.i"
 	@echo "... unit/test_bvh.s"

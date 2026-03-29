@@ -310,6 +310,54 @@ src/film/Film.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.s
 .PHONY : src/film/Film.cpp.s
 
+src/integrator/BDPTIntegrator.o: src/integrator/BDPTIntegrator.cpp.o
+.PHONY : src/integrator/BDPTIntegrator.o
+
+# target to build an object file
+src/integrator/BDPTIntegrator.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o
+.PHONY : src/integrator/BDPTIntegrator.cpp.o
+
+src/integrator/BDPTIntegrator.i: src/integrator/BDPTIntegrator.cpp.i
+.PHONY : src/integrator/BDPTIntegrator.i
+
+# target to preprocess a source file
+src/integrator/BDPTIntegrator.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.i
+.PHONY : src/integrator/BDPTIntegrator.cpp.i
+
+src/integrator/BDPTIntegrator.s: src/integrator/BDPTIntegrator.cpp.s
+.PHONY : src/integrator/BDPTIntegrator.s
+
+# target to generate assembly for a file
+src/integrator/BDPTIntegrator.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.s
+.PHONY : src/integrator/BDPTIntegrator.cpp.s
+
+src/integrator/MISWeight.o: src/integrator/MISWeight.cpp.o
+.PHONY : src/integrator/MISWeight.o
+
+# target to build an object file
+src/integrator/MISWeight.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o
+.PHONY : src/integrator/MISWeight.cpp.o
+
+src/integrator/MISWeight.i: src/integrator/MISWeight.cpp.i
+.PHONY : src/integrator/MISWeight.i
+
+# target to preprocess a source file
+src/integrator/MISWeight.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.i
+.PHONY : src/integrator/MISWeight.cpp.i
+
+src/integrator/MISWeight.s: src/integrator/MISWeight.cpp.s
+.PHONY : src/integrator/MISWeight.s
+
+# target to generate assembly for a file
+src/integrator/MISWeight.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.s
+.PHONY : src/integrator/MISWeight.cpp.s
+
 src/integrator/PathIntegrator.o: src/integrator/PathIntegrator.cpp.o
 .PHONY : src/integrator/PathIntegrator.o
 
@@ -408,6 +456,12 @@ help:
 	@echo "... src/film/Film.o"
 	@echo "... src/film/Film.i"
 	@echo "... src/film/Film.s"
+	@echo "... src/integrator/BDPTIntegrator.o"
+	@echo "... src/integrator/BDPTIntegrator.i"
+	@echo "... src/integrator/BDPTIntegrator.s"
+	@echo "... src/integrator/MISWeight.o"
+	@echo "... src/integrator/MISWeight.i"
+	@echo "... src/integrator/MISWeight.s"
 	@echo "... src/integrator/PathIntegrator.o"
 	@echo "... src/integrator/PathIntegrator.i"
 	@echo "... src/integrator/PathIntegrator.s"

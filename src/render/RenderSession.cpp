@@ -1,6 +1,7 @@
 #include "RenderSession.h"
 #include "../accel/BVHBackend.h"
 #include "../integrator/PathIntegrator.h"
+#include "../integrator/BDPTIntegrator.h"
 #include "../sampling/HaltonSampler.h"
 #include "../shading/Lambertian.h"
 #include "../shading/lights/AreaLight.h"
@@ -68,28 +69,6 @@ void RenderSession::buildCornellBox() {
         return id;
     };
 
-    // addBox: axis-aligned box from pMin to pMax, all faces using mat.
-    // Returns the material pointer so the caller can register it.
-    auto addBox = [&](Vec3f lo, Vec3f hi, const IMaterial* mat) {
-        float x0=lo.x, x1=hi.x, y0=lo.y, y1=hi.y, z0=lo.z, z1=hi.z;
-        auto reg = [&](uint32_t id) {
-            if (id >= m_scene.materials.size())
-                m_scene.materials.resize(id + 1, nullptr);
-            m_scene.materials[id] = mat;
-        };
-        // Floor of box — normal +y
-        reg(addQuad({x0,y0,z0},{x1,y0,z0},{x1,y0,z1},{x0,y0,z1}, {0, 1,0}, mat));
-        // Ceiling of box — normal -y
-        reg(addQuad({x0,y1,z1},{x1,y1,z1},{x1,y1,z0},{x0,y1,z0}, {0,-1,0}, mat));
-        // Front face — normal -z
-        reg(addQuad({x0,y0,z0},{x0,y1,z0},{x1,y1,z0},{x1,y0,z0}, {0,0,-1}, mat));
-        // Back face — normal +z
-        reg(addQuad({x1,y0,z1},{x1,y1,z1},{x0,y1,z1},{x0,y0,z1}, {0,0, 1}, mat));
-        // Left face — normal +x
-        reg(addQuad({x0,y0,z1},{x0,y1,z1},{x0,y1,z0},{x0,y0,z0}, { 1,0,0}, mat));
-        // Right face — normal -x
-        reg(addQuad({x1,y0,z0},{x1,y1,z0},{x1,y1,z1},{x1,y0,z1}, {-1,0,0}, mat));
-    };
 
     // -- Room walls --
     // Floor: y=-1, normal +y
@@ -106,14 +85,6 @@ void RenderSession::buildCornellBox() {
     uint32_t lightID = addQuad({-0.25f,0.999f,0.85f},{0.25f,0.999f,0.85f},
                                 {0.25f,0.999f,1.15f},{-0.25f,0.999f,1.15f},
                                 {0,-1,0}, pLight);
-
-    m_scene.materials.resize(m_geomPool.numMeshes(), nullptr);
-    m_scene.materials[floorID] = pWhite;
-    m_scene.materials[ceilID]  = pWhite;
-    m_scene.materials[backID]  = pWhite;
-    m_scene.materials[leftID]  = pRed;
-    m_scene.materials[rightID] = pGreen;
-    m_scene.materials[lightID] = pLight;
 
     // -- Interior blocks (rotated around Y axis) --
     // addRotatedBox: builds an axis-aligned box then rotates all vertices
@@ -148,6 +119,17 @@ void RenderSession::buildCornellBox() {
 
     // Short block — left side, rotated 18° CW (classic Cornell box angle)
     addRotatedBox({-0.65f, -1.0f, 0.80f}, {-0.10f, -0.5f, 1.35f},  18.f, pWhite);
+
+    // -- Register all materials now that all geometry has been added --
+    // (Must happen after all addQuad/addRotatedBox calls so meshID space is final)
+    m_scene.materials.resize(m_geomPool.numMeshes(), nullptr);
+    m_scene.materials[floorID] = pWhite;
+    m_scene.materials[ceilID]  = pWhite;
+    m_scene.materials[backID]  = pWhite;
+    m_scene.materials[leftID]  = pRed;
+    m_scene.materials[rightID] = pGreen;
+    m_scene.materials[lightID] = pLight;
+    // addRotatedBox registered its own face materials inline via m_scene.materials[id]
 
     // -- Area light (ILight for direct sampling) --
     auto areaLight = std::make_unique<AreaLight>(
@@ -202,7 +184,10 @@ void RenderSession::render() {
 
     m_film        = std::make_unique<Film>(m_settings.imageWidth,
                                            m_settings.imageHeight);
-    m_integrator  = std::make_unique<PathIntegrator>(m_settings.maxDepth);
+    if (m_settings.integrator == IntegratorType::BDPT)
+        m_integrator = std::make_unique<BDPTIntegrator>(m_settings.maxDepth);
+    else
+        m_integrator = std::make_unique<PathIntegrator>(m_settings.maxDepth);
     m_baseSampler = std::make_unique<HaltonSampler>(m_settings.samplesPerPixel);
     m_threadPool  = std::make_unique<ThreadPool>(m_settings.numThreads);
 

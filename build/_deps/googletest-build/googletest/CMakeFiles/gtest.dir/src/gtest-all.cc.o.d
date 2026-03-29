@@ -984,7 +984,6 @@ _deps/googletest-build/googletest/CMakeFiles/gtest.dir/src/gtest-all.cc.o: \
   /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include/gtest/internal/gtest-param-util.h \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/cassert \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/assert.h \
-  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_assert.h \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_static_assert.h \
   /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include/gtest/gtest-test-part.h \
   /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include/gtest/gtest-typed-test.h \

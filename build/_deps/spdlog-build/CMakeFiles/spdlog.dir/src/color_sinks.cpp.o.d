@@ -972,7 +972,6 @@ _deps/spdlog-build/CMakeFiles/spdlog.dir/src/color_sinks.cpp.o: \
   /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include/spdlog/details/circular_q.h \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/cassert \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/assert.h \
-  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_assert.h \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_static_assert.h \
   /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include/spdlog/details/log_msg_buffer.h \
   /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include/spdlog/details/log_msg.h \

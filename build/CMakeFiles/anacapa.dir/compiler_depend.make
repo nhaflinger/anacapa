@@ -1020,6 +1020,7 @@ CMakeFiles/anacapa.dir/src/main.cpp.o: /Users/douglascreel/dev/anacapa/src/main.
   /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdarg.h \
   /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stddef.h \
   /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdint.h \
+  /Library/Developer/CommandLineTools/usr/lib/clang/17/share/asan_ignorelist.txt \
   _deps/cli11-src/include/CLI/App.hpp \
   _deps/cli11-src/include/CLI/Argv.hpp \
   _deps/cli11-src/include/CLI/CLI.hpp \
@@ -3166,6 +3167,8 @@ _deps/spdlog-src/include/spdlog/version.h:
 /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__algorithm/ranges_inplace_merge.h:
 
 /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/arm/_limits.h:
+
+/Library/Developer/CommandLineTools/usr/lib/clang/17/share/asan_ignorelist.txt:
 
 /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__math/trigonometric_functions.h:
 

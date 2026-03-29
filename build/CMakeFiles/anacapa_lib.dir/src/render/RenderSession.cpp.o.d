@@ -757,7 +757,6 @@ CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o: \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__bit/has_single_bit.h \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/cassert \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/assert.h \
-  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_assert.h \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_static_assert.h \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/string \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__debug_utils/sanitizers.h \
@@ -961,6 +960,10 @@ CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o: \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__thread/this_thread.h \
   /Users/douglascreel/dev/anacapa/src/render/../accel/BVHBackend.h \
   /Users/douglascreel/dev/anacapa/src/render/../integrator/PathIntegrator.h \
+  /Users/douglascreel/dev/anacapa/src/render/../integrator/BDPTIntegrator.h \
+  /Users/douglascreel/dev/anacapa/include/anacapa/integrator/PathVertex.h \
+  /Users/douglascreel/dev/anacapa/include/anacapa/integrator/MISWeight.h \
+  /Users/douglascreel/dev/anacapa/src/render/../integrator/LightSampler.h \
   /Users/douglascreel/dev/anacapa/src/render/../sampling/HaltonSampler.h \
   /Users/douglascreel/dev/anacapa/src/render/../sampling/PCGRng.h \
   /Users/douglascreel/dev/anacapa/src/render/../shading/Lambertian.h \

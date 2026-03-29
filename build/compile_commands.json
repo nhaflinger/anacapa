@@ -1,109 +1,127 @@
 [
 {
   "directory": "/Users/douglascreel/dev/anacapa/build",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -Wall -Wextra -Wpedantic -Wno-unused-parameter -fno-math-errno -fno-trapping-math -march=native -O0 -g -fno-inline -o CMakeFiles/anacapa_lib.dir/src/accel/BVHBackend.cpp.o -c /Users/douglascreel/dev/anacapa/src/accel/BVHBackend.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -Wall -Wextra -Wpedantic -Wno-unused-parameter -fno-math-errno -fno-trapping-math -march=native -O3 -DNDEBUG -o CMakeFiles/anacapa_lib.dir/src/accel/BVHBackend.cpp.o -c /Users/douglascreel/dev/anacapa/src/accel/BVHBackend.cpp",
   "file": "/Users/douglascreel/dev/anacapa/src/accel/BVHBackend.cpp",
   "output": "CMakeFiles/anacapa_lib.dir/src/accel/BVHBackend.cpp.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -Wall -Wextra -Wpedantic -Wno-unused-parameter -fno-math-errno -fno-trapping-math -march=native -O0 -g -fno-inline -o CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.o -c /Users/douglascreel/dev/anacapa/src/film/Film.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -Wall -Wextra -Wpedantic -Wno-unused-parameter -fno-math-errno -fno-trapping-math -march=native -O3 -DNDEBUG -o CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.o -c /Users/douglascreel/dev/anacapa/src/film/Film.cpp",
   "file": "/Users/douglascreel/dev/anacapa/src/film/Film.cpp",
   "output": "CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -Wall -Wextra -Wpedantic -Wno-unused-parameter -fno-math-errno -fno-trapping-math -march=native -O0 -g -fno-inline -o CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o -c /Users/douglascreel/dev/anacapa/src/integrator/PathIntegrator.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -Wall -Wextra -Wpedantic -Wno-unused-parameter -fno-math-errno -fno-trapping-math -march=native -O3 -DNDEBUG -o CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o -c /Users/douglascreel/dev/anacapa/src/integrator/BDPTIntegrator.cpp",
+  "file": "/Users/douglascreel/dev/anacapa/src/integrator/BDPTIntegrator.cpp",
+  "output": "CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o"
+},
+{
+  "directory": "/Users/douglascreel/dev/anacapa/build",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -Wall -Wextra -Wpedantic -Wno-unused-parameter -fno-math-errno -fno-trapping-math -march=native -O3 -DNDEBUG -o CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o -c /Users/douglascreel/dev/anacapa/src/integrator/MISWeight.cpp",
+  "file": "/Users/douglascreel/dev/anacapa/src/integrator/MISWeight.cpp",
+  "output": "CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o"
+},
+{
+  "directory": "/Users/douglascreel/dev/anacapa/build",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -Wall -Wextra -Wpedantic -Wno-unused-parameter -fno-math-errno -fno-trapping-math -march=native -O3 -DNDEBUG -o CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o -c /Users/douglascreel/dev/anacapa/src/integrator/PathIntegrator.cpp",
   "file": "/Users/douglascreel/dev/anacapa/src/integrator/PathIntegrator.cpp",
   "output": "CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -Wall -Wextra -Wpedantic -Wno-unused-parameter -fno-math-errno -fno-trapping-math -march=native -O0 -g -fno-inline -o CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o -c /Users/douglascreel/dev/anacapa/src/render/RenderSession.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -Wall -Wextra -Wpedantic -Wno-unused-parameter -fno-math-errno -fno-trapping-math -march=native -O3 -DNDEBUG -o CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o -c /Users/douglascreel/dev/anacapa/src/render/RenderSession.cpp",
   "file": "/Users/douglascreel/dev/anacapa/src/render/RenderSession.cpp",
   "output": "CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/cli11-src/include -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/anacapa.dir/src/main.cpp.o -c /Users/douglascreel/dev/anacapa/src/main.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/cli11-src/include -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/anacapa.dir/src/main.cpp.o -c /Users/douglascreel/dev/anacapa/src/main.cpp",
   "file": "/Users/douglascreel/dev/anacapa/src/main.cpp",
   "output": "CMakeFiles/anacapa.dir/src/main.cpp.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build/_deps/spdlog-build",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/spdlog.dir/src/spdlog.cpp.o -c /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/spdlog.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/spdlog.dir/src/spdlog.cpp.o -c /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/spdlog.cpp",
   "file": "/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/spdlog.cpp",
   "output": "_deps/spdlog-build/CMakeFiles/spdlog.dir/src/spdlog.cpp.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build/_deps/spdlog-build",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/spdlog.dir/src/stdout_sinks.cpp.o -c /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/stdout_sinks.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/spdlog.dir/src/stdout_sinks.cpp.o -c /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/stdout_sinks.cpp",
   "file": "/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/stdout_sinks.cpp",
   "output": "_deps/spdlog-build/CMakeFiles/spdlog.dir/src/stdout_sinks.cpp.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build/_deps/spdlog-build",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/spdlog.dir/src/color_sinks.cpp.o -c /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/color_sinks.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/spdlog.dir/src/color_sinks.cpp.o -c /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/color_sinks.cpp",
   "file": "/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/color_sinks.cpp",
   "output": "_deps/spdlog-build/CMakeFiles/spdlog.dir/src/color_sinks.cpp.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build/_deps/spdlog-build",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/spdlog.dir/src/file_sinks.cpp.o -c /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/file_sinks.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/spdlog.dir/src/file_sinks.cpp.o -c /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/file_sinks.cpp",
   "file": "/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/file_sinks.cpp",
   "output": "_deps/spdlog-build/CMakeFiles/spdlog.dir/src/file_sinks.cpp.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build/_deps/spdlog-build",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/spdlog.dir/src/async.cpp.o -c /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/async.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/spdlog.dir/src/async.cpp.o -c /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/async.cpp",
   "file": "/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/async.cpp",
   "output": "_deps/spdlog-build/CMakeFiles/spdlog.dir/src/async.cpp.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build/_deps/spdlog-build",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/spdlog.dir/src/cfg.cpp.o -c /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/cfg.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/spdlog.dir/src/cfg.cpp.o -c /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/cfg.cpp",
   "file": "/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/cfg.cpp",
   "output": "_deps/spdlog-build/CMakeFiles/spdlog.dir/src/cfg.cpp.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build/_deps/spdlog-build",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/spdlog.dir/src/bundled_fmtlib_format.cpp.o -c /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/bundled_fmtlib_format.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/spdlog.dir/src/bundled_fmtlib_format.cpp.o -c /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/bundled_fmtlib_format.cpp",
   "file": "/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/src/bundled_fmtlib_format.cpp",
   "output": "_deps/spdlog-build/CMakeFiles/spdlog.dir/src/bundled_fmtlib_format.cpp.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build/_deps/googletest-build/googletest",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++  -I/Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include -I/Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk  -DGTEST_HAS_PTHREAD=1   -o CMakeFiles/gtest.dir/src/gtest-all.cc.o -c /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest-all.cc",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++  -I/Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include -I/Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk  -DGTEST_HAS_PTHREAD=1   -o CMakeFiles/gtest.dir/src/gtest-all.cc.o -c /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest-all.cc",
   "file": "/Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest-all.cc",
   "output": "_deps/googletest-build/googletest/CMakeFiles/gtest.dir/src/gtest-all.cc.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build/_deps/googletest-build/googletest",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++  -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk  -DGTEST_HAS_PTHREAD=1   -o CMakeFiles/gtest_main.dir/src/gtest_main.cc.o -c /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++  -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk  -DGTEST_HAS_PTHREAD=1   -o CMakeFiles/gtest_main.dir/src/gtest_main.cc.o -c /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc",
   "file": "/Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc",
   "output": "_deps/googletest-build/googletest/CMakeFiles/gtest_main.dir/src/gtest_main.cc.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build/tests",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/anacapa_tests.dir/unit/test_allocator.cpp.o -c /Users/douglascreel/dev/anacapa/tests/unit/test_allocator.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/anacapa_tests.dir/unit/test_allocator.cpp.o -c /Users/douglascreel/dev/anacapa/tests/unit/test_allocator.cpp",
   "file": "/Users/douglascreel/dev/anacapa/tests/unit/test_allocator.cpp",
   "output": "tests/CMakeFiles/anacapa_tests.dir/unit/test_allocator.cpp.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build/tests",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/anacapa_tests.dir/unit/test_bvh.cpp.o -c /Users/douglascreel/dev/anacapa/tests/unit/test_bvh.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/anacapa_tests.dir/unit/test_bdpt.cpp.o -c /Users/douglascreel/dev/anacapa/tests/unit/test_bdpt.cpp",
+  "file": "/Users/douglascreel/dev/anacapa/tests/unit/test_bdpt.cpp",
+  "output": "tests/CMakeFiles/anacapa_tests.dir/unit/test_bdpt.cpp.o"
+},
+{
+  "directory": "/Users/douglascreel/dev/anacapa/build/tests",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/anacapa_tests.dir/unit/test_bvh.cpp.o -c /Users/douglascreel/dev/anacapa/tests/unit/test_bvh.cpp",
   "file": "/Users/douglascreel/dev/anacapa/tests/unit/test_bvh.cpp",
   "output": "tests/CMakeFiles/anacapa_tests.dir/unit/test_bvh.cpp.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build/tests",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o -c /Users/douglascreel/dev/anacapa/tests/unit/test_sampler.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o -c /Users/douglascreel/dev/anacapa/tests/unit/test_sampler.cpp",
   "file": "/Users/douglascreel/dev/anacapa/tests/unit/test_sampler.cpp",
   "output": "tests/CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o"
 },
 {
   "directory": "/Users/douglascreel/dev/anacapa/build/tests",
-  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest -g -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o -c /Users/douglascreel/dev/anacapa/tests/unit/test_types.cpp",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/c++ -DFMT_HEADER_ONLY=1 -DSPDLOG_COMPILED_LIB -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -o CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o -c /Users/douglascreel/dev/anacapa/tests/unit/test_types.cpp",
   "file": "/Users/douglascreel/dev/anacapa/tests/unit/test_types.cpp",
   "output": "tests/CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o"
 }
