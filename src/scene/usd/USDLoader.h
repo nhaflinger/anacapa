@@ -13,16 +13,19 @@ namespace anacapa {
 //   UsdLuxRectLight    → AreaLight
 //   UsdLuxSphereLight  → AreaLight (approximated as a small rect)
 //   UsdLuxDistantLight → directional (future)
-//   UsdGeomCamera      → Camera (first camera found wins)
+//   UsdGeomCamera      → Pinhole camera
 //   UsdShadeMaterial   → UsdPreviewSurface → LambertianMaterial or EmissiveMaterial
 //
-// Materials are resolved via UsdShadeMaterial bindings on each mesh.
-// If no binding exists, a default grey Lambertian is assigned.
-// Transforms: all positions are baked into world space via
-// UsdGeomXformable::GetLocalToWorldTransform().
+// Camera selection priority:
+//   1. cameraOverridePath — explicit prim path from --camera flag
+//   2. UsdRenderSettings.camera relationship (first RenderSettings prim found)
+//   3. First UsdGeomCamera encountered during traversal
+//
+// Pass --list-cameras to discover available camera paths without rendering.
 // ---------------------------------------------------------------------------
 LoadedScene loadUSD(const std::string& path,
                     uint32_t filmWidth,
-                    uint32_t filmHeight);
+                    uint32_t filmHeight,
+                    const std::string& cameraOverridePath = "");
 
 } // namespace anacapa

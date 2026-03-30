@@ -5626,6 +5626,7 @@ CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o: /Users/douglascreel/d
   /Users/douglascreel/dev/anacapa/src/scene/usd/USDLoader.h \
   /Users/douglascreel/dev/anacapa/src/shading/Lambertian.h \
   /Users/douglascreel/dev/anacapa/src/shading/lights/AreaLight.h \
+  /Users/douglascreel/dev/anacapa/src/shading/lights/DirectionalLight.h \
   /Users/douglascreel/dev/anacapa/src/render/RenderSession.h \
   /Users/douglascreel/dev/anacapa/src/render/ThreadPool.h
 
@@ -7016,6 +7017,10 @@ CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o: /Users/douglascreel/de
   /Users/douglascreel/usd/include/pxr/usd/usdLux/rectLight.h \
   /Users/douglascreel/usd/include/pxr/usd/usdLux/sphereLight.h \
   /Users/douglascreel/usd/include/pxr/usd/usdLux/tokens.h \
+  /Users/douglascreel/usd/include/pxr/usd/usdRender/api.h \
+  /Users/douglascreel/usd/include/pxr/usd/usdRender/settings.h \
+  /Users/douglascreel/usd/include/pxr/usd/usdRender/settingsBase.h \
+  /Users/douglascreel/usd/include/pxr/usd/usdRender/tokens.h \
   /Users/douglascreel/usd/include/pxr/usd/usdShade/api.h \
   /Users/douglascreel/usd/include/pxr/usd/usdShade/connectableAPI.h \
   /Users/douglascreel/usd/include/pxr/usd/usdShade/connectableAPIBehavior.h \
@@ -7138,6 +7143,8 @@ CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o: /Users/douglascreel/de
 /Users/douglascreel/usd/include/pxr/usd/usdShade/materialBindingAPI.h:
 
 /Users/douglascreel/usd/include/pxr/usd/usdShade/connectableAPI.h:
+
+/Users/douglascreel/usd/include/pxr/usd/usdRender/settingsBase.h:
 
 /Users/douglascreel/usd/include/pxr/usd/usdLux/distantLight.h:
 
@@ -8129,6 +8136,8 @@ _deps/spdlog-src/include/spdlog/common.h:
 
 /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__verbose_abort:
 
+/Users/douglascreel/usd/include/pxr/usd/usdRender/settings.h:
+
 /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/sys/_types/_errno_t.h:
 
 /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__variant/monostate.h:
@@ -9079,6 +9088,8 @@ _deps/spdlog-src/include/spdlog/details/circular_q.h:
 
 /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__fwd/ios.h:
 
+/Users/douglascreel/usd/include/pxr/usd/usdRender/api.h:
+
 /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__iterator/move_iterator.h:
 
 /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/format:
@@ -9540,6 +9551,8 @@ _deps/spdlog-src/include/spdlog/details/synchronous_factory.h:
 /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/sys/_types/_int32_t.h:
 
 /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__math/roots.h:
+
+/Users/douglascreel/dev/anacapa/src/shading/lights/DirectionalLight.h:
 
 /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__math/gamma.h:
 
@@ -10134,6 +10147,8 @@ _deps/spdlog-src/include/spdlog/version.h:
 /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__functional/mem_fn.h:
 
 /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__algorithm/replace_copy_if.h:
+
+/Users/douglascreel/usd/include/pxr/usd/usdRender/tokens.h:
 
 /Users/douglascreel/usd/include/pxr/usd/pcp/propertyIndex.h:
 

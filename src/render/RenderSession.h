@@ -25,6 +25,7 @@ struct RenderSettings {
     uint32_t       numThreads      = 0;   // 0 = hardware_concurrency
     std::string    outputPath      = "out.exr";
     std::string    scenePath;              // empty → built-in Cornell box
+    std::string    cameraPath;             // empty → auto-select from USD
     IntegratorType integrator      = IntegratorType::BDPT;
     DenoiseOptions denoise;
 };

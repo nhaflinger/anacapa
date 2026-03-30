@@ -77,6 +77,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 # Full options
 ./build/anacapa \
   --scene      scenes/cornell_box.usda \
+  --camera     /World/RenderCam \
   --integrator bdpt \
   --width      800  \
   --height     800  \
@@ -121,7 +122,7 @@ For interactive layer switching use one of these free viewers:
 
 ## Scene Format
 
-Scenes are authored in OpenUSD (`.usda` text or `.usdc` binary). The loader supports:
+Scenes are authored in OpenUSD (`.usda` text, `.usdc` binary, or `.usd` auto-detect). The loader supports:
 
 | USD Prim | Anacapa |
 |---|---|
@@ -130,9 +131,30 @@ Scenes are authored in OpenUSD (`.usda` text or `.usdc` binary). The loader supp
 | `UsdLuxRectLight` | `AreaLight` |
 | `UsdLuxSphereLight` | `AreaLight` (approximated) |
 | `UsdGeomCamera` | Pinhole camera (focal length + aperture → FOV) |
+| `UsdRenderSettings` | Declares the render camera via `.camera` relationship |
 
 Material bindings require `prepend apiSchemas = ["MaterialBindingAPI"]` on each mesh prim.
 All mesh positions and normals are baked into world space at load time.
+
+### Camera selection
+
+When a scene contains multiple cameras the loader resolves which one to use in
+priority order:
+
+1. **`--camera /Prim/Path`** — explicit prim path passed on the command line
+2. **`UsdRenderSettings.camera`** — the relationship declared in the scene's render settings
+3. **First `UsdGeomCamera` found** — fallback when no other selection is made
+
+Every render logs all cameras present in the file so you can see the available
+prim paths without any extra tooling:
+
+```
+[info] USDLoader: 2 camera(s) found in scene:
+[info]   /World/RenderCam
+[info]   /World/CloseupCam
+[info] USDLoader: multiple cameras found; using first '/World/RenderCam'.
+       Use --camera <path> to select another.
+```
 
 The built-in scene is at [scenes/cornell_box.usda](scenes/cornell_box.usda).
 

@@ -5,6 +5,7 @@
 #include "../sampling/HaltonSampler.h"
 #include "../shading/Lambertian.h"
 #include "../shading/lights/AreaLight.h"
+#include "../shading/lights/DirectionalLight.h"
 
 #ifdef ANACAPA_ENABLE_USD
 #  include "../scene/usd/USDLoader.h"
@@ -25,6 +26,15 @@ static Vec3f rotateY(Vec3f p, Vec3f pivot, float degrees) {
     return pivot + Vec3f{ c*q.x + s*q.z, q.y, -s*q.x + c*q.z };
 }
 
+// Compute the axis-aligned bounding box of all mesh positions in the pool.
+static BBox3f computeSceneBounds(const GeometryPool& pool) {
+    BBox3f bounds;
+    for (size_t i = 0; i < pool.numMeshes(); ++i)
+        for (const Vec3f& p : pool.mesh(i).positions)
+            bounds.expand(p);
+    return bounds;
+}
+
 RenderSession::RenderSession(RenderSettings settings)
     : m_settings(std::move(settings))
 {}
@@ -37,16 +47,73 @@ void RenderSession::loadScene() {
     if (!m_settings.scenePath.empty()) {
         LoadedScene loaded = loadUSD(m_settings.scenePath,
                                       m_settings.imageWidth,
-                                      m_settings.imageHeight);
+                                      m_settings.imageHeight,
+                                      m_settings.cameraPath);
+        if (!loaded.valid) {
+            spdlog::error("Aborting: could not open scene '{}'",
+                          m_settings.scenePath);
+            std::exit(1);
+        }
         m_geomPool  = std::move(loaded.geomPool);
         m_scene     = std::move(loaded.sceneView);
         m_camera    = std::move(loaded.camera);
         m_materials = std::move(loaded.materials);
         m_lights    = std::move(loaded.lights);
-        // Re-link camera into scene view (integrators read it from there)
         m_scene.camera = m_camera;
-        // Accel pointer is set by buildAccelStructure()
-        m_scene.accel = nullptr;
+        m_scene.accel  = nullptr;
+
+        // ---- Auto-camera: frame the scene if no camera was found ------------
+        if (!m_scene.camera) {
+            BBox3f bounds = computeSceneBounds(m_geomPool);
+            if (bounds.valid()) {
+                Vec3f center   = bounds.centroid();
+                float halfDiag = bounds.diagonal().length() * 0.5f;
+                float fovY     = 45.f;
+                float fovRad   = fovY * 3.14159265f / 180.f;
+                float dist     = halfDiag / std::tan(fovRad * 0.5f);
+                m_scene.camera = Camera::makePinhole(
+                    center + Vec3f{0.f, 0.f, -(dist + halfDiag)},
+                    center,
+                    {0.f, 1.f, 0.f},
+                    fovY,
+                    m_settings.imageWidth, m_settings.imageHeight);
+                spdlog::info("No camera in scene — auto-camera: "
+                             "center=({:.2f},{:.2f},{:.2f}) fovY=45 dist={:.2f}",
+                             center.x, center.y, center.z, dist);
+            }
+        }
+
+        // ---- Auto-sun: add a headlamp if the scene has no lights -----------
+        // The light is fixed to the camera and points in the camera's forward
+        // direction so every surface in the frustum is illuminated.
+        if (m_scene.lights.empty()) {
+            BBox3f bounds = computeSceneBounds(m_geomPool);
+            Vec3f  center = bounds.valid() ? bounds.centroid() : Vec3f{};
+            float  radius = bounds.valid()
+                          ? bounds.diagonal().length() * 0.5f : 1.f;
+
+            // Derive camera forward from the stored camera (auto or USD).
+            Vec3f forward = {0.f, 0.f, 1.f};   // fallback
+            if (m_scene.camera) {
+                const Camera& cam = *m_scene.camera;
+                forward = safeNormalize(
+                    cam.lowerLeftCorner
+                    + cam.horizontal * 0.5f
+                    + cam.vertical   * 0.5f
+                    - cam.origin);
+            }
+
+            auto sun = std::make_unique<DirectionalLight>(
+                forward,                        // dirToLight = camera forward
+                Spectrum{8.f, 8.f, 7.5f},
+                radius, center);
+            m_scene.lights.push_back(sun.get());
+            m_lights.push_back(std::move(sun));
+            spdlog::info("No lights in scene — auto headlamp: "
+                         "dir=({:.2f},{:.2f},{:.2f})",
+                         forward.x, forward.y, forward.z);
+        }
+
         return;
     }
 #endif

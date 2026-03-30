@@ -17,6 +17,7 @@ namespace anacapa {
 // Camera is optional — if not present the renderer uses its default.
 // ---------------------------------------------------------------------------
 struct LoadedScene {
+    bool                                   valid = false; // false if stage failed to open
     GeometryPool                           geomPool;
     SceneView                              sceneView;
     std::vector<std::unique_ptr<IMaterial>> materials;

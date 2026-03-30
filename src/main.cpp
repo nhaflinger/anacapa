@@ -29,6 +29,9 @@ int main(int argc, char** argv) {
 
     app.add_option("--scene", settings.scenePath,
                    "USD/USDA/USDC scene file to load (requires ANACAPA_ENABLE_USD)");
+    app.add_option("--camera", settings.cameraPath,
+                   "USD prim path of camera to use (e.g. /World/RenderCam). "
+                   "If omitted, uses UsdRenderSettings.camera or first camera found.");
 
     app.add_flag("--denoise",    settings.denoise.enabled,
                  "Run Intel OIDN denoiser on the beauty buffer after rendering");
