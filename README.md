@@ -134,10 +134,10 @@ All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable
 |---|---|---|
 | 1 | Complete | CPU path tracer, custom BVH, Halton sampler, EXR output |
 | 2 | Complete | Bidirectional path tracing with MIS, alias-table light sampler |
-| Denoising | Complete | Intel OIDN, albedo/normal AOVs, multi-layer EXR |
-| 3 | Planned | OpenUSD scene loading (geometry, materials, lights, camera) |
-| 4 | Planned | MaterialX `standard_surface`, OSL shading, HDRI dome lights |
-| 5 | Planned | Metal backend (Apple Silicon), CUDA+OptiX backend (NVIDIA) |
+| 3 | Complete | Intel OIDN, albedo/normal AOVs, multi-layer EXR |
+| 4 | Planned | OpenUSD scene loading (geometry, materials, lights, camera) |
+| 5 | Planned | MaterialX `standard_surface`, OSL shading, HDRI dome lights |
+| 6 | Planned | Metal backend (Apple Silicon), CUDA+OptiX backend (NVIDIA) |
 
 ## License
 
