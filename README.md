@@ -85,6 +85,25 @@ When `--write-aovs` is used the EXR contains four layer groups:
 | `albedo.R/G/B` | First-hit diffuse reflectance (denoising hint) |
 | `normals.R/G/B` | First-hit world-space normals (denoising hint) |
 
+### Viewing EXR output
+
+macOS Preview does not support multi-layer EXR or channel selection. To compare
+the raw beauty against the denoised result, use `oiiotool` (installed with
+OpenImageIO) to extract individual layers:
+
+```bash
+# Extract just the denoised beauty as a standard RGB EXR
+oiiotool out.exr --ch "denoised.R,denoised.G,denoised.B" --chnames "R,G,B" -o denoised.exr
+
+# Extract raw beauty
+oiiotool out.exr --ch "R,G,B" -o beauty.exr
+```
+
+For interactive layer switching use one of these free viewers:
+
+- **[mrViewer](https://mrviewer.sourceforge.io)** — macOS/Linux/Windows, designed for VFX
+- **[DJV](https://darbyjohnston.github.io/DJV/)** — cross-platform, lightweight
+
 ## Architecture
 
 ```
