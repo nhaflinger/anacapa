@@ -1,0 +1,13 @@
+# Build
+build/
+
+# Render output
+images/*
+!images/.gitkeep
+
+# Scene files — only the built-in Cornell box is committed
+scenes/*
+!scenes/cornell_box.usda
+
+# macOS
+.DS_Store

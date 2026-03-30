@@ -5632,6 +5632,7 @@ CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o
  /Users/douglascreel/dev/anacapa/src/scene/usd/USDLoader.h
  /Users/douglascreel/dev/anacapa/src/shading/Lambertian.h
  /Users/douglascreel/dev/anacapa/src/shading/lights/AreaLight.h
+ /Users/douglascreel/dev/anacapa/src/shading/lights/DirectionalLight.h
  /Users/douglascreel/dev/anacapa/src/render/RenderSession.h
  /Users/douglascreel/dev/anacapa/src/render/ThreadPool.h
 
@@ -7023,6 +7024,10 @@ CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o
  /Users/douglascreel/usd/include/pxr/usd/usdLux/rectLight.h
  /Users/douglascreel/usd/include/pxr/usd/usdLux/sphereLight.h
  /Users/douglascreel/usd/include/pxr/usd/usdLux/tokens.h
+ /Users/douglascreel/usd/include/pxr/usd/usdRender/api.h
+ /Users/douglascreel/usd/include/pxr/usd/usdRender/settings.h
+ /Users/douglascreel/usd/include/pxr/usd/usdRender/settingsBase.h
+ /Users/douglascreel/usd/include/pxr/usd/usdRender/tokens.h
  /Users/douglascreel/usd/include/pxr/usd/usdShade/api.h
  /Users/douglascreel/usd/include/pxr/usd/usdShade/connectableAPI.h
  /Users/douglascreel/usd/include/pxr/usd/usdShade/connectableAPIBehavior.h

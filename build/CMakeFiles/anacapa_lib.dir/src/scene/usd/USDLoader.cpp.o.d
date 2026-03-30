@@ -1416,6 +1416,10 @@ CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o: \
   /Users/douglascreel/usd/include/pxr/usd/usdShade/materialBindingAPI.h \
   /opt/homebrew/include/tbb/concurrent_unordered_map.h \
   /opt/homebrew/include/tbb/../oneapi/tbb/concurrent_unordered_map.h \
+  /Users/douglascreel/usd/include/pxr/usd/usdRender/settings.h \
+  /Users/douglascreel/usd/include/pxr/usd/usdRender/api.h \
+  /Users/douglascreel/usd/include/pxr/usd/usdRender/settingsBase.h \
+  /Users/douglascreel/usd/include/pxr/usd/usdRender/tokens.h \
   /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include/spdlog/spdlog.h \
   /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include/spdlog/common.h \
   /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include/spdlog/details/null_mutex.h \

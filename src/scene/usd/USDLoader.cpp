@@ -16,6 +16,9 @@
 #include <pxr/usd/usdLux/distantLight.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
+#include <pxr/usd/usdShade/shader.h>
+#include <pxr/usd/usdShade/connectableAPI.h>
+#include <pxr/usd/usdRender/settings.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/vt/array.h>
@@ -57,37 +60,89 @@ static Vec3f transformNormal(const GfMatrix4d& m, const GfVec3f& n) {
 }
 
 // ---------------------------------------------------------------------------
+// resolveColorInput — read a Vec3f color from a UsdShadeInput.
+//
+// If the input has a direct value, return it.
+// If it is connected (e.g. to a UsdUVTexture), follow the connection and try:
+//   1. UsdUVTexture.fallback  (Vec4f — common in Pixar sample scenes)
+//   2. A hue derived from the texture filename so different materials get
+//      different flat colors (better than every material being the same grey).
+// ---------------------------------------------------------------------------
+static Spectrum resolveColorInput(const UsdShadeInput& input,
+                                   const Spectrum& defaultVal) {
+    if (!input) return defaultVal;
+
+    GfVec3f col;
+    if (input.Get(&col)) return {col[0], col[1], col[2]};
+
+    // Input is texture-connected — follow the connection.
+    UsdShadeSourceInfoVector sources = input.GetConnectedSources();
+    if (sources.empty()) return defaultVal;
+
+    UsdShadeShader texShader(sources[0].source.GetPrim());
+    if (!texShader) return defaultVal;
+
+    TfToken shaderId;
+    texShader.GetShaderId(&shaderId);
+
+    if (shaderId == TfToken("UsdUVTexture")) {
+        // Try the fallback value first (authored on the texture node).
+        UsdShadeInput fallbackIn = texShader.GetInput(TfToken("fallback"));
+        GfVec4f fb;
+        if (fallbackIn && fallbackIn.Get(&fb))
+            return {fb[0], fb[1], fb[2]};
+
+        // No fallback authored — derive a stable hue from the texture path so
+        // different materials are visually distinguishable.
+        UsdShadeInput fileIn = texShader.GetInput(TfToken("file"));
+        if (fileIn) {
+            SdfAssetPath ap;
+            if (fileIn.Get(&ap)) {
+                // Hash the path to a hue in [0, 1), map to a saturated pastel.
+                std::size_t h = std::hash<std::string>{}(ap.GetAssetPath());
+                float hue = static_cast<float>(h % 360) / 360.f;
+                // HSV→RGB with S=0.5, V=0.8 (pastel, not too bright)
+                float H = hue * 6.f;
+                int   i = static_cast<int>(H);
+                float f = H - static_cast<float>(i);
+                float p = 0.8f * 0.5f, q = 0.8f * (1.f - 0.5f * f),
+                      t = 0.8f * (1.f - 0.5f * (1.f - f)), v = 0.8f;
+                switch (i % 6) {
+                    case 0: return {v, t, p};
+                    case 1: return {q, v, p};
+                    case 2: return {p, v, t};
+                    case 3: return {p, q, v};
+                    case 4: return {t, p, v};
+                    default: return {v, p, q};
+                }
+            }
+        }
+    }
+
+    return defaultVal;
+}
+
 // resolveMaterial — walk a UsdShadeMaterial's surface output to find
 // a UsdPreviewSurface shader and extract diffuseColor + emissiveColor.
+// Texture-connected inputs are approximated via resolveColorInput.
 // Returns a LambertianMaterial or EmissiveMaterial.
 // ---------------------------------------------------------------------------
 static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat) {
-    // Default grey if binding can't be resolved
     Spectrum diffuse{0.5f, 0.5f, 0.5f};
     Spectrum emission{};
 
     UsdShadeShader surface = mat.ComputeSurfaceSource();
-    if (!surface) {
+    if (!surface)
         return std::make_unique<LambertianMaterial>(diffuse);
-    }
 
     TfToken shaderId;
     surface.GetShaderId(&shaderId);
 
     if (shaderId == TfToken("UsdPreviewSurface")) {
-        // diffuseColor
-        UsdShadeInput diffIn = surface.GetInput(TfToken("diffuseColor"));
-        if (diffIn) {
-            GfVec3f col;
-            if (diffIn.Get(&col)) diffuse = {col[0], col[1], col[2]};
-        }
-
-        // emissiveColor
-        UsdShadeInput emissIn = surface.GetInput(TfToken("emissiveColor"));
-        if (emissIn) {
-            GfVec3f col;
-            if (emissIn.Get(&col)) emission = {col[0], col[1], col[2]};
-        }
+        diffuse  = resolveColorInput(surface.GetInput(TfToken("diffuseColor")),
+                                     diffuse);
+        emission = resolveColorInput(surface.GetInput(TfToken("emissiveColor")),
+                                     emission);
     }
 
     if (!isBlack(emission))
@@ -197,16 +252,59 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
 // ---------------------------------------------------------------------------
 // loadUSD
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// buildCamera — convert a UsdGeomCamera prim to an anacapa Camera
+// ---------------------------------------------------------------------------
+static Camera buildCamera(const UsdPrim& prim,
+                           UsdGeomXformCache& xformCache,
+                           uint32_t filmWidth, uint32_t filmHeight) {
+    UsdGeomCamera usdCam(prim);
+
+    bool resetXformStack = false;
+    GfMatrix4d localToWorld(1.0);
+    UsdGeomXformable xformable(prim);
+    xformable.GetLocalTransformation(&localToWorld, &resetXformStack,
+                                      UsdTimeCode::Default());
+    GfMatrix4d parentXform = xformCache.GetParentToWorldTransform(prim);
+    GfMatrix4d fullXform   = localToWorld * parentXform;
+
+    Vec3f origin = transformPoint(fullXform, GfVec3d(0, 0,  0));
+    Vec3f target = transformPoint(fullXform, GfVec3d(0, 0, -1));
+    Vec3f upWS   = transformPoint(fullXform, GfVec3d(0, 1,  0));
+    Vec3f up     = safeNormalize(upWS - origin);
+
+    GfCamera gc  = usdCam.GetCamera(UsdTimeCode::Default());
+    float focalLen  = gc.GetFocalLength();
+    float hAperture = gc.GetHorizontalAperture();
+
+    float aspectRatio = static_cast<float>(filmWidth) /
+                        static_cast<float>(filmHeight);
+    float vAperture = hAperture / aspectRatio;
+    float vfovRad   = 2.f * std::atan(vAperture * 0.5f / focalLen);
+    float vfovDeg   = vfovRad * 180.f / 3.14159265f;
+
+    spdlog::info("USDLoader: camera '{}' origin=({:.2f},{:.2f},{:.2f}) fov={:.1f}°",
+                 prim.GetPath().GetString(),
+                 origin.x, origin.y, origin.z, vfovDeg);
+
+    return Camera::makePinhole(origin, target, up, vfovDeg, filmWidth, filmHeight);
+}
+
+// ---------------------------------------------------------------------------
+// loadUSD
+// ---------------------------------------------------------------------------
 LoadedScene loadUSD(const std::string& path,
                     uint32_t filmWidth,
-                    uint32_t filmHeight) {
+                    uint32_t filmHeight,
+                    const std::string& cameraOverridePath) {
     LoadedScene result;
 
     auto stage = UsdStage::Open(path);
     if (!stage) {
         spdlog::error("USDLoader: failed to open '{}'", path);
-        return result;
+        return result;  // result.valid stays false
     }
+    result.valid = true;
 
     spdlog::info("USDLoader: opened '{}' (up-axis: {})",
                  path,
@@ -221,6 +319,9 @@ LoadedScene loadUSD(const std::string& path,
     result.materials.push_back(
         std::make_unique<LambertianMaterial>(Spectrum{0.5f, 0.5f, 0.5f}));
     const uint32_t kDefaultMatIdx = 0;
+
+    // Cameras collected during traversal; resolved after loop
+    std::vector<UsdPrim> cameraPrims;
 
     // --- Traverse all prims ---
     for (const UsdPrim& prim : stage->Traverse()) {
@@ -324,49 +425,77 @@ LoadedScene loadUSD(const std::string& path,
             result.lights.push_back(std::move(light));
         }
 
-        // ---- Camera — first camera found wins ----
-        else if (prim.IsA<UsdGeomCamera>() && !result.camera.has_value()) {
-            UsdGeomCamera usdCam(prim);
-            GfMatrix4d xform = xformCache.GetLocalToWorldTransform(prim);
-
-            // Camera-to-world: compute directly from xformable (bypasses cache)
-            bool resetXformStack = false;
-            GfMatrix4d localToWorld(1.0);
-            UsdGeomXformable xformable(prim);
-            xformable.GetLocalTransformation(&localToWorld, &resetXformStack,
-                                              UsdTimeCode::Default());
-            // Compose with parent xform from cache
-            GfMatrix4d parentXform = xformCache.GetParentToWorldTransform(prim);
-            GfMatrix4d fullXform   = localToWorld * parentXform;
-
-            spdlog::debug("USDLoader: camera xform t=({:.3f},{:.3f},{:.3f})",
-                          fullXform[3][0], fullXform[3][1], fullXform[3][2]);
-
-            // USD cameras look in -Z in local space
-            Vec3f origin = transformPoint(fullXform, GfVec3d(0, 0,  0));
-            Vec3f target = transformPoint(fullXform, GfVec3d(0, 0, -1));
-            Vec3f upWS   = transformPoint(fullXform, GfVec3d(0, 1,  0));
-            Vec3f up     = safeNormalize(upWS - origin);
-
-            // Vertical FOV from focal length + aperture
-            float focalLen = 50.f, hAperture = 20.943f;
-            GfCamera gc = usdCam.GetCamera(UsdTimeCode::Default());
-            focalLen  = gc.GetFocalLength();
-            hAperture = gc.GetHorizontalAperture();
-
-            float aspectRatio = static_cast<float>(filmWidth) /
-                                static_cast<float>(filmHeight);
-            float vAperture = hAperture / aspectRatio;
-            float vfovRad   = 2.f * std::atan(vAperture * 0.5f / focalLen);
-            float vfovDeg   = vfovRad * 180.f / 3.14159265f;
-
-            result.camera = Camera::makePinhole(origin, target, up,
-                                                 vfovDeg, filmWidth, filmHeight);
-            spdlog::info("USDLoader: camera '{}' origin=({:.2f},{:.2f},{:.2f}) fov={:.1f}°",
-                         prim.GetPath().GetString(),
-                         origin.x, origin.y, origin.z, vfovDeg);
+        // ---- Camera — collect all; resolve selection after traversal ----
+        else if (prim.IsA<UsdGeomCamera>()) {
+            cameraPrims.push_back(prim);
         }
     }
+
+    // --- Camera selection (three-level priority) ---
+    //
+    // 1. Explicit --camera path override
+    // 2. UsdRenderSettings.camera relationship
+    // 3. First camera found during traversal
+    //
+    // Always log all available cameras so users can see what's in the file.
+
+    if (!cameraPrims.empty()) {
+        spdlog::info("USDLoader: {} camera(s) found in scene:", cameraPrims.size());
+        for (const auto& cp : cameraPrims)
+            spdlog::info("  {}", cp.GetPath().GetString());
+    }
+
+    UsdPrim selectedCamPrim;
+
+    // Priority 1: explicit --camera override
+    if (!cameraOverridePath.empty()) {
+        UsdPrim p = stage->GetPrimAtPath(SdfPath(cameraOverridePath));
+        if (p && p.IsA<UsdGeomCamera>()) {
+            selectedCamPrim = p;
+            spdlog::info("USDLoader: using camera from --camera flag: '{}'",
+                         cameraOverridePath);
+        } else {
+            spdlog::warn("USDLoader: --camera '{}' not found or not a camera; "
+                         "falling back", cameraOverridePath);
+        }
+    }
+
+    // Priority 2: UsdRenderSettings.camera relationship
+    if (!selectedCamPrim) {
+        for (const UsdPrim& prim : stage->Traverse()) {
+            if (!prim.IsA<UsdRenderSettings>()) continue;
+            UsdRenderSettings rs(prim);
+            UsdRelationship camRel = rs.GetCameraRel();
+            SdfPathVector targets;
+            if (camRel && camRel.GetForwardedTargets(&targets) && !targets.empty()) {
+                UsdPrim p = stage->GetPrimAtPath(targets[0]);
+                if (p && p.IsA<UsdGeomCamera>()) {
+                    selectedCamPrim = p;
+                    spdlog::info("USDLoader: using camera from RenderSettings '{}': '{}'",
+                                 prim.GetPath().GetString(),
+                                 targets[0].GetString());
+                    break;
+                }
+            }
+        }
+    }
+
+    // Priority 3: first camera found
+    if (!selectedCamPrim && !cameraPrims.empty()) {
+        selectedCamPrim = cameraPrims[0];
+        if (cameraPrims.size() > 1)
+            spdlog::warn("USDLoader: multiple cameras found; using first '{}'. "
+                         "Use --camera <path> to select another.",
+                         selectedCamPrim.GetPath().GetString());
+        else
+            spdlog::info("USDLoader: using only camera '{}'",
+                         selectedCamPrim.GetPath().GetString());
+    }
+
+    if (selectedCamPrim)
+        result.camera = buildCamera(selectedCamPrim, xformCache, filmWidth, filmHeight);
+    else
+        spdlog::info("USDLoader: no camera in scene; renderer will use default");
 
     // Pad materials vector to cover all mesh IDs
     result.sceneView.materials.resize(result.geomPool.numMeshes(), nullptr);
