@@ -13,7 +13,6 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_allocator.cpp.o
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__wctype.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__xlocale.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_abort.h
- /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_assert.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_bounds.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctermid.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctype.h
@@ -972,7 +971,6 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_allocator.cpp.o
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdarg.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stddef.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdint.h
- /Library/Developer/CommandLineTools/usr/lib/clang/17/share/asan_ignorelist.txt
  /Users/douglascreel/dev/anacapa/include/anacapa/core/Allocator.h
  /opt/homebrew/include/gtest/gtest-assertion-result.h
  /opt/homebrew/include/gtest/gtest-death-test.h
@@ -1008,7 +1006,6 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_bdpt.cpp.o
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__wctype.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__xlocale.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_abort.h
- /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_assert.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_bounds.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctermid.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctype.h
@@ -1967,7 +1964,6 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_bdpt.cpp.o
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdarg.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stddef.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdint.h
- /Library/Developer/CommandLineTools/usr/lib/clang/17/share/asan_ignorelist.txt
  /Users/douglascreel/dev/anacapa/include/anacapa/accel/IAccelerationStructure.h
  /Users/douglascreel/dev/anacapa/include/anacapa/core/Types.h
  /Users/douglascreel/dev/anacapa/include/anacapa/integrator/MISWeight.h
@@ -2009,7 +2005,6 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_bvh.cpp.o
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__wctype.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__xlocale.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_abort.h
- /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_assert.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_bounds.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctermid.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctype.h
@@ -2968,7 +2963,6 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_bvh.cpp.o
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdarg.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stddef.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdint.h
- /Library/Developer/CommandLineTools/usr/lib/clang/17/share/asan_ignorelist.txt
  /Users/douglascreel/dev/anacapa/include/anacapa/accel/GeometryPool.h
  /Users/douglascreel/dev/anacapa/include/anacapa/accel/IAccelerationStructure.h
  /Users/douglascreel/dev/anacapa/include/anacapa/core/Types.h
@@ -3007,7 +3001,6 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__wctype.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__xlocale.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_abort.h
- /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_assert.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_bounds.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctermid.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctype.h
@@ -3966,7 +3959,6 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdarg.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stddef.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdint.h
- /Library/Developer/CommandLineTools/usr/lib/clang/17/share/asan_ignorelist.txt
  /Users/douglascreel/dev/anacapa/include/anacapa/core/Types.h
  /Users/douglascreel/dev/anacapa/include/anacapa/sampling/ISampler.h
  /Users/douglascreel/dev/anacapa/src/sampling/HaltonSampler.h
@@ -4005,7 +3997,6 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__wctype.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__xlocale.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_abort.h
- /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_assert.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_bounds.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctermid.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctype.h
@@ -4964,7 +4955,6 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdarg.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stddef.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdint.h
- /Library/Developer/CommandLineTools/usr/lib/clang/17/share/asan_ignorelist.txt
  /Users/douglascreel/dev/anacapa/include/anacapa/core/Types.h
  /opt/homebrew/include/gtest/gtest-assertion-result.h
  /opt/homebrew/include/gtest/gtest-death-test.h

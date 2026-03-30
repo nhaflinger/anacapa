@@ -73,6 +73,10 @@ public:
         return cosineHemispherePdf(absCosTheta(wiLocal));
     }
 
+    Spectrum reflectance(const ShadingContext&) const override {
+        return m_albedo;
+    }
+
 private:
     Spectrum m_albedo;
 };

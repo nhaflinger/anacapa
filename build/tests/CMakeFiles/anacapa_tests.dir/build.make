@@ -161,6 +161,7 @@ tests/anacapa_tests: lib/libgtest_main.a
 tests/anacapa_tests: /opt/homebrew/lib/libOpenImageIO.3.1.11.dylib
 tests/anacapa_tests: /opt/homebrew/lib/libOpenImageIO_Util.3.1.11.dylib
 tests/anacapa_tests: _deps/spdlog-build/libspdlog.a
+tests/anacapa_tests: /opt/homebrew/Cellar/open-image-denoise/2.4.1/lib/libOpenImageDenoise.2.4.1.dylib
 tests/anacapa_tests: lib/libgtest.a
 tests/anacapa_tests: tests/CMakeFiles/anacapa_tests.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Linking CXX executable anacapa_tests"

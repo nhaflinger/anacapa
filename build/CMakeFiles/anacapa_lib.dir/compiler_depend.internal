@@ -11,7 +11,6 @@ CMakeFiles/anacapa_lib.dir/src/accel/BVHBackend.cpp.o
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__wctype.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__xlocale.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_abort.h
- /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_assert.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_bounds.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctermid.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctype.h
@@ -921,7 +920,6 @@ CMakeFiles/anacapa_lib.dir/src/accel/BVHBackend.cpp.o
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdarg.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stddef.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdint.h
- /Library/Developer/CommandLineTools/usr/lib/clang/17/share/asan_ignorelist.txt
  /Users/douglascreel/dev/anacapa/include/anacapa/accel/GeometryPool.h
  /Users/douglascreel/dev/anacapa/include/anacapa/accel/IAccelerationStructure.h
  /Users/douglascreel/dev/anacapa/include/anacapa/core/Types.h
@@ -937,7 +935,6 @@ CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.o
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__wctype.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__xlocale.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_abort.h
- /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_assert.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_bounds.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctermid.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctype.h
@@ -1757,6 +1754,7 @@ CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.o
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/ratio
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/sstream
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/stack
+ /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/stdbool.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/stddef.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/stdexcept
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/stdint.h
@@ -1928,11 +1926,13 @@ CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.o
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/limits.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/ptrcheck.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdarg.h
+ /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdbool.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stddef.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdint.h
- /Library/Developer/CommandLineTools/usr/lib/clang/17/share/asan_ignorelist.txt
  /Users/douglascreel/dev/anacapa/include/anacapa/core/Types.h
  /Users/douglascreel/dev/anacapa/include/anacapa/film/Film.h
+ /opt/homebrew/include/OpenImageDenoise/config.h
+ /opt/homebrew/include/OpenImageDenoise/oidn.h
  /opt/homebrew/include/OpenImageIO/atomic.h
  /opt/homebrew/include/OpenImageIO/attrdelegate.h
  /opt/homebrew/include/OpenImageIO/dassert.h
@@ -1976,7 +1976,6 @@ CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__wctype.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__xlocale.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_abort.h
- /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_assert.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_bounds.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctermid.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctype.h
@@ -2841,7 +2840,6 @@ CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdarg.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stddef.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdint.h
- /Library/Developer/CommandLineTools/usr/lib/clang/17/share/asan_ignorelist.txt
  /Users/douglascreel/dev/anacapa/include/anacapa/accel/IAccelerationStructure.h
  /Users/douglascreel/dev/anacapa/include/anacapa/core/Types.h
  /Users/douglascreel/dev/anacapa/include/anacapa/film/Film.h
@@ -2866,7 +2864,6 @@ CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__wctype.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__xlocale.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_abort.h
- /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_assert.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_bounds.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctermid.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctype.h
@@ -3731,7 +3728,6 @@ CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdarg.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stddef.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdint.h
- /Library/Developer/CommandLineTools/usr/lib/clang/17/share/asan_ignorelist.txt
  /Users/douglascreel/dev/anacapa/include/anacapa/accel/IAccelerationStructure.h
  /Users/douglascreel/dev/anacapa/include/anacapa/core/Types.h
  /Users/douglascreel/dev/anacapa/include/anacapa/integrator/MISWeight.h
@@ -3747,7 +3743,6 @@ CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__wctype.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__xlocale.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_abort.h
- /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_assert.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_bounds.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctermid.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctype.h
@@ -4612,7 +4607,6 @@ CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdarg.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stddef.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdint.h
- /Library/Developer/CommandLineTools/usr/lib/clang/17/share/asan_ignorelist.txt
  /Users/douglascreel/dev/anacapa/include/anacapa/accel/IAccelerationStructure.h
  /Users/douglascreel/dev/anacapa/include/anacapa/core/Types.h
  /Users/douglascreel/dev/anacapa/include/anacapa/film/Film.h
@@ -4633,7 +4627,6 @@ CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__wctype.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/__xlocale.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_abort.h
- /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_assert.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_bounds.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctermid.h
  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/_ctype.h
@@ -5601,7 +5594,6 @@ CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdarg.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stddef.h
  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdint.h
- /Library/Developer/CommandLineTools/usr/lib/clang/17/share/asan_ignorelist.txt
  /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include/spdlog/common.h
  /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include/spdlog/details/backtracer.h
  /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include/spdlog/details/circular_q.h

@@ -1032,4 +1032,8 @@ CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.o: \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__stop_token/stop_token.h \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__thread/thread.h \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/__thread/this_thread.h \
-  /opt/homebrew/include/OpenImageIO/atomic.h
+  /opt/homebrew/include/OpenImageIO/atomic.h \
+  /opt/homebrew/include/OpenImageDenoise/oidn.h \
+  /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/stdbool.h \
+  /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdbool.h \
+  /opt/homebrew/include/OpenImageDenoise/config.h

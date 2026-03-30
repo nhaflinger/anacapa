@@ -14,6 +14,7 @@ option(ANACAPA_ENABLE_OSL    "Build with Open Shading Language support (Phase 4)
 option(ANACAPA_ENABLE_METAL  "Build Metal GPU backend (Phase 5, macOS)"            OFF)
 option(ANACAPA_ENABLE_CUDA   "Build CUDA/OptiX GPU backend (Phase 5)"              OFF)
 option(ANACAPA_ENABLE_ASAN   "Build with AddressSanitizer"                         OFF)
+option(ANACAPA_ENABLE_OIDN   "Build with Intel OpenImageDenoise support"           OFF)
 
 # ---------------------------------------------------------------------------
 # Dependencies (all header-only except OpenImageIO)
@@ -64,6 +65,11 @@ if(ANACAPA_ENABLE_METAL)
     )
     target_compile_definitions(anacapa_lib PUBLIC ANACAPA_ENABLE_METAL)
     add_subdirectory(src/backends/metal)
+endif()
+
+if(ANACAPA_ENABLE_OIDN)
+    target_link_libraries(anacapa_lib PUBLIC OpenImageDenoise)
+    target_compile_definitions(anacapa_lib PUBLIC ANACAPA_ENABLE_OIDN)
 endif()
 
 if(ANACAPA_ENABLE_CUDA)

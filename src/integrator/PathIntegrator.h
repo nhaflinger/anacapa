@@ -37,8 +37,10 @@ public:
                     TileBuffer& localTile) override;
 
 private:
+    // outAlbedo/outNormal are filled with first-hit surface data for denoising
     Spectrum Li(const Ray& ray, const SceneView& scene,
-                ISampler& sampler, uint32_t depth) const;
+                ISampler& sampler, uint32_t depth,
+                Spectrum& outAlbedo, Vec3f& outNormal) const;
 
     // Direct lighting: sample one light, return MIS-weighted contribution
     Spectrum estimateDirect(const SurfaceInteraction& si,

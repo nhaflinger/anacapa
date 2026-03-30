@@ -96,6 +96,7 @@ anacapa: libanacapa_lib.a
 anacapa: /opt/homebrew/lib/libOpenImageIO.3.1.11.dylib
 anacapa: /opt/homebrew/lib/libOpenImageIO_Util.3.1.11.dylib
 anacapa: _deps/spdlog-build/libspdlog.a
+anacapa: /opt/homebrew/Cellar/open-image-denoise/2.4.1/lib/libOpenImageDenoise.2.4.1.dylib
 anacapa: CMakeFiles/anacapa.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX executable anacapa"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/anacapa.dir/link.txt --verbose=$(VERBOSE)

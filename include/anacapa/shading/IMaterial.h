@@ -81,6 +81,12 @@ public:
         return {};
     }
 
+    // Hemispherical albedo — the surface reflectance, used as a denoising hint.
+    // Returns black for emitters and unimplemented materials.
+    virtual Spectrum reflectance(const ShadingContext& ctx) const {
+        return {};
+    }
+
     virtual uint32_t flags() const = 0;
 };
 

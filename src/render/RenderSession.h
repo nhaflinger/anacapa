@@ -1,6 +1,6 @@
 #pragma once
 
-#include <anacapa/film/Film.h>
+#include <anacapa/film/Film.h>      // Film, DenoiseOptions
 #include <anacapa/integrator/IIntegrator.h>
 #include <anacapa/accel/GeometryPool.h>
 #include <anacapa/accel/IAccelerationStructure.h>
@@ -24,6 +24,7 @@ struct RenderSettings {
     uint32_t       numThreads      = 0;   // 0 = hardware_concurrency
     std::string    outputPath      = "out.exr";
     IntegratorType integrator      = IntegratorType::BDPT;
+    DenoiseOptions denoise;
 };
 
 // ---------------------------------------------------------------------------

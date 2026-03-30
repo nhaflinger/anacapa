@@ -27,6 +27,11 @@ int main(int argc, char** argv) {
                    "Integrator: bdpt (default) or path")
        ->default_val("bdpt");
 
+    app.add_flag("--denoise",    settings.denoise.enabled,
+                 "Run Intel OIDN denoiser on the beauty buffer after rendering");
+    app.add_flag("--write-aovs", settings.denoise.writeAOVs,
+                 "Include albedo and normals layers in the output EXR");
+
     CLI11_PARSE(app, argc, argv);
 
     if (integratorName == "path")

@@ -77,6 +77,16 @@ if(ANACAPA_ENABLE_OSL)
 endif()
 
 # ---------------------------------------------------------------------------
+# Intel OpenImageDenoise (optional — denoising phase)
+# Expected: brew install open-image-denoise
+# ---------------------------------------------------------------------------
+if(ANACAPA_ENABLE_OIDN)
+    find_package(OpenImageDenoise REQUIRED
+        PATHS /opt/homebrew/lib/cmake /opt/homebrew/lib/cmake/OpenImageDenoise-2.4.1
+        PATH_SUFFIXES OpenImageDenoise)
+endif()
+
+# ---------------------------------------------------------------------------
 # Metal (optional — Phase 5, macOS only)
 # ---------------------------------------------------------------------------
 if(ANACAPA_ENABLE_METAL)

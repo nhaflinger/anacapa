@@ -370,7 +370,10 @@ void BDPTIntegrator::renderTile(const SceneView& scene,
             uint32_t px = tile.x0 + tx;
             uint32_t py = tile.y0 + ty;
 
-            Spectrum pixelL = {};
+            Spectrum pixelL       = {};
+            Spectrum accumAlbedo  = {};
+            Vec3f    accumNormal  = {};
+            uint32_t aovCount     = 0;
 
             for (uint32_t s = 0; s < tile.sampleCount; ++s) {
                 sampler.startPixelSample(px, py, tile.sampleStart + s);
@@ -380,6 +383,18 @@ void BDPTIntegrator::renderTile(const SceneView& scene,
                 Ray primaryRay = cam.generateRay(px, py, jitter.x, jitter.y);
                 // Pinhole camera: area PDF = 1 (we treat it as a single point)
                 traceCameraSubpath(scene, primaryRay, 1.f, sampler, camPath);
+
+                // Denoising AOVs: first surface vertex (index 1, after the camera vertex)
+                if (camPath.count >= 2 &&
+                    camPath.type(1) == PathVertexType::Surface &&
+                    camPath.material[1]) {
+                    SurfaceInteraction si;
+                    si.p = camPath.position[1]; si.n = camPath.normal[1]; si.ng = camPath.normal[1];
+                    ShadingContext ctx(si, -camPath.wo[1]);
+                    accumAlbedo = accumAlbedo + camPath.material[1]->reflectance(ctx);
+                    accumNormal = accumNormal + camPath.normal[1];
+                    ++aovCount;
+                }
 
                 // --- Light subpath ---
                 uint32_t lightIdx = 0;
@@ -417,6 +432,15 @@ void BDPTIntegrator::renderTile(const SceneView& scene,
 
             float invSPP = 1.f / static_cast<float>(tile.sampleCount);
             localTile.add(tx, ty, pixelL * invSPP);
+
+            if (aovCount > 0) {
+                float invN = 1.f / static_cast<float>(aovCount);
+                localTile.addAlbedo(tx, ty, accumAlbedo * invN);
+                Vec3f avgN = accumNormal * invN;
+                float len  = avgN.length();
+                if (len > 1e-6f) avgN = avgN * (1.f / len);
+                localTile.addNormal(tx, ty, avgN);
+            }
         }
     }
 }

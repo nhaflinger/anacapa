@@ -227,7 +227,10 @@ void RenderSession::render() {
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     spdlog::info("Render complete in {:.1f} ms", ms);
 
-    if (!m_film->writeEXR(m_settings.outputPath))
+    if (m_settings.denoise.enabled)
+        m_film->denoise();
+
+    if (!m_film->writeEXR(m_settings.outputPath, m_settings.denoise))
         spdlog::error("Failed to write {}", m_settings.outputPath);
     else
         spdlog::info("Written: {}", m_settings.outputPath);

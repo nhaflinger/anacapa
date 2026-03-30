@@ -56,18 +56,32 @@ struct PixelAccumulator {
 // the main Film atomically via Film::mergeTile(). This eliminates atomic
 // ops for camera-path contributions (the common case) and reserves atomics
 // only for BDPT light-subpath splats which are inherently non-local.
+//
+// albedo and normal are auxiliary buffers for denoising:
+//   albedo — diffuse reflectance at the first camera-ray hit
+//   normal — world-space normal at the first camera-ray hit (signed, unit)
+// Both are averaged over spp and passed to OIDN as denoising hints.
 // ---------------------------------------------------------------------------
 struct TileBuffer {
     struct Sample {
         float r = 0.f, g = 0.f, b = 0.f, weight = 0.f;
     };
 
+    // Denoising AOV sample — clamped average, not weighted sum
+    struct AOVSample {
+        float r = 0.f, g = 0.f, b = 0.f;
+        uint32_t count = 0;
+    };
+
     uint32_t           x0, y0;       // Tile origin in film space
     uint32_t           width, height;
-    std::vector<Sample> pixels;       // [y * width + x]
+    std::vector<Sample>    pixels;       // [y * width + x]
+    std::vector<AOVSample> albedo;       // first-hit diffuse reflectance
+    std::vector<AOVSample> normals;      // first-hit world-space normal
 
     TileBuffer(uint32_t x0, uint32_t y0, uint32_t w, uint32_t h)
-        : x0(x0), y0(y0), width(w), height(h), pixels(w * h)
+        : x0(x0), y0(y0), width(w), height(h)
+        , pixels(w * h), albedo(w * h), normals(w * h)
     {}
 
     void add(uint32_t localX, uint32_t localY,
@@ -83,9 +97,30 @@ struct TileBuffer {
         add(localX, localY, s.x, s.y, s.z, w);
     }
 
-    void clear() {
-        for (auto& p : pixels) p = {};
+    // Record denoising AOVs (averaged, not splatted — only first hit per ray)
+    void addAlbedo(uint32_t localX, uint32_t localY, Spectrum s) {
+        auto& a = albedo[localY * width + localX];
+        a.r += s.x; a.g += s.y; a.b += s.z; ++a.count;
     }
+
+    void addNormal(uint32_t localX, uint32_t localY, Vec3f n) {
+        auto& a = normals[localY * width + localX];
+        a.r += n.x; a.g += n.y; a.b += n.z; ++a.count;
+    }
+
+    void clear() {
+        for (auto& p : pixels)  p = {};
+        for (auto& a : albedo)  a = {};
+        for (auto& n : normals) n = {};
+    }
+};
+
+// ---------------------------------------------------------------------------
+// DenoiseOptions — controls Film::denoise() behaviour
+// ---------------------------------------------------------------------------
+struct DenoiseOptions {
+    bool enabled   = false;  // Run OIDN on the beauty buffer
+    bool writeAOVs = false;  // Include albedo + normals layers in output EXR
 };
 
 // ---------------------------------------------------------------------------
@@ -106,16 +141,27 @@ public:
     // Merge a completed TileBuffer into the film (called by tile worker)
     void mergeTile(const TileBuffer& tile);
 
+    // Run OIDN denoiser on the beauty buffer, storing result in m_denoised.
+    // No-op (returns false with a log warning) if OIDN is not compiled in.
+    bool denoise();
+
     // Write finalized image to an EXR file via OpenImageIO.
-    // Divides each pixel by its accumulated weight before writing.
-    bool writeEXR(const std::string& path) const;
+    // If DenoiseOptions::enabled, includes a denoised beauty layer.
+    // If DenoiseOptions::writeAOVs, includes albedo and normals layers.
+    bool writeEXR(const std::string& path,
+                  const DenoiseOptions& opts = {}) const;
 
     // Raw resolved pixel access (for preview / post-processing)
     Spectrum getPixel(uint32_t x, uint32_t y) const;
 
 private:
     uint32_t m_width, m_height;
-    std::vector<PixelAccumulator> m_pixels;  // [y * width + x]
+    std::vector<PixelAccumulator> m_pixels;   // [y * width + x]
+    std::vector<PixelAccumulator> m_albedo;   // first-hit diffuse reflectance
+    std::vector<PixelAccumulator> m_normals;  // first-hit world normal
+
+    // Denoised beauty buffer (populated by denoise())
+    std::vector<float> m_denoised;   // RGB interleaved, size = width*height*3
 
     bool inBounds(int x, int y) const {
         return x >= 0 && x < static_cast<int>(m_width)

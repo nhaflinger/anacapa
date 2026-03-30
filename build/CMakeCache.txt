@@ -23,6 +23,9 @@ ANACAPA_ENABLE_CUDA:BOOL=OFF
 //Build Metal GPU backend (Phase 5, macOS)
 ANACAPA_ENABLE_METAL:BOOL=OFF
 
+//Build with Intel OpenImageDenoise support
+ANACAPA_ENABLE_OIDN:BOOL=ON
+
 //Build with Open Shading Language support (Phase 4)
 ANACAPA_ENABLE_OSL:BOOL=OFF
 
@@ -362,6 +365,9 @@ INSTALL_GTEST:BOOL=ON
 
 //The directory containing a CMake configuration file for Imath.
 Imath_DIR:PATH=/opt/homebrew/lib/cmake/Imath
+
+//No help, variable specified on the command line.
+OpenImageDenoise_DIR:UNINITIALIZED=/opt/homebrew/Cellar/open-image-denoise/2.4.1/lib/cmake/OpenImageDenoise-2.4.1
 
 //The directory containing a CMake configuration file for OpenImageIO.
 OpenImageIO_DIR:PATH=/opt/homebrew/lib/cmake/OpenImageIO
