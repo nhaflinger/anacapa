@@ -10,13 +10,13 @@ void PathIntegrator::renderTile(const SceneView& scene,
                                  uint32_t filmHeight,
                                  ISampler& sampler,
                                  TileBuffer& localTile) {
-    Camera cam = Camera::makePinhole(
+    Camera cam = scene.camera.value_or(Camera::makePinhole(
         {0.f, 0.f, -2.5f},
         {0.f, 0.f,  1.f},
         {0.f, 1.f,  0.f},
         50.f,
         filmWidth, filmHeight
-    );
+    ));
 
     for (uint32_t ty = 0; ty < tile.height; ++ty) {
         for (uint32_t tx = 0; tx < tile.width; ++tx) {

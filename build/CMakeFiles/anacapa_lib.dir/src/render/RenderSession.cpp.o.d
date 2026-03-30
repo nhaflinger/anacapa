@@ -968,6 +968,8 @@ CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o: \
   /Users/douglascreel/dev/anacapa/src/render/../sampling/PCGRng.h \
   /Users/douglascreel/dev/anacapa/src/render/../shading/Lambertian.h \
   /Users/douglascreel/dev/anacapa/src/render/../shading/lights/AreaLight.h \
+  /Users/douglascreel/dev/anacapa/src/render/../scene/usd/USDLoader.h \
+  /Users/douglascreel/dev/anacapa/include/anacapa/scene/SceneLoader.h \
   /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include/spdlog/spdlog.h \
   /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include/spdlog/common.h \
   /Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include/spdlog/details/null_mutex.h \

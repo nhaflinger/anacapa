@@ -9,6 +9,7 @@
 #include <anacapa/shading/ILight.h>
 #include "ThreadPool.h"
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace anacapa {
@@ -23,6 +24,7 @@ struct RenderSettings {
     uint32_t       tileSize        = 64;
     uint32_t       numThreads      = 0;   // 0 = hardware_concurrency
     std::string    outputPath      = "out.exr";
+    std::string    scenePath;              // empty → built-in Cornell box
     IntegratorType integrator      = IntegratorType::BDPT;
     DenoiseOptions denoise;
 };
@@ -37,19 +39,22 @@ class RenderSession {
 public:
     explicit RenderSession(RenderSettings settings);
 
-    // Build a hardcoded Cornell-box scene (Phase 1)
-    void buildCornellBox();
+    // Load scene: if settings.scenePath is non-empty, loads from USD file.
+    // Otherwise falls back to the built-in Cornell box.
+    void loadScene();
 
     // Run the render, write output EXR
     void render();
 
 private:
+    void buildCornellBox();
     void buildAccelStructure();
     void scheduleTiles(std::vector<TileRequest>& tiles) const;
 
     RenderSettings                        m_settings;
     GeometryPool                          m_geomPool;
     SceneView                             m_scene;
+    std::optional<Camera>                 m_camera;   // set by USD loader if present
     std::unique_ptr<IAccelerationStructure> m_accel;
     std::unique_ptr<Film>                 m_film;
     std::unique_ptr<IIntegrator>          m_integrator;
