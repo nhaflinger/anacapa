@@ -30,7 +30,7 @@ ANACAPA_ENABLE_OIDN:BOOL=ON
 ANACAPA_ENABLE_OSL:BOOL=OFF
 
 //Build with OpenUSD support (Phase 3)
-ANACAPA_ENABLE_USD:BOOL=OFF
+ANACAPA_ENABLE_USD:BOOL=ON
 
 //Builds the googlemock subproject
 BUILD_GMOCK:BOOL=OFF
@@ -454,6 +454,9 @@ SPDLOG_WCHAR_FILENAMES:BOOL=OFF
 //non supported option
 SPDLOG_WCHAR_SUPPORT:BOOL=OFF
 
+//OpenUSD install root
+USD_ROOT:PATH=/Users/douglascreel/usd
+
 //Value Computed by CMake
 anacapa_BINARY_DIR:STATIC=/Users/douglascreel/dev/anacapa/build
 
@@ -499,6 +502,9 @@ gtest_force_shared_crt:BOOL=ON
 
 //Build gtest with internal symbols hidden in shared libraries.
 gtest_hide_internal_symbols:BOOL=OFF
+
+//The directory containing a CMake configuration file for pxr.
+pxr_DIR:PATH=/Users/douglascreel/usd
 
 //Value Computed by CMake
 spdlog_BINARY_DIR:STATIC=/Users/douglascreel/dev/anacapa/build/_deps/spdlog-build

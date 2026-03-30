@@ -6,6 +6,10 @@
 #include "../shading/Lambertian.h"
 #include "../shading/lights/AreaLight.h"
 
+#ifdef ANACAPA_ENABLE_USD
+#  include "../scene/usd/USDLoader.h"
+#endif
+
 #include <spdlog/spdlog.h>
 #include <cassert>
 #include <chrono>
@@ -26,7 +30,33 @@ RenderSession::RenderSession(RenderSettings settings)
 {}
 
 // ---------------------------------------------------------------------------
-// Cornell Box — hardcoded for Phase 1
+// loadScene — dispatch to USD loader or built-in Cornell box
+// ---------------------------------------------------------------------------
+void RenderSession::loadScene() {
+#ifdef ANACAPA_ENABLE_USD
+    if (!m_settings.scenePath.empty()) {
+        LoadedScene loaded = loadUSD(m_settings.scenePath,
+                                      m_settings.imageWidth,
+                                      m_settings.imageHeight);
+        m_geomPool  = std::move(loaded.geomPool);
+        m_scene     = std::move(loaded.sceneView);
+        m_camera    = std::move(loaded.camera);
+        m_materials = std::move(loaded.materials);
+        m_lights    = std::move(loaded.lights);
+        // Re-link camera into scene view (integrators read it from there)
+        m_scene.camera = m_camera;
+        // Accel pointer is set by buildAccelStructure()
+        m_scene.accel = nullptr;
+        return;
+    }
+#endif
+    if (!m_settings.scenePath.empty())
+        spdlog::warn("--scene requires ANACAPA_ENABLE_USD; falling back to Cornell box");
+    buildCornellBox();
+}
+
+// ---------------------------------------------------------------------------
+// Cornell Box — built-in fallback scene
 //
 // Coordinate system:
 //   x ∈ [-1, 1]  (left wall = -1 red, right wall = +1 green)

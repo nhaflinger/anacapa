@@ -3,6 +3,7 @@
 #include <anacapa/core/Types.h>
 #include <anacapa/film/Film.h>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace anacapa {
@@ -14,48 +15,7 @@ class ISampler;
 struct SurfaceInteraction;
 
 // ---------------------------------------------------------------------------
-// SceneView — non-owning view of the scene passed to integrators.
-// Separates the integrator from the scene ownership model.
-// ---------------------------------------------------------------------------
-struct SceneView {
-    const IAccelerationStructure*        accel    = nullptr;
-    std::vector<const IMaterial*>        materials;   // indexed by meshID
-    std::vector<const ILight*>           lights;
-    Vec3f                                envRadiance = {};  // Background color
-};
-
-// ---------------------------------------------------------------------------
-// TileRequest — describes a rectangular region of the film to render
-// ---------------------------------------------------------------------------
-struct TileRequest {
-    uint32_t x0, y0;          // Pixel-space origin (inclusive)
-    uint32_t width, height;
-    uint32_t sampleStart;      // First sample index (for low-discrepancy offsets)
-    uint32_t sampleCount;
-};
-
-// ---------------------------------------------------------------------------
-// IIntegrator
-// ---------------------------------------------------------------------------
-class IIntegrator {
-public:
-    virtual ~IIntegrator() = default;
-
-    // One-time setup after the scene is committed (build light samplers, etc.)
-    virtual void prepare(const SceneView& scene) = 0;
-
-    // Render a single tile. Must be thread-safe — called concurrently.
-    // Writes to localTile; caller merges into Film.
-    virtual void renderTile(const SceneView& scene,
-                            const TileRequest& tile,
-                            uint32_t filmWidth,
-                            uint32_t filmHeight,
-                            ISampler& sampler,
-                            TileBuffer& localTile) = 0;
-};
-
-// ---------------------------------------------------------------------------
-// Camera — pinhole camera
+// Camera — pinhole camera (defined before SceneView so SceneView can embed it)
 // ---------------------------------------------------------------------------
 struct Camera {
     Vec3f  origin;
@@ -99,6 +59,48 @@ struct Camera {
         Vec3f dir = lowerLeftCorner + horizontal*s + vertical*t - origin;
         return Ray{origin, normalize(dir)};
     }
+};
+
+// ---------------------------------------------------------------------------
+// SceneView — non-owning view of the scene passed to integrators.
+// Separates the integrator from the scene ownership model.
+// ---------------------------------------------------------------------------
+struct SceneView {
+    const IAccelerationStructure*        accel    = nullptr;
+    std::vector<const IMaterial*>        materials;   // indexed by meshID
+    std::vector<const ILight*>           lights;
+    Vec3f                                envRadiance = {};  // Background color
+    std::optional<Camera>                camera;            // set by scene loader
+};
+
+// ---------------------------------------------------------------------------
+// TileRequest — describes a rectangular region of the film to render
+// ---------------------------------------------------------------------------
+struct TileRequest {
+    uint32_t x0, y0;          // Pixel-space origin (inclusive)
+    uint32_t width, height;
+    uint32_t sampleStart;      // First sample index (for low-discrepancy offsets)
+    uint32_t sampleCount;
+};
+
+// ---------------------------------------------------------------------------
+// IIntegrator
+// ---------------------------------------------------------------------------
+class IIntegrator {
+public:
+    virtual ~IIntegrator() = default;
+
+    // One-time setup after the scene is committed (build light samplers, etc.)
+    virtual void prepare(const SceneView& scene) = 0;
+
+    // Render a single tile. Must be thread-safe — called concurrently.
+    // Writes to localTile; caller merges into Film.
+    virtual void renderTile(const SceneView& scene,
+                            const TileRequest& tile,
+                            uint32_t filmWidth,
+                            uint32_t filmHeight,
+                            ISampler& sampler,
+                            TileBuffer& localTile) = 0;
 };
 
 } // namespace anacapa

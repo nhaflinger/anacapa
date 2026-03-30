@@ -13,10 +13,10 @@ namespace anacapa {
 void BDPTIntegrator::prepare(const SceneView& scene) {
     m_lightSampler.build(scene.lights);
 
-    // Default camera — overridden per tile in renderTile
-    m_camera = Camera::makePinhole(
+    // Camera stored for (s,1) pixel projection; overridden per tile if USD camera present
+    m_camera = scene.camera.value_or(Camera::makePinhole(
         {0.f, 0.f, -2.5f}, {0.f, 0.f, 1.f}, {0.f, 1.f, 0.f},
-        50.f, 800, 800);
+        50.f, 800, 800));
 }
 
 // ---------------------------------------------------------------------------
@@ -356,9 +356,9 @@ void BDPTIntegrator::renderTile(const SceneView& scene,
                                  uint32_t filmHeight,
                                  ISampler& sampler,
                                  TileBuffer& localTile) {
-    Camera cam = Camera::makePinhole(
+    Camera cam = scene.camera.value_or(Camera::makePinhole(
         {0.f, 0.f, -2.5f}, {0.f, 0.f, 1.f}, {0.f, 1.f, 0.f},
-        50.f, filmWidth, filmHeight);
+        50.f, filmWidth, filmHeight));
 
     // Per-tile path vertex buffers — pre-allocated, reset each sample
     uint32_t maxVerts = m_maxDepth + 2;

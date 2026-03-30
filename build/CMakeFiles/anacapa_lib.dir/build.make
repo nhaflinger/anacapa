@@ -153,6 +153,20 @@ CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.s"
 	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /Users/douglascreel/dev/anacapa/src/render/RenderSession.cpp -o CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.s
 
+CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o: CMakeFiles/anacapa_lib.dir/flags.make
+CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o: /Users/douglascreel/dev/anacapa/src/scene/usd/USDLoader.cpp
+CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o: CMakeFiles/anacapa_lib.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o -MF CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o.d -o CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o -c /Users/douglascreel/dev/anacapa/src/scene/usd/USDLoader.cpp
+
+CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.i"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /Users/douglascreel/dev/anacapa/src/scene/usd/USDLoader.cpp > CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.i
+
+CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.s"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /Users/douglascreel/dev/anacapa/src/scene/usd/USDLoader.cpp -o CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.s
+
 # Object files for target anacapa_lib
 anacapa_lib_OBJECTS = \
 "CMakeFiles/anacapa_lib.dir/src/accel/BVHBackend.cpp.o" \
@@ -160,7 +174,8 @@ anacapa_lib_OBJECTS = \
 "CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o" \
 "CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o" \
 "CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o" \
-"CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o"
+"CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o" \
+"CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o"
 
 # External object files for target anacapa_lib
 anacapa_lib_EXTERNAL_OBJECTS =
@@ -171,9 +186,10 @@ libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o
+libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/build.make
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Linking CXX static library libanacapa_lib.a"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Linking CXX static library libanacapa_lib.a"
 	$(CMAKE_COMMAND) -P CMakeFiles/anacapa_lib.dir/cmake_clean_target.cmake
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/anacapa_lib.dir/link.txt --verbose=$(VERBOSE)
 

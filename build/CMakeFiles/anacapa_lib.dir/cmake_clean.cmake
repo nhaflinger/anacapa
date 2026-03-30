@@ -11,6 +11,8 @@ file(REMOVE_RECURSE
   "CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o.d"
   "CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o"
   "CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o.d"
+  "CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o"
+  "CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o.d"
   "libanacapa_lib.a"
   "libanacapa_lib.pdb"
 )

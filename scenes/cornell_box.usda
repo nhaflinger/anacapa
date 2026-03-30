@@ -1,0 +1,248 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    metersPerUnit = 1.0
+    doc = """Anacapa Cornell Box
+    Coordinate system: x∈[-1,1], y∈[-1,1], z∈[0,2]
+    Camera sits at z=-2.5 looking in +z, 50° vertical FOV.
+    """
+)
+
+def Xform "World"
+{
+    # -----------------------------------------------------------------------
+    # Materials
+    # -----------------------------------------------------------------------
+
+    def Material "WhiteMat"
+    {
+        token outputs:surface.connect = </World/WhiteMat/Shader.outputs:surface>
+        def Shader "Shader"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.73, 0.73, 0.73)
+            float inputs:roughness = 1.0
+            float inputs:metallic = 0.0
+            token outputs:surface
+        }
+    }
+
+    def Material "RedMat"
+    {
+        token outputs:surface.connect = </World/RedMat/Shader.outputs:surface>
+        def Shader "Shader"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.65, 0.05, 0.05)
+            float inputs:roughness = 1.0
+            float inputs:metallic = 0.0
+            token outputs:surface
+        }
+    }
+
+    def Material "GreenMat"
+    {
+        token outputs:surface.connect = </World/GreenMat/Shader.outputs:surface>
+        def Shader "Shader"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.12, 0.45, 0.15)
+            float inputs:roughness = 1.0
+            float inputs:metallic = 0.0
+            token outputs:surface
+        }
+    }
+
+    def Material "LightMat"
+    {
+        token outputs:surface.connect = </World/LightMat/Shader.outputs:surface>
+        def Shader "Shader"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.0, 0.0, 0.0)
+            color3f inputs:emissiveColor = (15.0, 15.0, 15.0)
+            token outputs:surface
+        }
+    }
+
+    # -----------------------------------------------------------------------
+    # Room geometry
+    # Each mesh declares MaterialBindingAPI so USD resolves material bindings.
+    # -----------------------------------------------------------------------
+
+    # Floor: y=-1, normal +y
+    def Mesh "Floor" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        point3f[] points = [(-1,-1,0), (1,-1,0), (1,-1,2), (-1,-1,2)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        normal3f[] normals = [(0,1,0), (0,1,0), (0,1,0), (0,1,0)]
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </World/WhiteMat>
+    }
+
+    # Ceiling: y=+1, normal -y
+    def Mesh "Ceiling" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        point3f[] points = [(-1,1,2), (1,1,2), (1,1,0), (-1,1,0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        normal3f[] normals = [(0,-1,0), (0,-1,0), (0,-1,0), (0,-1,0)]
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </World/WhiteMat>
+    }
+
+    # Back wall: z=2, normal -z
+    def Mesh "BackWall" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        point3f[] points = [(-1,-1,2), (-1,1,2), (1,1,2), (1,-1,2)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        normal3f[] normals = [(0,0,-1), (0,0,-1), (0,0,-1), (0,0,-1)]
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </World/WhiteMat>
+    }
+
+    # Left wall (red): x=-1, normal +x
+    def Mesh "LeftWall" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        point3f[] points = [(-1,-1,2), (-1,1,2), (-1,1,0), (-1,-1,0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        normal3f[] normals = [(1,0,0), (1,0,0), (1,0,0), (1,0,0)]
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </World/RedMat>
+    }
+
+    # Right wall (green): x=+1, normal -x
+    def Mesh "RightWall" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        point3f[] points = [(1,-1,0), (1,1,0), (1,1,2), (1,-1,2)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        normal3f[] normals = [(-1,0,0), (-1,0,0), (-1,0,0), (-1,0,0)]
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </World/GreenMat>
+    }
+
+    # Ceiling light patch (emissive geometry for visibility and MIS)
+    def Mesh "LightPatch" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        point3f[] points = [(-0.25,0.999,0.85), (0.25,0.999,0.85),
+                             (0.25,0.999,1.15), (-0.25,0.999,1.15)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        normal3f[] normals = [(0,-1,0), (0,-1,0), (0,-1,0), (0,-1,0)]
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </World/LightMat>
+    }
+
+    # -----------------------------------------------------------------------
+    # Tall block — right side, rotated -15° around Y
+    # Pivot: (0.375, -1, 0.825)
+    # -----------------------------------------------------------------------
+    def Mesh "TallBlock" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        point3f[] points = [
+            ( 0.181, -1.0,  0.488),
+            ( 0.712, -1.0,  0.631),
+            ( 0.569, -1.0,  1.162),
+            ( 0.038, -1.0,  1.019),
+            ( 0.181,  0.0,  0.488),
+            ( 0.712,  0.0,  0.631),
+            ( 0.569,  0.0,  1.162),
+            ( 0.038,  0.0,  1.019)
+        ]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [
+            0, 1, 2, 3,
+            7, 6, 5, 4,
+            0, 4, 5, 1,
+            1, 5, 6, 2,
+            2, 6, 7, 3,
+            3, 7, 4, 0
+        ]
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </World/WhiteMat>
+    }
+
+    # -----------------------------------------------------------------------
+    # Short block — left side, rotated +18° around Y
+    # Pivot: (-0.375, -1, 1.075)
+    # -----------------------------------------------------------------------
+    def Mesh "ShortBlock" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        point3f[] points = [
+            (-0.722, -1.0,  0.898),
+            (-0.198, -1.0,  0.728),
+            (-0.028, -1.0,  1.252),
+            (-0.552, -1.0,  1.422),
+            (-0.722, -0.5,  0.898),
+            (-0.198, -0.5,  0.728),
+            (-0.028, -0.5,  1.252),
+            (-0.552, -0.5,  1.422)
+        ]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [
+            0, 1, 2, 3,
+            7, 6, 5, 4,
+            0, 4, 5, 1,
+            1, 5, 6, 2,
+            2, 6, 7, 3,
+            3, 7, 4, 0
+        ]
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </World/WhiteMat>
+    }
+
+    # -----------------------------------------------------------------------
+    # Area light (ILight for direct sampling / BDPT light subpaths)
+    # Rotated 90° around X so the rect faces downward (-Y)
+    # -----------------------------------------------------------------------
+    def RectLight "CeilingLight"
+    {
+        float inputs:width     = 0.5
+        float inputs:height    = 0.3
+        float inputs:intensity = 15.0
+        color3f inputs:color   = (1.0, 1.0, 1.0)
+        bool inputs:normalize  = false
+
+        double3 xformOp:translate = (0.0, 0.999, 1.0)
+        double3 xformOp:rotateXYZ = (90.0, 0.0, 0.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    # -----------------------------------------------------------------------
+    # Camera — 50° vertical FOV, placed at z=-2.5 looking in +z
+    # focalLength=50mm, aperture=46.631mm → exactly 50° vfov on square sensor
+    # -----------------------------------------------------------------------
+    def Camera "RenderCam"
+    {
+        float focalLength          = 50.0
+        float horizontalAperture   = 46.631
+        float verticalAperture     = 46.631
+        float2 clippingRange       = (0.1, 1000.0)
+
+        double3 xformOp:translate = (0.0, 0.0, -2.5)
+        # Rotate 180° around Y so the camera looks in +Z (toward the Cornell box)
+        double3 xformOp:rotateXYZ = (0.0, 180.0, 0.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

@@ -430,6 +430,30 @@ src/render/RenderSession.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.s
 .PHONY : src/render/RenderSession.cpp.s
 
+src/scene/usd/USDLoader.o: src/scene/usd/USDLoader.cpp.o
+.PHONY : src/scene/usd/USDLoader.o
+
+# target to build an object file
+src/scene/usd/USDLoader.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o
+.PHONY : src/scene/usd/USDLoader.cpp.o
+
+src/scene/usd/USDLoader.i: src/scene/usd/USDLoader.cpp.i
+.PHONY : src/scene/usd/USDLoader.i
+
+# target to preprocess a source file
+src/scene/usd/USDLoader.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.i
+.PHONY : src/scene/usd/USDLoader.cpp.i
+
+src/scene/usd/USDLoader.s: src/scene/usd/USDLoader.cpp.s
+.PHONY : src/scene/usd/USDLoader.s
+
+# target to generate assembly for a file
+src/scene/usd/USDLoader.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.s
+.PHONY : src/scene/usd/USDLoader.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -471,6 +495,9 @@ help:
 	@echo "... src/render/RenderSession.o"
 	@echo "... src/render/RenderSession.i"
 	@echo "... src/render/RenderSession.s"
+	@echo "... src/scene/usd/USDLoader.o"
+	@echo "... src/scene/usd/USDLoader.i"
+	@echo "... src/scene/usd/USDLoader.s"
 .PHONY : help
 
 

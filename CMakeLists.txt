@@ -52,9 +52,11 @@ target_link_libraries(anacapa_lib
 include(cmake/compiler_options.cmake)
 
 if(ANACAPA_ENABLE_USD)
+    target_include_directories(anacapa_lib PUBLIC "${USD_ROOT}/include")
+    target_link_directories(anacapa_lib PUBLIC "${USD_ROOT}/lib")
     target_link_libraries(anacapa_lib PUBLIC
-        pxr::usd pxr::usdGeom pxr::usdLux pxr::usdShade
-        MaterialXCore MaterialXFormat MaterialXGenShader
+        usd_usd usd_usdGeom usd_usdLux usd_usdShade
+        usd_tf usd_gf usd_vt usd_sdf usd_ar usd_plug
     )
     target_compile_definitions(anacapa_lib PUBLIC ANACAPA_ENABLE_USD)
 endif()

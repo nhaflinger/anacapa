@@ -57,12 +57,16 @@ FetchContent_MakeAvailable(googletest)
 find_package(OpenImageIO REQUIRED)
 
 # ---------------------------------------------------------------------------
-# OpenUSD + MaterialX (optional — Phase 3)
-# Expected: brew install usd  (or build from source)
+# OpenUSD (optional — Phase 4)
+# Default search path: ~/usd  (built by build_scripts/build_usd.py)
+# Override with: cmake -DUSD_ROOT=/path/to/usd
 # ---------------------------------------------------------------------------
 if(ANACAPA_ENABLE_USD)
-    find_package(pxr      REQUIRED)
-    find_package(MaterialX REQUIRED)
+    set(USD_ROOT "$ENV{HOME}/usd" CACHE PATH "OpenUSD install root")
+    find_package(pxr REQUIRED
+        PATHS "${USD_ROOT}" "${USD_ROOT}/lib/cmake/pxr"
+        NO_DEFAULT_PATH)
+    message(STATUS "OpenUSD ${PXR_VERSION} found at ${USD_ROOT}")
 endif()
 
 # ---------------------------------------------------------------------------

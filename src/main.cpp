@@ -27,6 +27,9 @@ int main(int argc, char** argv) {
                    "Integrator: bdpt (default) or path")
        ->default_val("bdpt");
 
+    app.add_option("--scene", settings.scenePath,
+                   "USD/USDA/USDC scene file to load (requires ANACAPA_ENABLE_USD)");
+
     app.add_flag("--denoise",    settings.denoise.enabled,
                  "Run Intel OIDN denoiser on the beauty buffer after rendering");
     app.add_flag("--write-aovs", settings.denoise.writeAOVs,
@@ -42,7 +45,7 @@ int main(int argc, char** argv) {
     spdlog::set_level(spdlog::level::info);
 
     anacapa::RenderSession session(settings);
-    session.buildCornellBox();
+    session.loadScene();
     session.render();
 
     return 0;
