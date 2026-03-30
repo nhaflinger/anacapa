@@ -7,14 +7,14 @@ Named after Anacapa Island, part of California's Channel Islands.
 ## Features
 
 - **Bidirectional path tracing (BDPT)** with multiple importance sampling and Veach MIS weights
+- **OpenUSD scene loading** — geometry, materials, lights, and camera from `.usda`/`.usdc` files
 - **Intel OIDN denoising** — AI denoiser with albedo and normal auxiliary buffers, optional
 - **Custom SAH BVH** — surface area heuristic build with 12-bucket binning, Möller–Trumbore traversal
 - **Custom thread pool** — tile-parallel rendering with `std::thread`, no external threading library
 - **Scrambled Halton sampler** — low-discrepancy sampling up to 128 dimensions
 - **Multi-layer EXR output** — beauty, denoised, albedo, and normals layers via OpenImageIO
-- **USD scene format** — Phase 3, optional
-- **OSL shading language** — Phase 4, optional
-- **GPU backends** — Metal (Apple Silicon) and CUDA+OptiX (NVIDIA) planned for Phase 5
+- **OSL shading language** — Phase 5, optional
+- **GPU backends** — Metal (Apple Silicon) and CUDA+OptiX (NVIDIA) planned for Phase 6
 - **Zero compiled third-party dependencies** in the core renderer
 
 ## Dependencies
@@ -22,8 +22,8 @@ Named after Anacapa Island, part of California's Channel Islands.
 | Dependency | Required | Install |
 |---|---|---|
 | OpenImageIO | Yes | `brew install openimageio` |
+| OpenUSD | No (`-DANACAPA_ENABLE_USD=ON`) | Build from source — see below |
 | OpenImageDenoise | No (`-DANACAPA_ENABLE_OIDN=ON`) | `brew install open-image-denoise` |
-| OpenUSD | No (`-DANACAPA_ENABLE_USD=ON`) | `brew install usd` |
 | Open Shading Language | No (`-DANACAPA_ENABLE_OSL=ON`) | `brew install open-shading-language` |
 
 Header-only dependencies (fetched automatically by CMake): spdlog, CLI11, GoogleTest.
@@ -34,13 +34,23 @@ Header-only dependencies (fetched automatically by CMake): spdlog, CLI11, Google
 # Prerequisites (macOS)
 brew install openimageio
 
-# Configure and build
+# Configure and build (no USD, no OIDN)
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 
 # Build with Intel OIDN denoising support
 brew install open-image-denoise
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DANACAPA_ENABLE_OIDN=ON \
+  -DOpenImageDenoise_DIR=/opt/homebrew/lib/cmake/OpenImageDenoise-2.4.1
+cmake --build build --parallel
+
+# Build with OpenUSD support
+# OpenUSD must be built from source using Pixar's build script:
+#   python3 USD/build_scripts/build_usd.py ~/usd
+# Then configure with:
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+  -DANACAPA_ENABLE_USD=ON -DUSD_ROOT=~/usd \
+  -DANACAPA_ENABLE_OIDN=ON \
   -DOpenImageDenoise_DIR=/opt/homebrew/lib/cmake/OpenImageDenoise-2.4.1
 cmake --build build --parallel
 
@@ -52,22 +62,27 @@ cd build && ctest --output-on-failure
 
 ```bash
 # Render the built-in Cornell box scene (BDPT, 64 spp)
-./build/anacapa -o out.exr
+./build/anacapa -o images/render.exr
+
+# Load a USD scene file
+DYLD_LIBRARY_PATH=~/usd/lib \
+./build/anacapa --scene scenes/cornell_box.usda -o images/render.exr
 
 # Render with denoising
-./build/anacapa -o out.exr --denoise
+./build/anacapa --scene scenes/cornell_box.usda -o images/render.exr --denoise
 
 # Render with denoising + write albedo and normals layers to the EXR
-./build/anacapa -o out.exr --denoise --write-aovs
+./build/anacapa --scene scenes/cornell_box.usda -o images/render.exr --denoise --write-aovs
 
 # Full options
 ./build/anacapa \
+  --scene      scenes/cornell_box.usda \
   --integrator bdpt \
-  --width  800      \
-  --height 800      \
-  --spp    256      \
-  --depth  8        \
-  --output render.exr \
+  --width      800  \
+  --height     800  \
+  --spp        256  \
+  --depth      8    \
+  --output     images/render.exr \
   --denoise         \
   --write-aovs
 
@@ -104,6 +119,23 @@ For interactive layer switching use one of these free viewers:
 - **[mrViewer](https://mrviewer.sourceforge.io)** — macOS/Linux/Windows, designed for VFX
 - **[DJV](https://darbyjohnston.github.io/DJV/)** — cross-platform, lightweight
 
+## Scene Format
+
+Scenes are authored in OpenUSD (`.usda` text or `.usdc` binary). The loader supports:
+
+| USD Prim | Anacapa |
+|---|---|
+| `UsdGeomMesh` | Triangulated mesh, world-space baked |
+| `UsdShadeMaterial` + `UsdPreviewSurface` | `LambertianMaterial` or `EmissiveMaterial` |
+| `UsdLuxRectLight` | `AreaLight` |
+| `UsdLuxSphereLight` | `AreaLight` (approximated) |
+| `UsdGeomCamera` | Pinhole camera (focal length + aperture → FOV) |
+
+Material bindings require `prepend apiSchemas = ["MaterialBindingAPI"]` on each mesh prim.
+All mesh positions and normals are baked into world space at load time.
+
+The built-in scene is at [scenes/cornell_box.usda](scenes/cornell_box.usda).
+
 ## Architecture
 
 ```
@@ -114,6 +146,7 @@ include/anacapa/
   sampling/     ISampler, SamplerState
   film/         Film, TileBuffer, DenoiseOptions
   integrator/   IIntegrator, Camera, SceneView
+  scene/        SceneLoader (LoadedScene)
 
 src/
   accel/        BVHBackend (custom SAH BVH)
@@ -123,10 +156,13 @@ src/
                 LightSampler (Vose alias table), MISWeight
   film/         Film (atomic accumulation, OIDN denoising, multi-layer EXR)
   render/       ThreadPool, RenderSession
-  scene/usd/    USD scene loader (Phase 3)
+  scene/usd/    USDLoader (Phase 4)
+
+scenes/
+  cornell_box.usda   built-in Cornell box reference scene
 ```
 
-All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable zero-copy migration to GPU backends in Phase 5.
+All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable zero-copy migration to GPU backends in Phase 6.
 
 ## Roadmap
 
@@ -134,8 +170,8 @@ All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable
 |---|---|---|
 | 1 | Complete | CPU path tracer, custom BVH, Halton sampler, EXR output |
 | 2 | Complete | Bidirectional path tracing with MIS, alias-table light sampler |
-| 3 | Complete | Intel OIDN, albedo/normal AOVs, multi-layer EXR |
-| 4 | Planned | OpenUSD scene loading (geometry, materials, lights, camera) |
+| 3 | Complete | Intel OIDN denoising, albedo/normal AOVs, multi-layer EXR |
+| 4 | Complete | OpenUSD scene loading (geometry, materials, lights, camera) |
 | 5 | Planned | MaterialX `standard_surface`, OSL shading, HDRI dome lights |
 | 6 | Planned | Metal backend (Apple Silicon), CUDA+OptiX backend (NVIDIA) |
 
