@@ -6,7 +6,7 @@ CXX_DEFINES =
 
 CXX_INCLUDES = -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/include -isystem /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest
 
-CXX_FLAGSarm64 = -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk  -DGTEST_HAS_PTHREAD=1  
+CXX_FLAGSarm64 = -O2 -g -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk  -DGTEST_HAS_PTHREAD=1  
 
-CXX_FLAGS = -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk  -DGTEST_HAS_PTHREAD=1  
+CXX_FLAGS = -O2 -g -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk  -DGTEST_HAS_PTHREAD=1  
 

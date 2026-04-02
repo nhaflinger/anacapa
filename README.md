@@ -13,7 +13,9 @@ Named after Anacapa Island, part of California's Channel Islands.
 - **Custom thread pool** — tile-parallel rendering with `std::thread`, no external threading library
 - **Scrambled Halton sampler** — low-discrepancy sampling up to 128 dimensions
 - **Multi-layer EXR output** — beauty, denoised, albedo, and normals layers via OpenImageIO
-- **OSL shading language** — Phase 5, optional
+- **GGX multi-layer BSDF** — MaterialX `standard_surface` (metallic conductor, dielectric specular, Lambertian diffuse, clearcoat)
+- **HDRI dome lights** — equirectangular EXR/HDR with 2D piecewise-constant importance sampling
+- **OSL shading language** — optional (`-DANACAPA_ENABLE_OSL=ON`)
 - **GPU backends** — Metal (Apple Silicon) and CUDA+OptiX (NVIDIA) planned for Phase 6
 - **Zero compiled third-party dependencies** in the core renderer
 
@@ -24,7 +26,7 @@ Named after Anacapa Island, part of California's Channel Islands.
 | OpenImageIO | Yes | `brew install openimageio` |
 | OpenUSD | No (`-DANACAPA_ENABLE_USD=ON`) | Build from source — see below |
 | OpenImageDenoise | No (`-DANACAPA_ENABLE_OIDN=ON`) | `brew install open-image-denoise` |
-| Open Shading Language | No (`-DANACAPA_ENABLE_OSL=ON`) | `brew install open-shading-language` |
+| Open Shading Language | No (`-DANACAPA_ENABLE_OSL=ON`) | `brew install open-shading-language` (if available) |
 
 Header-only dependencies (fetched automatically by CMake): spdlog, CLI11, GoogleTest.
 
@@ -128,12 +130,15 @@ Scenes are authored in OpenUSD (`.usda` text, `.usdc` binary, or `.usd` auto-det
 |---|---|
 | `UsdGeomMesh` | Triangulated mesh, world-space baked |
 | `UsdShadeMaterial` + `UsdPreviewSurface` | `LambertianMaterial` or `EmissiveMaterial` |
+| `primvars:displayColor` | `LambertianMaterial` (Blender USD export fallback) |
 | `UsdLuxRectLight` | `AreaLight` |
 | `UsdLuxSphereLight` | `AreaLight` (approximated) |
+| `UsdLuxDistantLight` | `DirectionalLight` |
+| `UsdLuxDomeLight` | `DomeLight` (equirectangular HDRI) |
 | `UsdGeomCamera` | Pinhole camera (focal length + aperture → FOV) |
 | `UsdRenderSettings` | Declares the render camera via `.camera` relationship |
 
-Material bindings require `prepend apiSchemas = ["MaterialBindingAPI"]` on each mesh prim.
+When no `UsdShadeMaterial` binding is present the loader falls back to `primvars:displayColor`, which is the default export path from Blender.
 All mesh positions and normals are baked into world space at load time.
 
 ### Camera selection
@@ -178,7 +183,8 @@ src/
                 LightSampler (Vose alias table), MISWeight
   film/         Film (atomic accumulation, OIDN denoising, multi-layer EXR)
   render/       ThreadPool, RenderSession
-  scene/usd/    USDLoader (Phase 4)
+  shading/lights/ AreaLight, DirectionalLight, DomeLight (HDRI)
+  scene/usd/    USDLoader (geometry, lights, materials, camera)
 
 scenes/
   cornell_box.usda   built-in Cornell box reference scene
@@ -194,7 +200,7 @@ All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable
 | 2 | Complete | Bidirectional path tracing with MIS, alias-table light sampler |
 | 3 | Complete | Intel OIDN denoising, albedo/normal AOVs, multi-layer EXR |
 | 4 | Complete | OpenUSD scene loading (geometry, materials, lights, camera) |
-| 5 | Planned | MaterialX `standard_surface`, OSL shading, HDRI dome lights |
+| 5 | Complete | GGX `standard_surface` BSDF, HDRI dome lights, OSL adapter, `primvars:displayColor` support |
 | 6 | Planned | Metal backend (Apple Silicon), CUDA+OptiX backend (NVIDIA) |
 
 ## License

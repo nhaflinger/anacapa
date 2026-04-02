@@ -6,6 +6,7 @@
 #include "../shading/Lambertian.h"
 #include "../shading/lights/AreaLight.h"
 #include "../shading/lights/DirectionalLight.h"
+#include "../shading/lights/DomeLight.h"
 
 #ifdef ANACAPA_ENABLE_USD
 #  include "../scene/usd/USDLoader.h"
@@ -278,6 +279,25 @@ void RenderSession::scheduleTiles(std::vector<TileRequest>& tiles) const {
 // ---------------------------------------------------------------------------
 void RenderSession::render() {
     buildAccelStructure();
+
+    // DomeLight (HDRI environment) — set up before prepare() so the integrator
+    // can see envLight during subpath tracing.
+    if (!m_settings.envPath.empty()) {
+        BBox3f bounds = computeSceneBounds(m_geomPool);
+        float radius  = bounds.valid()
+            ? bounds.diagonal().length() * 0.5f * 2.f : 10.f;
+        Vec3f center  = bounds.valid() ? bounds.centroid() : Vec3f{};
+
+        auto dome = std::make_unique<DomeLight>(
+            m_settings.envPath,
+            m_settings.envIntensity,
+            radius, center);
+        m_scene.envLight = dome.get();
+        m_scene.lights.push_back(dome.get());
+        m_lights.push_back(std::move(dome));
+        spdlog::info("DomeLight: '{}' intensity={:.2f}",
+                     m_settings.envPath, m_settings.envIntensity);
+    }
 
     m_film        = std::make_unique<Film>(m_settings.imageWidth,
                                            m_settings.imageHeight);

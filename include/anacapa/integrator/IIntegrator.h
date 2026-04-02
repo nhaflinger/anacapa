@@ -69,8 +69,9 @@ struct SceneView {
     const IAccelerationStructure*        accel    = nullptr;
     std::vector<const IMaterial*>        materials;   // indexed by meshID
     std::vector<const ILight*>           lights;
-    Vec3f                                envRadiance = {};  // Background color
-    std::optional<Camera>                camera;            // set by scene loader
+    const ILight*                        envLight = nullptr;  // Infinite/dome light (nullptr = constant)
+    Vec3f                                envRadiance = {};    // Constant background (used if envLight==nullptr)
+    std::optional<Camera>                camera;              // set by scene loader
 };
 
 // ---------------------------------------------------------------------------

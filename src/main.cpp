@@ -32,6 +32,11 @@ int main(int argc, char** argv) {
     app.add_option("--camera", settings.cameraPath,
                    "USD prim path of camera to use (e.g. /World/RenderCam). "
                    "If omitted, uses UsdRenderSettings.camera or first camera found.");
+    app.add_option("--env", settings.envPath,
+                   "Equirectangular HDRI environment map (EXR or HDR)");
+    app.add_option("--env-intensity", settings.envIntensity,
+                   "Intensity multiplier for the environment map")
+       ->default_val(1.f);
 
     app.add_flag("--denoise",    settings.denoise.enabled,
                  "Run Intel OIDN denoiser on the beauty buffer after rendering");

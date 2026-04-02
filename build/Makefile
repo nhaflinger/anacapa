@@ -454,6 +454,30 @@ src/scene/usd/USDLoader.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.s
 .PHONY : src/scene/usd/USDLoader.cpp.s
 
+src/shading/lights/DomeLight.o: src/shading/lights/DomeLight.cpp.o
+.PHONY : src/shading/lights/DomeLight.o
+
+# target to build an object file
+src/shading/lights/DomeLight.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/shading/lights/DomeLight.cpp.o
+.PHONY : src/shading/lights/DomeLight.cpp.o
+
+src/shading/lights/DomeLight.i: src/shading/lights/DomeLight.cpp.i
+.PHONY : src/shading/lights/DomeLight.i
+
+# target to preprocess a source file
+src/shading/lights/DomeLight.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/shading/lights/DomeLight.cpp.i
+.PHONY : src/shading/lights/DomeLight.cpp.i
+
+src/shading/lights/DomeLight.s: src/shading/lights/DomeLight.cpp.s
+.PHONY : src/shading/lights/DomeLight.s
+
+# target to generate assembly for a file
+src/shading/lights/DomeLight.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/shading/lights/DomeLight.cpp.s
+.PHONY : src/shading/lights/DomeLight.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -498,6 +522,9 @@ help:
 	@echo "... src/scene/usd/USDLoader.o"
 	@echo "... src/scene/usd/USDLoader.i"
 	@echo "... src/scene/usd/USDLoader.s"
+	@echo "... src/shading/lights/DomeLight.o"
+	@echo "... src/shading/lights/DomeLight.i"
+	@echo "... src/shading/lights/DomeLight.s"
 .PHONY : help
 
 

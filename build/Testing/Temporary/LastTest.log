@@ -1,10 +1,10 @@
-Start testing: Mar 29 17:45 PDT
+Start testing: Apr 02 16:22 PDT
 ----------------------------------------------------------
-1/31 Testing: ArenaAllocator.BasicAlloc
-1/31 Test: ArenaAllocator.BasicAlloc
+1/42 Testing: ArenaAllocator.BasicAlloc
+1/42 Test: ArenaAllocator.BasicAlloc
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=ArenaAllocator.BasicAlloc" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"ArenaAllocator.BasicAlloc" start time: Mar 29 17:45 PDT
+"ArenaAllocator.BasicAlloc" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -23,15 +23,15 @@ Note: Google Test filter = ArenaAllocator.BasicAlloc
 Test time =   0.11 sec
 ----------------------------------------------------------
 Test Passed.
-"ArenaAllocator.BasicAlloc" end time: Mar 29 17:45 PDT
+"ArenaAllocator.BasicAlloc" end time: Apr 02 16:22 PDT
 "ArenaAllocator.BasicAlloc" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-2/31 Testing: ArenaAllocator.AlignmentRespected
-2/31 Test: ArenaAllocator.AlignmentRespected
+2/42 Testing: ArenaAllocator.AlignmentRespected
+2/42 Test: ArenaAllocator.AlignmentRespected
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=ArenaAllocator.AlignmentRespected" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"ArenaAllocator.AlignmentRespected" start time: Mar 29 17:45 PDT
+"ArenaAllocator.AlignmentRespected" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -47,18 +47,18 @@ Note: Google Test filter = ArenaAllocator.AlignmentRespected
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.10 sec
+Test time =   0.11 sec
 ----------------------------------------------------------
 Test Passed.
-"ArenaAllocator.AlignmentRespected" end time: Mar 29 17:45 PDT
+"ArenaAllocator.AlignmentRespected" end time: Apr 02 16:22 PDT
 "ArenaAllocator.AlignmentRespected" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-3/31 Testing: ArenaAllocator.ResetReclaims
-3/31 Test: ArenaAllocator.ResetReclaims
+3/42 Testing: ArenaAllocator.ResetReclaims
+3/42 Test: ArenaAllocator.ResetReclaims
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=ArenaAllocator.ResetReclaims" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"ArenaAllocator.ResetReclaims" start time: Mar 29 17:45 PDT
+"ArenaAllocator.ResetReclaims" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -74,18 +74,18 @@ Note: Google Test filter = ArenaAllocator.ResetReclaims
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.10 sec
+Test time =   0.11 sec
 ----------------------------------------------------------
 Test Passed.
-"ArenaAllocator.ResetReclaims" end time: Mar 29 17:45 PDT
+"ArenaAllocator.ResetReclaims" end time: Apr 02 16:22 PDT
 "ArenaAllocator.ResetReclaims" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-4/31 Testing: ArenaAllocator.WatermarkRewind
-4/31 Test: ArenaAllocator.WatermarkRewind
+4/42 Testing: ArenaAllocator.WatermarkRewind
+4/42 Test: ArenaAllocator.WatermarkRewind
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=ArenaAllocator.WatermarkRewind" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"ArenaAllocator.WatermarkRewind" start time: Mar 29 17:45 PDT
+"ArenaAllocator.WatermarkRewind" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -104,15 +104,15 @@ Note: Google Test filter = ArenaAllocator.WatermarkRewind
 Test time =   0.11 sec
 ----------------------------------------------------------
 Test Passed.
-"ArenaAllocator.WatermarkRewind" end time: Mar 29 17:45 PDT
+"ArenaAllocator.WatermarkRewind" end time: Apr 02 16:22 PDT
 "ArenaAllocator.WatermarkRewind" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-5/31 Testing: ArenaAllocator.ExhaustionReturnsNull
-5/31 Test: ArenaAllocator.ExhaustionReturnsNull
+5/42 Testing: ArenaAllocator.ExhaustionReturnsNull
+5/42 Test: ArenaAllocator.ExhaustionReturnsNull
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=ArenaAllocator.ExhaustionReturnsNull" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"ArenaAllocator.ExhaustionReturnsNull" start time: Mar 29 17:45 PDT
+"ArenaAllocator.ExhaustionReturnsNull" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -131,15 +131,15 @@ Note: Google Test filter = ArenaAllocator.ExhaustionReturnsNull
 Test time =   0.11 sec
 ----------------------------------------------------------
 Test Passed.
-"ArenaAllocator.ExhaustionReturnsNull" end time: Mar 29 17:45 PDT
+"ArenaAllocator.ExhaustionReturnsNull" end time: Apr 02 16:22 PDT
 "ArenaAllocator.ExhaustionReturnsNull" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-6/31 Testing: ArenaAllocator.Create
-6/31 Test: ArenaAllocator.Create
+6/42 Testing: ArenaAllocator.Create
+6/42 Test: ArenaAllocator.Create
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=ArenaAllocator.Create" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"ArenaAllocator.Create" start time: Mar 29 17:45 PDT
+"ArenaAllocator.Create" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -158,15 +158,15 @@ Note: Google Test filter = ArenaAllocator.Create
 Test time =   0.11 sec
 ----------------------------------------------------------
 Test Passed.
-"ArenaAllocator.Create" end time: Mar 29 17:45 PDT
+"ArenaAllocator.Create" end time: Apr 02 16:22 PDT
 "ArenaAllocator.Create" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-7/31 Testing: PathVertexBuffer.ConstructAndReset
-7/31 Test: PathVertexBuffer.ConstructAndReset
+7/42 Testing: PathVertexBuffer.ConstructAndReset
+7/42 Test: PathVertexBuffer.ConstructAndReset
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=PathVertexBuffer.ConstructAndReset" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"PathVertexBuffer.ConstructAndReset" start time: Mar 29 17:45 PDT
+"PathVertexBuffer.ConstructAndReset" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -182,18 +182,18 @@ Note: Google Test filter = PathVertexBuffer.ConstructAndReset
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"PathVertexBuffer.ConstructAndReset" end time: Mar 29 17:45 PDT
+"PathVertexBuffer.ConstructAndReset" end time: Apr 02 16:22 PDT
 "PathVertexBuffer.ConstructAndReset" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-8/31 Testing: PathVertexBuffer.FlagsRoundtrip
-8/31 Test: PathVertexBuffer.FlagsRoundtrip
+8/42 Testing: PathVertexBuffer.FlagsRoundtrip
+8/42 Test: PathVertexBuffer.FlagsRoundtrip
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=PathVertexBuffer.FlagsRoundtrip" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"PathVertexBuffer.FlagsRoundtrip" start time: Mar 29 17:45 PDT
+"PathVertexBuffer.FlagsRoundtrip" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -209,18 +209,18 @@ Note: Google Test filter = PathVertexBuffer.FlagsRoundtrip
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.10 sec
+Test time =   0.11 sec
 ----------------------------------------------------------
 Test Passed.
-"PathVertexBuffer.FlagsRoundtrip" end time: Mar 29 17:45 PDT
+"PathVertexBuffer.FlagsRoundtrip" end time: Apr 02 16:22 PDT
 "PathVertexBuffer.FlagsRoundtrip" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-9/31 Testing: PathVertexBuffer.DeviceViewPointers
-9/31 Test: PathVertexBuffer.DeviceViewPointers
+9/42 Testing: PathVertexBuffer.DeviceViewPointers
+9/42 Test: PathVertexBuffer.DeviceViewPointers
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=PathVertexBuffer.DeviceViewPointers" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"PathVertexBuffer.DeviceViewPointers" start time: Mar 29 17:45 PDT
+"PathVertexBuffer.DeviceViewPointers" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -236,18 +236,18 @@ Note: Google Test filter = PathVertexBuffer.DeviceViewPointers
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"PathVertexBuffer.DeviceViewPointers" end time: Mar 29 17:45 PDT
+"PathVertexBuffer.DeviceViewPointers" end time: Apr 02 16:22 PDT
 "PathVertexBuffer.DeviceViewPointers" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-10/31 Testing: PathVertex.ConvertToAreaOrthogonal
-10/31 Test: PathVertex.ConvertToAreaOrthogonal
+10/42 Testing: PathVertex.ConvertToAreaOrthogonal
+10/42 Test: PathVertex.ConvertToAreaOrthogonal
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=PathVertex.ConvertToAreaOrthogonal" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"PathVertex.ConvertToAreaOrthogonal" start time: Mar 29 17:45 PDT
+"PathVertex.ConvertToAreaOrthogonal" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -263,18 +263,18 @@ Note: Google Test filter = PathVertex.ConvertToAreaOrthogonal
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.12 sec
 ----------------------------------------------------------
 Test Passed.
-"PathVertex.ConvertToAreaOrthogonal" end time: Mar 29 17:45 PDT
+"PathVertex.ConvertToAreaOrthogonal" end time: Apr 02 16:22 PDT
 "PathVertex.ConvertToAreaOrthogonal" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-11/31 Testing: PathVertex.ConvertToAreaGrazingAngle
-11/31 Test: PathVertex.ConvertToAreaGrazingAngle
+11/42 Testing: PathVertex.ConvertToAreaGrazingAngle
+11/42 Test: PathVertex.ConvertToAreaGrazingAngle
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=PathVertex.ConvertToAreaGrazingAngle" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"PathVertex.ConvertToAreaGrazingAngle" start time: Mar 29 17:45 PDT
+"PathVertex.ConvertToAreaGrazingAngle" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -290,18 +290,18 @@ Note: Google Test filter = PathVertex.ConvertToAreaGrazingAngle
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.10 sec
+Test time =   0.11 sec
 ----------------------------------------------------------
 Test Passed.
-"PathVertex.ConvertToAreaGrazingAngle" end time: Mar 29 17:45 PDT
+"PathVertex.ConvertToAreaGrazingAngle" end time: Apr 02 16:22 PDT
 "PathVertex.ConvertToAreaGrazingAngle" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-12/31 Testing: MISWeight.SingleStrategyIsOne
-12/31 Test: MISWeight.SingleStrategyIsOne
+12/42 Testing: MISWeight.SingleStrategyIsOne
+12/42 Test: MISWeight.SingleStrategyIsOne
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=MISWeight.SingleStrategyIsOne" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"MISWeight.SingleStrategyIsOne" start time: Mar 29 17:45 PDT
+"MISWeight.SingleStrategyIsOne" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -320,15 +320,15 @@ Note: Google Test filter = MISWeight.SingleStrategyIsOne
 Test time =   0.11 sec
 ----------------------------------------------------------
 Test Passed.
-"MISWeight.SingleStrategyIsOne" end time: Mar 29 17:45 PDT
+"MISWeight.SingleStrategyIsOne" end time: Apr 02 16:22 PDT
 "MISWeight.SingleStrategyIsOne" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-13/31 Testing: MISWeight.WeightInRange
-13/31 Test: MISWeight.WeightInRange
+13/42 Testing: MISWeight.WeightInRange
+13/42 Test: MISWeight.WeightInRange
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=MISWeight.WeightInRange" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"MISWeight.WeightInRange" start time: Mar 29 17:45 PDT
+"MISWeight.WeightInRange" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -344,18 +344,18 @@ Note: Google Test filter = MISWeight.WeightInRange
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"MISWeight.WeightInRange" end time: Mar 29 17:45 PDT
+"MISWeight.WeightInRange" end time: Apr 02 16:22 PDT
 "MISWeight.WeightInRange" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-14/31 Testing: MISWeight.DeltaVertexZeroWeight
-14/31 Test: MISWeight.DeltaVertexZeroWeight
+14/42 Testing: MISWeight.DeltaVertexZeroWeight
+14/42 Test: MISWeight.DeltaVertexZeroWeight
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=MISWeight.DeltaVertexZeroWeight" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"MISWeight.DeltaVertexZeroWeight" start time: Mar 29 17:45 PDT
+"MISWeight.DeltaVertexZeroWeight" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -371,18 +371,18 @@ Note: Google Test filter = MISWeight.DeltaVertexZeroWeight
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"MISWeight.DeltaVertexZeroWeight" end time: Mar 29 17:45 PDT
+"MISWeight.DeltaVertexZeroWeight" end time: Apr 02 16:22 PDT
 "MISWeight.DeltaVertexZeroWeight" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-15/31 Testing: LightSampler.SelectionProbabilities
-15/31 Test: LightSampler.SelectionProbabilities
+15/42 Testing: LightSampler.SelectionProbabilities
+15/42 Test: LightSampler.SelectionProbabilities
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=LightSampler.SelectionProbabilities" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"LightSampler.SelectionProbabilities" start time: Mar 29 17:45 PDT
+"LightSampler.SelectionProbabilities" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -398,18 +398,18 @@ Note: Google Test filter = LightSampler.SelectionProbabilities
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"LightSampler.SelectionProbabilities" end time: Mar 29 17:45 PDT
+"LightSampler.SelectionProbabilities" end time: Apr 02 16:22 PDT
 "LightSampler.SelectionProbabilities" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-16/31 Testing: LightSampler.SelectionConverges
-16/31 Test: LightSampler.SelectionConverges
+16/42 Testing: LightSampler.SelectionConverges
+16/42 Test: LightSampler.SelectionConverges
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=LightSampler.SelectionConverges" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"LightSampler.SelectionConverges" start time: Mar 29 17:45 PDT
+"LightSampler.SelectionConverges" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -425,18 +425,18 @@ Note: Google Test filter = LightSampler.SelectionConverges
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"LightSampler.SelectionConverges" end time: Mar 29 17:45 PDT
+"LightSampler.SelectionConverges" end time: Apr 02 16:22 PDT
 "LightSampler.SelectionConverges" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-17/31 Testing: BVH.SingleTriangleHit
-17/31 Test: BVH.SingleTriangleHit
+17/42 Testing: BVH.SingleTriangleHit
+17/42 Test: BVH.SingleTriangleHit
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=BVH.SingleTriangleHit" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"BVH.SingleTriangleHit" start time: Mar 29 17:45 PDT
+"BVH.SingleTriangleHit" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -452,18 +452,18 @@ Note: Google Test filter = BVH.SingleTriangleHit
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"BVH.SingleTriangleHit" end time: Mar 29 17:46 PDT
+"BVH.SingleTriangleHit" end time: Apr 02 16:22 PDT
 "BVH.SingleTriangleHit" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-18/31 Testing: BVH.SingleTriangleMiss
-18/31 Test: BVH.SingleTriangleMiss
+18/42 Testing: BVH.SingleTriangleMiss
+18/42 Test: BVH.SingleTriangleMiss
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=BVH.SingleTriangleMiss" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"BVH.SingleTriangleMiss" start time: Mar 29 17:46 PDT
+"BVH.SingleTriangleMiss" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -482,15 +482,15 @@ Note: Google Test filter = BVH.SingleTriangleMiss
 Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"BVH.SingleTriangleMiss" end time: Mar 29 17:46 PDT
+"BVH.SingleTriangleMiss" end time: Apr 02 16:22 PDT
 "BVH.SingleTriangleMiss" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-19/31 Testing: BVH.OcclusionTest
-19/31 Test: BVH.OcclusionTest
+19/42 Testing: BVH.OcclusionTest
+19/42 Test: BVH.OcclusionTest
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=BVH.OcclusionTest" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"BVH.OcclusionTest" start time: Mar 29 17:46 PDT
+"BVH.OcclusionTest" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -506,18 +506,18 @@ Note: Google Test filter = BVH.OcclusionTest
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"BVH.OcclusionTest" end time: Mar 29 17:46 PDT
+"BVH.OcclusionTest" end time: Apr 02 16:22 PDT
 "BVH.OcclusionTest" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-20/31 Testing: BVH.MultipleTriangles
-20/31 Test: BVH.MultipleTriangles
+20/42 Testing: BVH.MultipleTriangles
+20/42 Test: BVH.MultipleTriangles
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=BVH.MultipleTriangles" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"BVH.MultipleTriangles" start time: Mar 29 17:46 PDT
+"BVH.MultipleTriangles" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -533,18 +533,315 @@ Note: Google Test filter = BVH.MultipleTriangles
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"BVH.MultipleTriangles" end time: Mar 29 17:46 PDT
+"BVH.MultipleTriangles" end time: Apr 02 16:22 PDT
 "BVH.MultipleTriangles" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-21/31 Testing: PCGRng.ValuesInRange
-21/31 Test: PCGRng.ValuesInRange
+21/42 Testing: GGX.NDF_IntegralApproximatelyOne
+21/42 Test: GGX.NDF_IntegralApproximatelyOne
+Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=GGX.NDF_IntegralApproximatelyOne" "--gtest_also_run_disabled_tests"
+Directory: /Users/douglascreel/dev/anacapa/build/tests
+"GGX.NDF_IntegralApproximatelyOne" start time: Apr 02 16:22 PDT
+Output:
+----------------------------------------------------------
+Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
+Note: Google Test filter = GGX.NDF_IntegralApproximatelyOne
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from GGX
+[ RUN      ] GGX.NDF_IntegralApproximatelyOne
+[       OK ] GGX.NDF_IntegralApproximatelyOne (0 ms)
+[----------] 1 test from GGX (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"GGX.NDF_IntegralApproximatelyOne" end time: Apr 02 16:22 PDT
+"GGX.NDF_IntegralApproximatelyOne" time elapsed: 00:00:00
+----------------------------------------------------------
+
+22/42 Testing: StandardSurface.DiffuseEnergyConservation
+22/42 Test: StandardSurface.DiffuseEnergyConservation
+Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=StandardSurface.DiffuseEnergyConservation" "--gtest_also_run_disabled_tests"
+Directory: /Users/douglascreel/dev/anacapa/build/tests
+"StandardSurface.DiffuseEnergyConservation" start time: Apr 02 16:22 PDT
+Output:
+----------------------------------------------------------
+Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
+Note: Google Test filter = StandardSurface.DiffuseEnergyConservation
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StandardSurface
+[ RUN      ] StandardSurface.DiffuseEnergyConservation
+[       OK ] StandardSurface.DiffuseEnergyConservation (0 ms)
+[----------] 1 test from StandardSurface (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"StandardSurface.DiffuseEnergyConservation" end time: Apr 02 16:22 PDT
+"StandardSurface.DiffuseEnergyConservation" time elapsed: 00:00:00
+----------------------------------------------------------
+
+23/42 Testing: StandardSurface.SampleReturnsValid
+23/42 Test: StandardSurface.SampleReturnsValid
+Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=StandardSurface.SampleReturnsValid" "--gtest_also_run_disabled_tests"
+Directory: /Users/douglascreel/dev/anacapa/build/tests
+"StandardSurface.SampleReturnsValid" start time: Apr 02 16:22 PDT
+Output:
+----------------------------------------------------------
+Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
+Note: Google Test filter = StandardSurface.SampleReturnsValid
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StandardSurface
+[ RUN      ] StandardSurface.SampleReturnsValid
+[       OK ] StandardSurface.SampleReturnsValid (0 ms)
+[----------] 1 test from StandardSurface (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"StandardSurface.SampleReturnsValid" end time: Apr 02 16:22 PDT
+"StandardSurface.SampleReturnsValid" time elapsed: 00:00:00
+----------------------------------------------------------
+
+24/42 Testing: StandardSurface.Emission
+24/42 Test: StandardSurface.Emission
+Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=StandardSurface.Emission" "--gtest_also_run_disabled_tests"
+Directory: /Users/douglascreel/dev/anacapa/build/tests
+"StandardSurface.Emission" start time: Apr 02 16:22 PDT
+Output:
+----------------------------------------------------------
+Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
+Note: Google Test filter = StandardSurface.Emission
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StandardSurface
+[ RUN      ] StandardSurface.Emission
+[       OK ] StandardSurface.Emission (0 ms)
+[----------] 1 test from StandardSurface (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"StandardSurface.Emission" end time: Apr 02 16:22 PDT
+"StandardSurface.Emission" time elapsed: 00:00:00
+----------------------------------------------------------
+
+25/42 Testing: StandardSurface.DiffusePdfSymmetry
+25/42 Test: StandardSurface.DiffusePdfSymmetry
+Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=StandardSurface.DiffusePdfSymmetry" "--gtest_also_run_disabled_tests"
+Directory: /Users/douglascreel/dev/anacapa/build/tests
+"StandardSurface.DiffusePdfSymmetry" start time: Apr 02 16:22 PDT
+Output:
+----------------------------------------------------------
+Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
+Note: Google Test filter = StandardSurface.DiffusePdfSymmetry
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from StandardSurface
+[ RUN      ] StandardSurface.DiffusePdfSymmetry
+[       OK ] StandardSurface.DiffusePdfSymmetry (0 ms)
+[----------] 1 test from StandardSurface (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"StandardSurface.DiffusePdfSymmetry" end time: Apr 02 16:22 PDT
+"StandardSurface.DiffusePdfSymmetry" time elapsed: 00:00:00
+----------------------------------------------------------
+
+26/42 Testing: Distribution1D.IntegralAndSample
+26/42 Test: Distribution1D.IntegralAndSample
+Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=Distribution1D.IntegralAndSample" "--gtest_also_run_disabled_tests"
+Directory: /Users/douglascreel/dev/anacapa/build/tests
+"Distribution1D.IntegralAndSample" start time: Apr 02 16:22 PDT
+Output:
+----------------------------------------------------------
+Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
+Note: Google Test filter = Distribution1D.IntegralAndSample
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from Distribution1D
+[ RUN      ] Distribution1D.IntegralAndSample
+[       OK ] Distribution1D.IntegralAndSample (0 ms)
+[----------] 1 test from Distribution1D (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"Distribution1D.IntegralAndSample" end time: Apr 02 16:22 PDT
+"Distribution1D.IntegralAndSample" time elapsed: 00:00:00
+----------------------------------------------------------
+
+27/42 Testing: Distribution1D.SampleConvergesToExpected
+27/42 Test: Distribution1D.SampleConvergesToExpected
+Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=Distribution1D.SampleConvergesToExpected" "--gtest_also_run_disabled_tests"
+Directory: /Users/douglascreel/dev/anacapa/build/tests
+"Distribution1D.SampleConvergesToExpected" start time: Apr 02 16:22 PDT
+Output:
+----------------------------------------------------------
+Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
+Note: Google Test filter = Distribution1D.SampleConvergesToExpected
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from Distribution1D
+[ RUN      ] Distribution1D.SampleConvergesToExpected
+[       OK ] Distribution1D.SampleConvergesToExpected (0 ms)
+[----------] 1 test from Distribution1D (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"Distribution1D.SampleConvergesToExpected" end time: Apr 02 16:22 PDT
+"Distribution1D.SampleConvergesToExpected" time elapsed: 00:00:00
+----------------------------------------------------------
+
+28/42 Testing: DomeLight.ConstantEnvironmentPdfPositive
+28/42 Test: DomeLight.ConstantEnvironmentPdfPositive
+Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=DomeLight.ConstantEnvironmentPdfPositive" "--gtest_also_run_disabled_tests"
+Directory: /Users/douglascreel/dev/anacapa/build/tests
+"DomeLight.ConstantEnvironmentPdfPositive" start time: Apr 02 16:22 PDT
+Output:
+----------------------------------------------------------
+Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
+Note: Google Test filter = DomeLight.ConstantEnvironmentPdfPositive
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from DomeLight
+[ RUN      ] DomeLight.ConstantEnvironmentPdfPositive
+[       OK ] DomeLight.ConstantEnvironmentPdfPositive (0 ms)
+[----------] 1 test from DomeLight (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.11 sec
+----------------------------------------------------------
+Test Passed.
+"DomeLight.ConstantEnvironmentPdfPositive" end time: Apr 02 16:22 PDT
+"DomeLight.ConstantEnvironmentPdfPositive" time elapsed: 00:00:00
+----------------------------------------------------------
+
+29/42 Testing: DomeLight.PdfMatchesExpected
+29/42 Test: DomeLight.PdfMatchesExpected
+Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=DomeLight.PdfMatchesExpected" "--gtest_also_run_disabled_tests"
+Directory: /Users/douglascreel/dev/anacapa/build/tests
+"DomeLight.PdfMatchesExpected" start time: Apr 02 16:22 PDT
+Output:
+----------------------------------------------------------
+Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
+Note: Google Test filter = DomeLight.PdfMatchesExpected
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from DomeLight
+[ RUN      ] DomeLight.PdfMatchesExpected
+[       OK ] DomeLight.PdfMatchesExpected (0 ms)
+[----------] 1 test from DomeLight (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"DomeLight.PdfMatchesExpected" end time: Apr 02 16:22 PDT
+"DomeLight.PdfMatchesExpected" time elapsed: 00:00:00
+----------------------------------------------------------
+
+30/42 Testing: DomeLight.SampleLeIsValid
+30/42 Test: DomeLight.SampleLeIsValid
+Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=DomeLight.SampleLeIsValid" "--gtest_also_run_disabled_tests"
+Directory: /Users/douglascreel/dev/anacapa/build/tests
+"DomeLight.SampleLeIsValid" start time: Apr 02 16:22 PDT
+Output:
+----------------------------------------------------------
+Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
+Note: Google Test filter = DomeLight.SampleLeIsValid
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from DomeLight
+[ RUN      ] DomeLight.SampleLeIsValid
+[       OK ] DomeLight.SampleLeIsValid (0 ms)
+[----------] 1 test from DomeLight (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"DomeLight.SampleLeIsValid" end time: Apr 02 16:22 PDT
+"DomeLight.SampleLeIsValid" time elapsed: 00:00:00
+----------------------------------------------------------
+
+31/42 Testing: DomeLight.LeReturnsMappedColor
+31/42 Test: DomeLight.LeReturnsMappedColor
+Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=DomeLight.LeReturnsMappedColor" "--gtest_also_run_disabled_tests"
+Directory: /Users/douglascreel/dev/anacapa/build/tests
+"DomeLight.LeReturnsMappedColor" start time: Apr 02 16:22 PDT
+Output:
+----------------------------------------------------------
+Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
+Note: Google Test filter = DomeLight.LeReturnsMappedColor
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from DomeLight
+[ RUN      ] DomeLight.LeReturnsMappedColor
+[       OK ] DomeLight.LeReturnsMappedColor (0 ms)
+[----------] 1 test from DomeLight (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"DomeLight.LeReturnsMappedColor" end time: Apr 02 16:22 PDT
+"DomeLight.LeReturnsMappedColor" time elapsed: 00:00:00
+----------------------------------------------------------
+
+32/42 Testing: PCGRng.ValuesInRange
+32/42 Test: PCGRng.ValuesInRange
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=PCGRng.ValuesInRange" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"PCGRng.ValuesInRange" start time: Mar 29 17:46 PDT
+"PCGRng.ValuesInRange" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -560,18 +857,18 @@ Note: Google Test filter = PCGRng.ValuesInRange
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"PCGRng.ValuesInRange" end time: Mar 29 17:46 PDT
+"PCGRng.ValuesInRange" end time: Apr 02 16:22 PDT
 "PCGRng.ValuesInRange" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-22/31 Testing: PCGRng.Reproducible
-22/31 Test: PCGRng.Reproducible
+33/42 Testing: PCGRng.Reproducible
+33/42 Test: PCGRng.Reproducible
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=PCGRng.Reproducible" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"PCGRng.Reproducible" start time: Mar 29 17:46 PDT
+"PCGRng.Reproducible" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -590,15 +887,15 @@ Note: Google Test filter = PCGRng.Reproducible
 Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"PCGRng.Reproducible" end time: Mar 29 17:46 PDT
+"PCGRng.Reproducible" end time: Apr 02 16:22 PDT
 "PCGRng.Reproducible" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-23/31 Testing: HaltonSampler.Uniformity1D
-23/31 Test: HaltonSampler.Uniformity1D
+34/42 Testing: HaltonSampler.Uniformity1D
+34/42 Test: HaltonSampler.Uniformity1D
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=HaltonSampler.Uniformity1D" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"HaltonSampler.Uniformity1D" start time: Mar 29 17:46 PDT
+"HaltonSampler.Uniformity1D" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -617,15 +914,15 @@ Note: Google Test filter = HaltonSampler.Uniformity1D
 Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"HaltonSampler.Uniformity1D" end time: Mar 29 17:46 PDT
+"HaltonSampler.Uniformity1D" end time: Apr 02 16:22 PDT
 "HaltonSampler.Uniformity1D" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-24/31 Testing: HaltonSampler.DifferentPixelsDiffer
-24/31 Test: HaltonSampler.DifferentPixelsDiffer
+35/42 Testing: HaltonSampler.DifferentPixelsDiffer
+35/42 Test: HaltonSampler.DifferentPixelsDiffer
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=HaltonSampler.DifferentPixelsDiffer" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"HaltonSampler.DifferentPixelsDiffer" start time: Mar 29 17:46 PDT
+"HaltonSampler.DifferentPixelsDiffer" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -641,18 +938,18 @@ Note: Google Test filter = HaltonSampler.DifferentPixelsDiffer
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"HaltonSampler.DifferentPixelsDiffer" end time: Mar 29 17:46 PDT
+"HaltonSampler.DifferentPixelsDiffer" end time: Apr 02 16:22 PDT
 "HaltonSampler.DifferentPixelsDiffer" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-25/31 Testing: Vec3f.BasicArithmetic
-25/31 Test: Vec3f.BasicArithmetic
+36/42 Testing: Vec3f.BasicArithmetic
+36/42 Test: Vec3f.BasicArithmetic
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=Vec3f.BasicArithmetic" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"Vec3f.BasicArithmetic" start time: Mar 29 17:46 PDT
+"Vec3f.BasicArithmetic" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -671,15 +968,15 @@ Note: Google Test filter = Vec3f.BasicArithmetic
 Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"Vec3f.BasicArithmetic" end time: Mar 29 17:46 PDT
+"Vec3f.BasicArithmetic" end time: Apr 02 16:22 PDT
 "Vec3f.BasicArithmetic" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-26/31 Testing: Vec3f.DotProduct
-26/31 Test: Vec3f.DotProduct
+37/42 Testing: Vec3f.DotProduct
+37/42 Test: Vec3f.DotProduct
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=Vec3f.DotProduct" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"Vec3f.DotProduct" start time: Mar 29 17:46 PDT
+"Vec3f.DotProduct" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -695,18 +992,18 @@ Note: Google Test filter = Vec3f.DotProduct
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.12 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"Vec3f.DotProduct" end time: Mar 29 17:46 PDT
+"Vec3f.DotProduct" end time: Apr 02 16:22 PDT
 "Vec3f.DotProduct" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-27/31 Testing: Vec3f.CrossProduct
-27/31 Test: Vec3f.CrossProduct
+38/42 Testing: Vec3f.CrossProduct
+38/42 Test: Vec3f.CrossProduct
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=Vec3f.CrossProduct" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"Vec3f.CrossProduct" start time: Mar 29 17:46 PDT
+"Vec3f.CrossProduct" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -722,18 +1019,18 @@ Note: Google Test filter = Vec3f.CrossProduct
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.12 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"Vec3f.CrossProduct" end time: Mar 29 17:46 PDT
+"Vec3f.CrossProduct" end time: Apr 02 16:22 PDT
 "Vec3f.CrossProduct" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-28/31 Testing: Vec3f.Normalize
-28/31 Test: Vec3f.Normalize
+39/42 Testing: Vec3f.Normalize
+39/42 Test: Vec3f.Normalize
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=Vec3f.Normalize" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"Vec3f.Normalize" start time: Mar 29 17:46 PDT
+"Vec3f.Normalize" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -749,18 +1046,18 @@ Note: Google Test filter = Vec3f.Normalize
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"Vec3f.Normalize" end time: Mar 29 17:46 PDT
+"Vec3f.Normalize" end time: Apr 02 16:22 PDT
 "Vec3f.Normalize" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-29/31 Testing: Vec3f.OrthonormalBasis
-29/31 Test: Vec3f.OrthonormalBasis
+40/42 Testing: Vec3f.OrthonormalBasis
+40/42 Test: Vec3f.OrthonormalBasis
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=Vec3f.OrthonormalBasis" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"Vec3f.OrthonormalBasis" start time: Mar 29 17:46 PDT
+"Vec3f.OrthonormalBasis" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -776,18 +1073,18 @@ Note: Google Test filter = Vec3f.OrthonormalBasis
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"Vec3f.OrthonormalBasis" end time: Mar 29 17:46 PDT
+"Vec3f.OrthonormalBasis" end time: Apr 02 16:22 PDT
 "Vec3f.OrthonormalBasis" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-30/31 Testing: BBox3f.ExpandAndCentroid
-30/31 Test: BBox3f.ExpandAndCentroid
+41/42 Testing: BBox3f.ExpandAndCentroid
+41/42 Test: BBox3f.ExpandAndCentroid
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=BBox3f.ExpandAndCentroid" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"BBox3f.ExpandAndCentroid" start time: Mar 29 17:46 PDT
+"BBox3f.ExpandAndCentroid" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -803,18 +1100,18 @@ Note: Google Test filter = BBox3f.ExpandAndCentroid
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"BBox3f.ExpandAndCentroid" end time: Mar 29 17:46 PDT
+"BBox3f.ExpandAndCentroid" end time: Apr 02 16:22 PDT
 "BBox3f.ExpandAndCentroid" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-31/31 Testing: Ray.SpawnRayAvoidsSelfIntersection
-31/31 Test: Ray.SpawnRayAvoidsSelfIntersection
+42/42 Testing: Ray.SpawnRayAvoidsSelfIntersection
+42/42 Test: Ray.SpawnRayAvoidsSelfIntersection
 Command: "/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests" "--gtest_filter=Ray.SpawnRayAvoidsSelfIntersection" "--gtest_also_run_disabled_tests"
 Directory: /Users/douglascreel/dev/anacapa/build/tests
-"Ray.SpawnRayAvoidsSelfIntersection" start time: Mar 29 17:46 PDT
+"Ray.SpawnRayAvoidsSelfIntersection" start time: Apr 02 16:22 PDT
 Output:
 ----------------------------------------------------------
 Running main() from /Users/douglascreel/dev/anacapa/build/_deps/googletest-src/googletest/src/gtest_main.cc
@@ -830,11 +1127,11 @@ Note: Google Test filter = Ray.SpawnRayAvoidsSelfIntersection
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.
 <end of output>
-Test time =   0.11 sec
+Test time =   0.10 sec
 ----------------------------------------------------------
 Test Passed.
-"Ray.SpawnRayAvoidsSelfIntersection" end time: Mar 29 17:46 PDT
+"Ray.SpawnRayAvoidsSelfIntersection" end time: Apr 02 16:22 PDT
 "Ray.SpawnRayAvoidsSelfIntersection" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-End testing: Mar 29 17:46 PDT
+End testing: Apr 02 16:22 PDT

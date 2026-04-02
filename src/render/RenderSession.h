@@ -26,6 +26,8 @@ struct RenderSettings {
     std::string    outputPath      = "out.exr";
     std::string    scenePath;              // empty → built-in Cornell box
     std::string    cameraPath;             // empty → auto-select from USD
+    std::string    envPath;                // HDRI dome light (empty = none)
+    float          envIntensity    = 1.f;
     IntegratorType integrator      = IntegratorType::BDPT;
     DenoiseOptions denoise;
 };

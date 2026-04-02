@@ -98,6 +98,9 @@ public:
     bool isInfinite() const override { return true;  }
     bool isDelta()    const override { return true;  }
 
+    void setSceneRadius(float r) { m_sceneRadius = r; m_diskArea = kDirLightPi * r * r; }
+    void setSceneCenter(Vec3f c) { m_sceneCenter = c; }
+
 private:
     Vec3f    m_dir;          // from surface toward light
     Spectrum m_Le;

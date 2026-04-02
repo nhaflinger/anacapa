@@ -3,6 +3,8 @@
 #include "USDLoader.h"
 #include "../../shading/Lambertian.h"
 #include "../../shading/lights/AreaLight.h"
+#include "../../shading/lights/DirectionalLight.h"
+#include "../../shading/lights/DomeLight.h"
 
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usd/primRange.h>
@@ -14,6 +16,7 @@
 #include <pxr/usd/usdLux/rectLight.h>
 #include <pxr/usd/usdLux/sphereLight.h>
 #include <pxr/usd/usdLux/distantLight.h>
+#include <pxr/usd/usdLux/domeLight.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/usdShade/shader.h>
@@ -120,6 +123,23 @@ static Spectrum resolveColorInput(const UsdShadeInput& input,
     }
 
     return defaultVal;
+}
+
+// resolveIntensity — apply USD exposure attribute: finalIntensity = intensity * 2^exposure
+static float resolveIntensity(const UsdLuxLightAPI& lightAPI) {
+    float intensity = 1.f, exposure = 0.f;
+    lightAPI.GetIntensityAttr().Get(&intensity);
+    lightAPI.GetExposureAttr().Get(&exposure);
+    return intensity * std::pow(2.f, exposure);
+}
+
+// computePoolBounds — fast AABB over all mesh positions in the pool
+static BBox3f computePoolBounds(const GeometryPool& pool) {
+    BBox3f b;
+    for (size_t i = 0; i < pool.numMeshes(); ++i)
+        for (const Vec3f& p : pool.mesh(static_cast<uint32_t>(i)).positions)
+            b.expand(p);
+    return b;
 }
 
 // resolveMaterial — walk a UsdShadeMaterial's surface output to find
@@ -315,6 +335,9 @@ LoadedScene loadUSD(const std::string& path,
     // Cache material → IMaterial* to avoid duplicating per-mesh
     std::unordered_map<std::string, uint32_t> matPathToIdx;
 
+    // Cache displayColor RGB (quantized to 8-bit key) → material index
+    std::unordered_map<uint32_t, uint32_t> displayColorToIdx;
+
     // Default material (used when no binding exists)
     result.materials.push_back(
         std::make_unique<LambertianMaterial>(Spectrum{0.5f, 0.5f, 0.5f}));
@@ -351,6 +374,32 @@ LoadedScene loadUSD(const std::string& path,
                     matIdx = static_cast<uint32_t>(result.materials.size());
                     result.materials.push_back(resolveMaterial(boundMat));
                     matPathToIdx[matPath] = matIdx;
+                }
+            } else {
+                // No material binding — fall back to primvars:displayColor.
+                // This is the common Blender USD export pattern.
+                UsdGeomPrimvarsAPI pvAPI2(prim);
+                UsdGeomPrimvar dcPrimvar = pvAPI2.GetPrimvar(TfToken("displayColor"));
+                if (dcPrimvar) {
+                    VtArray<GfVec3f> colors;
+                    dcPrimvar.Get(&colors);
+                    if (!colors.empty()) {
+                        GfVec3f c = colors[0];
+                        // Quantize to 8-bit per channel for cache key
+                        uint32_t key = (static_cast<uint32_t>(c[0] * 255.f + 0.5f) << 16)
+                                     | (static_cast<uint32_t>(c[1] * 255.f + 0.5f) << 8)
+                                     |  static_cast<uint32_t>(c[2] * 255.f + 0.5f);
+                        auto it2 = displayColorToIdx.find(key);
+                        if (it2 != displayColorToIdx.end()) {
+                            matIdx = it2->second;
+                        } else {
+                            matIdx = static_cast<uint32_t>(result.materials.size());
+                            Spectrum color{c[0], c[1], c[2]};
+                            result.materials.push_back(
+                                std::make_unique<LambertianMaterial>(color));
+                            displayColorToIdx[key] = matIdx;
+                        }
+                    }
                 }
             }
 
@@ -423,6 +472,65 @@ LoadedScene loadUSD(const std::string& path,
             auto light = std::make_unique<AreaLight>(center, uHalf, vHalf, Le);
             result.sceneView.lights.push_back(light.get());
             result.lights.push_back(std::move(light));
+        }
+
+        // ---- DistantLight (sun/directional) ----
+        else if (prim.IsA<UsdLuxDistantLight>()) {
+            UsdLuxDistantLight dist(prim);
+            UsdLuxLightAPI lightAPI(prim);
+            GfMatrix4d xform = xformCache.GetLocalToWorldTransform(prim);
+
+            float intensity = resolveIntensity(lightAPI);
+            GfVec3f color{1.f, 1.f, 1.f};
+            lightAPI.GetColorAttr().Get(&color);
+
+            // DistantLight emits along -Z local; dirToLight = +Z local in world
+            Vec3f lightPos  = transformPoint(xform, GfVec3d(0, 0, 0));
+            Vec3f lightPosZ = transformPoint(xform, GfVec3d(0, 0, 1));
+            Vec3f dirToLight = safeNormalize(lightPosZ - lightPos);
+
+            Spectrum Le = { color[0] * intensity,
+                            color[1] * intensity,
+                            color[2] * intensity };
+
+            // Bounds needed for disk placement — use placeholder; updated below
+            auto light = std::make_unique<DirectionalLight>(
+                dirToLight, Le, /*sceneRadius=*/1.f, Vec3f{});
+            result.sceneView.lights.push_back(light.get());
+            result.lights.push_back(std::move(light));
+
+            spdlog::info("USDLoader: distantLight '{}' dir=({:.2f},{:.2f},{:.2f}) intensity={:.2f}",
+                         prim.GetPath().GetString(),
+                         dirToLight.x, dirToLight.y, dirToLight.z, intensity);
+        }
+
+        // ---- DomeLight (HDRI environment) ----
+        else if (prim.IsA<UsdLuxDomeLight>()) {
+            UsdLuxDomeLight dome(prim);
+            UsdLuxLightAPI lightAPI(prim);
+
+            float intensity = resolveIntensity(lightAPI);
+            GfVec3f color{1.f, 1.f, 1.f};
+            lightAPI.GetColorAttr().Get(&color);
+            float effectiveIntensity = intensity * (color[0]+color[1]+color[2]) / 3.f;
+
+            // Check for a texture file
+            std::string texturePath;
+            SdfAssetPath ap;
+            if (dome.GetTextureFileAttr().Get(&ap))
+                texturePath = ap.GetResolvedPath().empty()
+                            ? ap.GetAssetPath()
+                            : ap.GetResolvedPath();
+
+            // Bounds placeholder — updated after all meshes are loaded
+            auto domeLight = std::make_unique<DomeLight>(
+                texturePath, effectiveIntensity, /*sceneRadius=*/1.f, Vec3f{});
+            result.sceneView.envLight = domeLight.get();
+            result.sceneView.lights.push_back(domeLight.get());
+            result.lights.push_back(std::move(domeLight));
+
+            spdlog::info("USDLoader: domeLight '{}' intensity={:.2f} texture='{}'",
+                         prim.GetPath().GetString(), effectiveIntensity, texturePath);
         }
 
         // ---- Camera — collect all; resolve selection after traversal ----
@@ -502,6 +610,28 @@ LoadedScene loadUSD(const std::string& path,
 
     // Default env radiance — black
     result.sceneView.envRadiance = {};
+
+    // Update scene-bounds-dependent lights (DistantLight, DomeLight) now that
+    // all geometry is loaded and we can compute a tight bounding sphere.
+    {
+        BBox3f bounds = computePoolBounds(result.geomPool);
+        if (bounds.valid()) {
+            Vec3f center = bounds.centroid();
+            float radius = bounds.diagonal().length() * 0.5f * 1.5f;  // 1.5× safety margin
+
+            for (auto& lightPtr : result.lights) {
+                if (auto* dl = dynamic_cast<DirectionalLight*>(lightPtr.get())) {
+                    dl->setSceneRadius(radius);
+                    dl->setSceneCenter(center);
+                } else if (auto* dome = dynamic_cast<DomeLight*>(lightPtr.get())) {
+                    dome->setSceneRadius(radius);
+                    dome->setSceneCenter(center);
+                }
+            }
+            spdlog::info("USDLoader: scene bounds center=({:.1f},{:.1f},{:.1f}) radius={:.1f}",
+                         center.x, center.y, center.z, radius);
+        }
+    }
 
     spdlog::info("USDLoader: {} meshes, {} lights, camera={}",
                  result.geomPool.numMeshes(),
