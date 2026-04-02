@@ -15,6 +15,7 @@ set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/Users/douglascreel/dev/anacapa/src/integrator/PathIntegrator.cpp" "CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o" "gcc" "CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o.d"
   "/Users/douglascreel/dev/anacapa/src/render/RenderSession.cpp" "CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o" "gcc" "CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o.d"
   "/Users/douglascreel/dev/anacapa/src/scene/usd/USDLoader.cpp" "CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o" "gcc" "CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o.d"
+  "/Users/douglascreel/dev/anacapa/src/shading/lights/DomeLight.cpp" "CMakeFiles/anacapa_lib.dir/src/shading/lights/DomeLight.cpp.o" "gcc" "CMakeFiles/anacapa_lib.dir/src/shading/lights/DomeLight.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

@@ -69,8 +69,12 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
         TraceResult hit = scene.accel->trace(r);
 
         if (!hit.hit) {
-            if (bounce == 0 || specularBounce)
-                L += beta * scene.envRadiance;
+            if (bounce == 0 || specularBounce) {
+                Spectrum bg = scene.envLight
+                    ? scene.envLight->Le({}, {}, -r.direction)
+                    : scene.envRadiance;
+                L += beta * bg;
+            }
             break;
         }
 
@@ -169,7 +173,9 @@ Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
 
                 Spectrum Li = {};
                 if (!hit.hit) {
-                    Li = scene.envRadiance;
+                    Li = scene.envLight
+                        ? scene.envLight->Le({}, {}, bs.wi)
+                        : scene.envRadiance;
                 } else if (hit.si.meshID < scene.materials.size()) {
                     const IMaterial* hitMat = scene.materials[hit.si.meshID];
                     if (hitMat) {

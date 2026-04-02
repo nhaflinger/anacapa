@@ -6,7 +6,7 @@ CXX_DEFINES = -DANACAPA_ENABLE_OIDN -DANACAPA_ENABLE_USD -DFMT_HEADER_ONLY=1 -DS
 
 CXX_INCLUDES = -I/Users/douglascreel/dev/anacapa/include -I/Users/douglascreel/dev/anacapa/src -I/Users/douglascreel/usd/include -I/Users/douglascreel/dev/anacapa/build/_deps/spdlog-src/include -isystem /opt/homebrew/include -isystem /opt/homebrew/Cellar/open-image-denoise/2.4.1/include
 
-CXX_FLAGSarm64 = -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -Wall -Wextra -Wpedantic -Wno-unused-parameter -fno-math-errno -fno-trapping-math -march=native -O3 -DNDEBUG
+CXX_FLAGSarm64 = -O2 -g -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -Wall -Wextra -Wpedantic -Wno-unused-parameter -fno-math-errno -fno-trapping-math -march=native -O2 -g -DNDEBUG
 
-CXX_FLAGS = -O3 -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -Wall -Wextra -Wpedantic -Wno-unused-parameter -fno-math-errno -fno-trapping-math -march=native -O3 -DNDEBUG
+CXX_FLAGS = -O2 -g -DNDEBUG -std=c++20 -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk -Wall -Wextra -Wpedantic -Wno-unused-parameter -fno-math-errno -fno-trapping-math -march=native -O2 -g -DNDEBUG
 

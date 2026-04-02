@@ -257,6 +257,30 @@ unit/test_bvh.cpp.s:
 	cd /Users/douglascreel/dev/anacapa/build && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/anacapa_tests.dir/build.make tests/CMakeFiles/anacapa_tests.dir/unit/test_bvh.cpp.s
 .PHONY : unit/test_bvh.cpp.s
 
+unit/test_phase4.o: unit/test_phase4.cpp.o
+.PHONY : unit/test_phase4.o
+
+# target to build an object file
+unit/test_phase4.cpp.o:
+	cd /Users/douglascreel/dev/anacapa/build && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/anacapa_tests.dir/build.make tests/CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.o
+.PHONY : unit/test_phase4.cpp.o
+
+unit/test_phase4.i: unit/test_phase4.cpp.i
+.PHONY : unit/test_phase4.i
+
+# target to preprocess a source file
+unit/test_phase4.cpp.i:
+	cd /Users/douglascreel/dev/anacapa/build && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/anacapa_tests.dir/build.make tests/CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.i
+.PHONY : unit/test_phase4.cpp.i
+
+unit/test_phase4.s: unit/test_phase4.cpp.s
+.PHONY : unit/test_phase4.s
+
+# target to generate assembly for a file
+unit/test_phase4.cpp.s:
+	cd /Users/douglascreel/dev/anacapa/build && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/anacapa_tests.dir/build.make tests/CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.s
+.PHONY : unit/test_phase4.cpp.s
+
 unit/test_sampler.o: unit/test_sampler.cpp.o
 .PHONY : unit/test_sampler.o
 
@@ -328,6 +352,9 @@ help:
 	@echo "... unit/test_bvh.o"
 	@echo "... unit/test_bvh.i"
 	@echo "... unit/test_bvh.s"
+	@echo "... unit/test_phase4.o"
+	@echo "... unit/test_phase4.i"
+	@echo "... unit/test_phase4.s"
 	@echo "... unit/test_sampler.o"
 	@echo "... unit/test_sampler.i"
 	@echo "... unit/test_sampler.s"

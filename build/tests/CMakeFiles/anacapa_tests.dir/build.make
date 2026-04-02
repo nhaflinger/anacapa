@@ -111,10 +111,24 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_bvh.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/anacapa_tests.dir/unit/test_bvh.cpp.s"
 	cd /Users/douglascreel/dev/anacapa/build/tests && /Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /Users/douglascreel/dev/anacapa/tests/unit/test_bvh.cpp -o CMakeFiles/anacapa_tests.dir/unit/test_bvh.cpp.s
 
+tests/CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.o: tests/CMakeFiles/anacapa_tests.dir/flags.make
+tests/CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.o: /Users/douglascreel/dev/anacapa/tests/unit/test_phase4.cpp
+tests/CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.o: tests/CMakeFiles/anacapa_tests.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object tests/CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.o"
+	cd /Users/douglascreel/dev/anacapa/build/tests && /Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT tests/CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.o -MF CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.o.d -o CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.o -c /Users/douglascreel/dev/anacapa/tests/unit/test_phase4.cpp
+
+tests/CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.i"
+	cd /Users/douglascreel/dev/anacapa/build/tests && /Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /Users/douglascreel/dev/anacapa/tests/unit/test_phase4.cpp > CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.i
+
+tests/CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.s"
+	cd /Users/douglascreel/dev/anacapa/build/tests && /Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /Users/douglascreel/dev/anacapa/tests/unit/test_phase4.cpp -o CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.s
+
 tests/CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o: tests/CMakeFiles/anacapa_tests.dir/flags.make
 tests/CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o: /Users/douglascreel/dev/anacapa/tests/unit/test_sampler.cpp
 tests/CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o: tests/CMakeFiles/anacapa_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object tests/CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object tests/CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o"
 	cd /Users/douglascreel/dev/anacapa/build/tests && /Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT tests/CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o -MF CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o.d -o CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o -c /Users/douglascreel/dev/anacapa/tests/unit/test_sampler.cpp
 
 tests/CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.i: cmake_force
@@ -128,7 +142,7 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.s: cmake_force
 tests/CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o: tests/CMakeFiles/anacapa_tests.dir/flags.make
 tests/CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o: /Users/douglascreel/dev/anacapa/tests/unit/test_types.cpp
 tests/CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o: tests/CMakeFiles/anacapa_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object tests/CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object tests/CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o"
 	cd /Users/douglascreel/dev/anacapa/build/tests && /Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT tests/CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o -MF CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o.d -o CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o -c /Users/douglascreel/dev/anacapa/tests/unit/test_types.cpp
 
 tests/CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.i: cmake_force
@@ -144,6 +158,7 @@ anacapa_tests_OBJECTS = \
 "CMakeFiles/anacapa_tests.dir/unit/test_allocator.cpp.o" \
 "CMakeFiles/anacapa_tests.dir/unit/test_bdpt.cpp.o" \
 "CMakeFiles/anacapa_tests.dir/unit/test_bvh.cpp.o" \
+"CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.o" \
 "CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o" \
 "CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o"
 
@@ -153,6 +168,7 @@ anacapa_tests_EXTERNAL_OBJECTS =
 tests/anacapa_tests: tests/CMakeFiles/anacapa_tests.dir/unit/test_allocator.cpp.o
 tests/anacapa_tests: tests/CMakeFiles/anacapa_tests.dir/unit/test_bdpt.cpp.o
 tests/anacapa_tests: tests/CMakeFiles/anacapa_tests.dir/unit/test_bvh.cpp.o
+tests/anacapa_tests: tests/CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.o
 tests/anacapa_tests: tests/CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o
 tests/anacapa_tests: tests/CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o
 tests/anacapa_tests: tests/CMakeFiles/anacapa_tests.dir/build.make
@@ -164,7 +180,7 @@ tests/anacapa_tests: _deps/spdlog-build/libspdlog.a
 tests/anacapa_tests: /opt/homebrew/Cellar/open-image-denoise/2.4.1/lib/libOpenImageDenoise.2.4.1.dylib
 tests/anacapa_tests: lib/libgtest.a
 tests/anacapa_tests: tests/CMakeFiles/anacapa_tests.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Linking CXX executable anacapa_tests"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Linking CXX executable anacapa_tests"
 	cd /Users/douglascreel/dev/anacapa/build/tests && $(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/anacapa_tests.dir/link.txt --verbose=$(VERBOSE)
 	cd /Users/douglascreel/dev/anacapa/build/tests && /opt/homebrew/Cellar/cmake/3.30.3/bin/cmake -D TEST_TARGET=anacapa_tests -D TEST_EXECUTABLE=/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests -D TEST_EXECUTOR= -D TEST_WORKING_DIR=/Users/douglascreel/dev/anacapa/build/tests -D TEST_EXTRA_ARGS= -D TEST_PROPERTIES= -D TEST_PREFIX= -D TEST_SUFFIX= -D TEST_FILTER= -D NO_PRETTY_TYPES=FALSE -D NO_PRETTY_VALUES=FALSE -D TEST_LIST=anacapa_tests_TESTS -D CTEST_FILE=/Users/douglascreel/dev/anacapa/build/tests/anacapa_tests[1]_tests.cmake -D TEST_DISCOVERY_TIMEOUT=5 -D TEST_XML_OUTPUT_DIR= -P /opt/homebrew/Cellar/cmake/3.30.3/share/cmake/Modules/GoogleTestAddTests.cmake
 

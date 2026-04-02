@@ -92,7 +92,26 @@ uint32_t BDPTIntegrator::traceCameraSubpath(const SceneView& scene,
 
     for (uint32_t depth = 0; depth < m_maxDepth && !path.full(); ++depth) {
         TraceResult hit = scene.accel->trace(ray);
-        if (!hit.hit) break;
+        if (!hit.hit) {
+            // Record an environment vertex so (s=0, t) strategies capture env light
+            if (scene.envLight && !path.full()) {
+                Vec3f rayDir = ray.direction;
+                Spectrum Le  = scene.envLight->Le({}, {}, -rayDir);
+                uint32_t ei  = path.count++;
+                path.position[ei] = ray.origin + rayDir * 1e6f;
+                path.normal[ei]   = -rayDir;
+                path.wo[ei]       = -rayDir;
+                path.beta[ei]     = beta;
+                path.Le[ei]       = Le;
+                path.pdfFwd[ei]   = 0.f;   // infinite light: area PDF undefined
+                path.pdfRev[ei]   = 0.f;
+                path.flags[ei]    = static_cast<uint32_t>(PathVertexType::Light)
+                                  | kVertexInfiniteBit;
+                path.meshID[ei]   = ~0u;
+                path.light[ei]    = scene.envLight;
+            }
+            break;
+        }
 
         SurfaceInteraction& si = hit.si;
         const IMaterial* mat = (si.meshID < scene.materials.size())
@@ -258,11 +277,13 @@ Spectrum BDPTIntegrator::connect(const SceneView& scene,
     }
 
     if (s == 0) {
-        // Strategy (0, t): pure camera path — include emitted radiance at cp[t-1]
+        // Strategy (0, t): pure camera path — emitted radiance at the last vertex.
+        // Handles both emissive surfaces and environment (infinite) vertices.
         if (t < 2) return {};
         const uint32_t last = t - 1;
-        if (cp.type(last) != PathVertexType::Surface) return {};
-        L = cp.beta[last] * cp.Le[last];
+        PathVertexType ty = cp.type(last);
+        if (ty == PathVertexType::Surface || ty == PathVertexType::Light)
+            L = cp.beta[last] * cp.Le[last];
         return L;
     }
 

@@ -5,6 +5,8 @@ file(REMOVE_RECURSE
   "CMakeFiles/anacapa_tests.dir/unit/test_bdpt.cpp.o.d"
   "CMakeFiles/anacapa_tests.dir/unit/test_bvh.cpp.o"
   "CMakeFiles/anacapa_tests.dir/unit/test_bvh.cpp.o.d"
+  "CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.o"
+  "CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.o.d"
   "CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o"
   "CMakeFiles/anacapa_tests.dir/unit/test_sampler.cpp.o.d"
   "CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o"
