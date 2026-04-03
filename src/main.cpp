@@ -38,6 +38,15 @@ int main(int argc, char** argv) {
                    "Intensity multiplier for the environment map")
        ->default_val(1.f);
 
+    app.add_option("--fstop", settings.fStop,
+                   "Lens f-stop (e.g. 2.8). Enables depth of field when combined "
+                   "with --focus-distance. Overrides the USD camera value if present.")
+       ->default_val(0.f);
+    app.add_option("--focus-distance", settings.focusDistance,
+                   "Distance from camera to the focal plane in scene units. "
+                   "Overrides the USD camera value if present.")
+       ->default_val(0.f);
+
     app.add_flag("--interactive", settings.interactive,
                  "Use GPU (Metal) backend for fast preview renders — "
                  "lower quality, much faster (requires ANACAPA_ENABLE_METAL)");

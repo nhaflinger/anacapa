@@ -416,7 +416,8 @@ void BDPTIntegrator::renderTile(const SceneView& scene,
 
                 // --- Camera subpath ---
                 Vec2f jitter = sampler.get2D();
-                Ray primaryRay = cam.generateRay(px, py, jitter.x, jitter.y);
+                Vec2f lens   = sampler.get2D();
+                Ray primaryRay = cam.generateRay(px, py, jitter.x, jitter.y, lens.x, lens.y);
                 // Pinhole camera: area PDF = 1 (we treat it as a single point)
                 traceCameraSubpath(scene, primaryRay, 1.f, sampler, camPath);
 

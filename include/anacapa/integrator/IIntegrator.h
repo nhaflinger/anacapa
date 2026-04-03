@@ -15,15 +15,29 @@ class ISampler;
 struct SurfaceInteraction;
 
 // ---------------------------------------------------------------------------
-// Camera — pinhole camera (defined before SceneView so SceneView can embed it)
+// Camera — pinhole or thin-lens camera.
+//
+// Thin lens model:
+//   apertureRadius > 0  enables depth of field.  A point on the aperture
+//   disk is sampled (using lensU, lensV passed to generateRay) and the ray
+//   is redirected to converge at the focal plane at distance focalDistance.
+//
+// Default (apertureRadius == 0): pure pinhole — lensU/lensV are ignored.
 // ---------------------------------------------------------------------------
 struct Camera {
     Vec3f  origin;
     Vec3f  lowerLeftCorner;
     Vec3f  horizontal;   // Full width vector
     Vec3f  vertical;     // Full height vector
+    // Camera basis — needed to offset ray origin across the aperture disk
+    Vec3f  basisU;       // Right vector (unit)
+    Vec3f  basisV;       // Up vector (unit)
     uint32_t imageWidth;
     uint32_t imageHeight;
+
+    // Thin lens parameters — both zero means pinhole (no DoF)
+    float apertureRadius = 0.f;  // Half the aperture diameter in world units
+    float focalDistance  = 0.f;  // Distance from origin to the focal plane
 
     static Camera makePinhole(Vec3f from, Vec3f at, Vec3f up,
                                float vfovDegrees,
@@ -44,20 +58,71 @@ struct Camera {
         cam.horizontal      = u * vpW;
         cam.vertical        = v * vpH;
         cam.lowerLeftCorner = from - u*(vpW*0.5f) - v*(vpH*0.5f) - w;
+        cam.basisU          = u;
+        cam.basisV          = v;
         cam.imageWidth      = width;
         cam.imageHeight     = height;
+        // apertureRadius and focalDistance stay 0 — pure pinhole
         return cam;
     }
 
-    // Generate a ray for pixel (px, py) with sub-pixel offset (u, v) in [0,1)
-    Ray generateRay(uint32_t px, uint32_t py, float u, float v) const {
-        float s = (static_cast<float>(px) + u) / static_cast<float>(imageWidth);
+    static Camera makeThinLens(Vec3f from, Vec3f at, Vec3f up,
+                                float vfovDegrees,
+                                uint32_t width, uint32_t height,
+                                float apertureRadius, float focalDistance) {
+        Camera cam = makePinhole(from, at, up, vfovDegrees, width, height);
+        cam.apertureRadius = apertureRadius;
+        cam.focalDistance  = focalDistance;
+        return cam;
+    }
+
+    // Generate a ray for pixel (px, py).
+    //   jitterU, jitterV — sub-pixel jitter in [0, 1)
+    //   lensU,   lensV   — aperture sample in [0, 1); ignored when apertureRadius == 0
+    Ray generateRay(uint32_t px, uint32_t py,
+                    float jitterU, float jitterV,
+                    float lensU = 0.5f, float lensV = 0.5f) const {
+        float s = (static_cast<float>(px) + jitterU) / static_cast<float>(imageWidth);
         // Flip py: row 0 is the top of the image, but lowerLeftCorner + vertical*0
         // is the bottom of the frustum. Invert so the image isn't upside-down.
-        float t = (static_cast<float>(imageHeight - 1 - py) + v)
+        float t = (static_cast<float>(imageHeight - 1 - py) + jitterV)
                 / static_cast<float>(imageHeight);
-        Vec3f dir = lowerLeftCorner + horizontal*s + vertical*t - origin;
-        return Ray{origin, normalize(dir)};
+
+        Vec3f target = lowerLeftCorner + horizontal*s + vertical*t;
+
+        if (apertureRadius <= 0.f)
+            return Ray{origin, normalize(target - origin)};
+
+        // Thin lens: sample a point on the aperture disk using concentric
+        // mapping (preserves uniform distribution, avoids clumping at center).
+        // Map lensU/V from [0,1) to [-1,1) then apply concentric disk mapping.
+        float lx = 2.f * lensU - 1.f;
+        float ly = 2.f * lensV - 1.f;
+        float diskX, diskY;
+        if (lx == 0.f && ly == 0.f) {
+            diskX = diskY = 0.f;
+        } else if (std::abs(lx) >= std::abs(ly)) {
+            float r   = lx;
+            float phi = (3.14159265f / 4.f) * (ly / lx);
+            diskX = r * std::cos(phi);
+            diskY = r * std::sin(phi);
+        } else {
+            float r   = ly;
+            float phi = (3.14159265f / 2.f) - (3.14159265f / 4.f) * (lx / ly);
+            diskX = r * std::cos(phi);
+            diskY = r * std::sin(phi);
+        }
+        Vec3f lensPoint = origin
+                        + basisU * (diskX * apertureRadius)
+                        + basisV * (diskY * apertureRadius);
+
+        // The focal point is where the pinhole ray intersects the focal plane.
+        // pinholeDir scaled so its z-component (along -w) equals focalDistance.
+        Vec3f pinholeDir = normalize(target - origin);
+        Vec3f focalPoint = origin + pinholeDir * focalDistance;
+
+        // Rays from all lens points converge at the focal point.
+        return Ray{lensPoint, normalize(focalPoint - lensPoint)};
     }
 };
 

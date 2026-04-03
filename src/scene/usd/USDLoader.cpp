@@ -335,7 +335,33 @@ static Camera buildCamera(const UsdPrim& prim,
     float vfovRad   = 2.f * std::atan(vAperture * 0.5f / focalLen);
     float vfovDeg   = vfovRad * 180.f / 3.14159265f;
 
-    spdlog::info("USDLoader: camera '{}' origin=({:.2f},{:.2f},{:.2f}) fov={:.1f}°",
+    // Thin lens parameters — read fStop and focusDistance if authored.
+    // fStop is dimensionless; aperture radius (in world units) = focalLength / (2 * fStop).
+    // USD focalLength is in tenths of a world unit (scene units / 10) by convention,
+    // so we convert: focalLen_world = focalLen / 10.
+    // focusDistance is already in scene units.
+    // If either is absent or zero, fall back to pinhole (no DoF).
+    float apertureRadius = 0.f;
+    float focalDistance  = 0.f;
+
+    float fStop = 0.f;
+    usdCam.GetFStopAttr().Get(&fStop, UsdTimeCode::Default());
+    usdCam.GetFocusDistanceAttr().Get(&focalDistance, UsdTimeCode::Default());
+
+    if (fStop > 0.f && focalDistance > 0.f) {
+        float focalLen_world = focalLen / 10.f;   // USD tenths → scene units
+        apertureRadius = focalLen_world / (2.f * fStop);
+        spdlog::info("USDLoader: camera '{}' origin=({:.2f},{:.2f},{:.2f}) fov={:.1f}° "
+                     "fStop={:.1f} focusDist={:.3f} apertureR={:.4f}",
+                     prim.GetPath().GetString(),
+                     origin.x, origin.y, origin.z, vfovDeg,
+                     fStop, focalDistance, apertureRadius);
+        return Camera::makeThinLens(origin, target, up, vfovDeg,
+                                    filmWidth, filmHeight,
+                                    apertureRadius, focalDistance);
+    }
+
+    spdlog::info("USDLoader: camera '{}' origin=({:.2f},{:.2f},{:.2f}) fov={:.1f}° (pinhole)",
                  prim.GetPath().GetString(),
                  origin.x, origin.y, origin.z, vfovDeg);
 
