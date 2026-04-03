@@ -2,6 +2,7 @@
 
 #include "USDLoader.h"
 #include "../../shading/Lambertian.h"
+#include "../../shading/StandardSurface.h"
 #include "../../shading/lights/AreaLight.h"
 #include "../../shading/lights/DirectionalLight.h"
 #include "../../shading/lights/DomeLight.h"
@@ -142,14 +143,29 @@ static BBox3f computePoolBounds(const GeometryPool& pool) {
     return b;
 }
 
+// resolveFloatInput — read a scalar UsdShadeInput, returning defaultVal if
+// not authored or connected to a texture (textures are not yet supported).
+static float resolveFloatInput(const UsdShadeInput& input, float defaultVal) {
+    if (!input) return defaultVal;
+    // Ignore texture connections — fall back to default
+    if (input.HasConnectedSource()) return defaultVal;
+    float val = defaultVal;
+    input.Get(&val);
+    return val;
+}
+
 // resolveMaterial — walk a UsdShadeMaterial's surface output to find
-// a UsdPreviewSurface shader and extract diffuseColor + emissiveColor.
-// Texture-connected inputs are approximated via resolveColorInput.
-// Returns a LambertianMaterial or EmissiveMaterial.
+// a UsdPreviewSurface shader and extract diffuseColor, emissiveColor,
+// roughness, and metallic. Returns the most appropriate material type:
+//   - EmissiveMaterial   if emissiveColor is non-black
+//   - StandardSurfaceMaterial if metallic > 0 or roughness < 0.9
+//   - LambertianMaterial otherwise (pure diffuse)
 // ---------------------------------------------------------------------------
 static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat) {
     Spectrum diffuse{0.5f, 0.5f, 0.5f};
     Spectrum emission{};
+    float    roughness = 1.0f;
+    float    metallic  = 0.0f;
 
     UsdShadeShader surface = mat.ComputeSurfaceSource();
     if (!surface)
@@ -159,14 +175,30 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat) {
     surface.GetShaderId(&shaderId);
 
     if (shaderId == TfToken("UsdPreviewSurface")) {
-        diffuse  = resolveColorInput(surface.GetInput(TfToken("diffuseColor")),
-                                     diffuse);
-        emission = resolveColorInput(surface.GetInput(TfToken("emissiveColor")),
-                                     emission);
+        diffuse   = resolveColorInput(surface.GetInput(TfToken("diffuseColor")),
+                                      diffuse);
+        emission  = resolveColorInput(surface.GetInput(TfToken("emissiveColor")),
+                                      emission);
+        roughness = resolveFloatInput(surface.GetInput(TfToken("roughness")),
+                                      roughness);
+        metallic  = resolveFloatInput(surface.GetInput(TfToken("metallic")),
+                                      metallic);
     }
 
     if (!isBlack(emission))
         return std::make_unique<EmissiveMaterial>(diffuse, emission);
+
+    // Use StandardSurfaceMaterial when the surface has any specular character.
+    // Pure Lambertian (roughness=1, metallic=0) stays as LambertianMaterial.
+    if (metallic > 0.01f || roughness < 0.95f) {
+        StandardSurfaceMaterial::Params p;
+        p.base_color = diffuse;
+        p.roughness  = roughness;
+        p.metalness  = metallic;
+        p.specular   = metallic > 0.01f ? 0.f : 0.5f;  // no dielectric spec on metals
+        return std::make_unique<StandardSurfaceMaterial>(p);
+    }
+
     return std::make_unique<LambertianMaterial>(diffuse);
 }
 
