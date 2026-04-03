@@ -16,7 +16,7 @@ Named after Anacapa Island, part of California's Channel Islands.
 - **GGX multi-layer BSDF** — MaterialX `standard_surface` (metallic conductor, dielectric specular, Lambertian diffuse, clearcoat)
 - **HDRI dome lights** — equirectangular EXR/HDR with 2D piecewise-constant importance sampling
 - **OSL shading language** — optional (`-DANACAPA_ENABLE_OSL=ON`)
-- **GPU-accelerated interactive rendering** — Metal backend (`--interactive`) for fast preview renders on Apple Silicon; hardware ray tracing via `MTLAccelerationStructure`
+- **GPU-accelerated interactive rendering** — Metal backend (`--interactive`) for Apple Silicon (hardware ray tracing via `MTLAccelerationStructure`); CUDA+OptiX backend planned for NVIDIA
 - **Zero compiled third-party dependencies** in the core renderer
 
 ## Dependencies
