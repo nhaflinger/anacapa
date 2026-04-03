@@ -83,14 +83,22 @@ DYLD_LIBRARY_PATH=~/usd/lib \
   --integrator bdpt \
   --width      800  \
   --height     800  \
-  --spp        256  \
+  --spp        256  \    # optional: samples per pixel (default 64); higher = less noise, slower
   --depth      8    \
   --output     images/render.exr \
   --denoise         \
-  --write-aovs
+  --write-aovs      \
+  --interactive          # optional: use Metal GPU backend for fast preview (Apple Silicon only)
 
 ./build/anacapa --help
 ```
+
+`--spp` controls quality vs. speed. Lower values (16–32) are useful for quick composition checks;
+256+ is recommended for final renders. Defaults to 64.
+
+`--interactive` switches to the Metal GPU backend, which can be significantly faster — especially
+on complex scenes — at the cost of some accuracy. See [Interactive (GPU) mode](#interactive-gpu-mode) below.
+Both flags are optional and independent of each other.
 
 ### Interactive (GPU) mode
 
