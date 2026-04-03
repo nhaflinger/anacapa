@@ -76,19 +76,29 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 # Render with denoising + write albedo and normals layers to the EXR
 ./build/anacapa --scene scenes/cornell_box.usda -o images/render.exr --denoise --write-aovs
 
+# Render with depth of field (thin lens, f/4, focused at 5 units)
+./build/anacapa --scene scenes/cornell_box.usda -o images/render.exr \
+  --fstop 4 --focus-distance 5
+
+# Fast GPU preview on Apple Silicon
+./build/anacapa --scene scenes/kitchen_set.usdc --interactive \
+  --width 800 --height 800 --spp 64 -o preview.exr
+
 # Full options
 ./build/anacapa \
-  --scene      scenes/cornell_box.usda \
-  --camera     /World/RenderCam \
-  --integrator bdpt \
-  --width      800  \
-  --height     800  \
-  --spp        256  \    # optional: samples per pixel (default 64); higher = less noise, slower
-  --depth      8    \
-  --output     images/render.exr \
-  --denoise         \
-  --write-aovs      \
-  --interactive          # optional: use Metal GPU backend for fast preview (Apple Silicon only)
+  --scene          scenes/cornell_box.usda \
+  --camera         /World/RenderCam \
+  --integrator     bdpt \
+  --width          800  \
+  --height         800  \
+  --spp            256  \
+  --depth          8    \
+  --fstop          2.8  \
+  --focus-distance 10   \
+  --output         images/render.exr \
+  --denoise             \
+  --write-aovs          \
+  --interactive
 
 ./build/anacapa --help
 ```
@@ -96,9 +106,15 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 `--spp` controls quality vs. speed. Lower values (16–32) are useful for quick composition checks;
 256+ is recommended for final renders. Defaults to 64.
 
+`--fstop` and `--focus-distance` enable depth of field using a thin lens model. Both must be
+provided together — either on the command line or via `fStop`/`focusDistance` attributes on the
+`UsdGeomCamera` in the scene file. Command-line values take priority over USD values. If neither
+is present the camera falls back to pinhole (infinite depth of field). Typical f-stops: 1.4
+(very shallow DoF), 2.8 (moderate), 8 (near-infinite).
+
 `--interactive` switches to the Metal GPU backend, which can be significantly faster — especially
 on complex scenes — at the cost of some accuracy. See [Interactive (GPU) mode](#interactive-gpu-mode) below.
-Both flags are optional and independent of each other.
+All three flags are optional and independent of each other.
 
 ### Interactive (GPU) mode
 

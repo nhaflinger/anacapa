@@ -28,6 +28,13 @@ struct RenderSettings {
     std::string    cameraPath;             // empty → auto-select from USD
     std::string    envPath;                // HDRI dome light (empty = none)
     float          envIntensity    = 1.f;
+
+    // Thin lens / depth of field overrides.
+    // If both are > 0 they override whatever the USD camera specifies (or add
+    // DoF to a scene that has none). If either is 0 the USD values are used;
+    // if USD also has none the camera falls back to pinhole.
+    float          fStop         = 0.f;
+    float          focusDistance = 0.f;
     IntegratorType integrator      = IntegratorType::BDPT;
     bool           interactive     = false; // Use GPU (Metal) backend when available
     DenoiseOptions denoise;

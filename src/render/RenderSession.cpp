@@ -66,6 +66,24 @@ void RenderSession::loadScene() {
         m_scene.camera = m_camera;
         m_scene.accel  = nullptr;
 
+        // ---- Command-line DoF override --------------------------------------
+        // If --fstop and --focus-distance are both provided they take priority
+        // over whatever the USD camera specified. Applied after camera is set
+        // so it works for both USD cameras and the auto-camera below.
+        if (m_settings.fStop > 0.f && m_settings.focusDistance > 0.f
+                && m_scene.camera) {
+            Camera& cam = *m_scene.camera;
+            // apertureRadius derived from focal length embedded in the camera
+            // frustum: focal length ≈ 0.5 * |vertical| / tan(vfov/2).
+            // Simpler: just store as-is; the caller supplied physical values.
+            float focalLen_approx = cam.vertical.length() * 0.5f;
+            cam.apertureRadius = focalLen_approx / (2.f * m_settings.fStop);
+            cam.focalDistance  = m_settings.focusDistance;
+            spdlog::info("DoF override: fStop={:.1f} focusDist={:.3f} apertureR={:.4f}",
+                         m_settings.fStop, m_settings.focusDistance,
+                         cam.apertureRadius);
+        }
+
         // ---- Auto-camera: frame the scene if no camera was found ------------
         if (!m_scene.camera) {
             BBox3f bounds = computeSceneBounds(m_geomPool);

@@ -31,7 +31,8 @@ void PathIntegrator::renderTile(const SceneView& scene,
             for (uint32_t s = 0; s < tile.sampleCount; ++s) {
                 sampler.startPixelSample(px, py, tile.sampleStart + s);
                 Vec2f jitter = sampler.get2D();
-                Ray ray = cam.generateRay(px, py, jitter.x, jitter.y);
+                Vec2f lens   = sampler.get2D();
+                Ray ray = cam.generateRay(px, py, jitter.x, jitter.y, lens.x, lens.y);
 
                 Spectrum albedo = {};
                 Vec3f    normal = {};
