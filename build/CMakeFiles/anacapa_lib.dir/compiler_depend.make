@@ -13231,6 +13231,7 @@ CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o: /Users/douglascreel/de
   /Users/douglascreel/dev/anacapa/include/anacapa/shading/IMaterial.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/shading/ShadingContext.h \
   /Users/douglascreel/dev/anacapa/src/shading/Lambertian.h \
+  /Users/douglascreel/dev/anacapa/src/shading/StandardSurface.h \
   /Users/douglascreel/dev/anacapa/src/shading/lights/AreaLight.h \
   /Users/douglascreel/dev/anacapa/src/shading/lights/DirectionalLight.h \
   /Users/douglascreel/dev/anacapa/src/shading/lights/DomeLight.h \
