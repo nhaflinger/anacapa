@@ -88,6 +88,12 @@ public:
     }
 
     virtual uint32_t flags() const = 0;
+
+    // Perceptual roughness in [0, 1].  0 = perfectly smooth, 1 = fully diffuse.
+    // Used by BDPTIntegrator to skip connection attempts through near-specular
+    // vertices where the geometry-sampling PDF would be near zero.
+    // Default (1.0) is safe for any material that doesn't override this.
+    virtual float roughness() const { return 1.0f; }
 };
 
 } // namespace anacapa

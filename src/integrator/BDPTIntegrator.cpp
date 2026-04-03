@@ -135,8 +135,11 @@ uint32_t BDPTIntegrator::traceCameraSubpath(const SceneView& scene,
         path.pdfRev[vi]   = 0.f;  // filled in by the previous vertex below
         path.flags[vi]    = static_cast<uint32_t>(PathVertexType::Surface)
                           | (mat->isDelta() ? kVertexDeltaBit : 0u);
-        path.meshID[vi]   = si.meshID;
-        path.material[vi] = mat;
+        path.meshID[vi]          = si.meshID;
+        path.material[vi]        = mat;
+        path.pathMinRoughness[vi] = std::min(
+            vi > 0 ? path.pathMinRoughness[vi - 1] : 1.0f,
+            mat->roughness());
 
         // Fill pdfRev on the previous vertex (reverse PDF from this vertex back)
         // We do this now because we have both ctx and wo
@@ -232,8 +235,11 @@ uint32_t BDPTIntegrator::traceLightSubpath(const SceneView& scene,
         path.pdfRev[vi]   = 0.f;
         path.flags[vi]    = static_cast<uint32_t>(PathVertexType::Surface)
                           | (mat->isDelta() ? kVertexDeltaBit : 0u);
-        path.meshID[vi]   = si.meshID;
-        path.material[vi] = mat;
+        path.meshID[vi]          = si.meshID;
+        path.material[vi]        = mat;
+        path.pathMinRoughness[vi] = std::min(
+            vi > 0 ? path.pathMinRoughness[vi - 1] : 1.0f,
+            mat->roughness());
 
         if (vi > 0) {
             float dummy, revSA;
@@ -341,6 +347,15 @@ Spectrum BDPTIntegrator::connect(const SceneView& scene,
 
     if (!lp.isConnectible(ls) || !cp.isConnectible(ct)) return {};
     if (!lp.material[ls] || !cp.material[ct]) return {};
+
+    // Skip connections where either subpath passed through near-specular
+    // vertices.  The geometry-sampling PDF is near zero there and the MIS
+    // weight will discard the contribution anyway — casting the shadow ray
+    // is pure overhead.  The threshold 0.08 (alpha ≈ 0.006) leaves rough
+    // GGX (α ≥ 0.3) fully connected and only suppresses mirror-like surfaces.
+    static constexpr float kRoughnessConnectionThreshold = 0.08f;
+    if (lp.pathMinRoughness[ls] < kRoughnessConnectionThreshold) return {};
+    if (cp.pathMinRoughness[ct] < kRoughnessConnectionThreshold) return {};
 
     // Visibility
     Ray shadowRay = spawnRayTo(lp.position[ls], lp.normal[ls], cp.position[ct]);

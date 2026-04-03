@@ -63,6 +63,13 @@ struct PathVertexBuffer {
     std::vector<const IMaterial*> material;
     std::vector<const ILight*>    light;  // Non-null only at light endpoint vertices
 
+    // Minimum perceptual roughness seen along the path from its origin up to
+    // and including this vertex.  Starts at 1.0 (camera/light endpoint) and
+    // is updated at each surface bounce.  Used by connect() to skip shadow
+    // rays toward near-specular vertices where the geometry-sampling PDF is
+    // near zero and the contribution would be discarded after MIS weighting.
+    std::vector<float> pathMinRoughness;
+
     uint32_t count    = 0;
     uint32_t capacity = 0;
 
@@ -78,6 +85,7 @@ struct PathVertexBuffer {
         meshID.resize(maxVerts, ~0u);
         material.resize(maxVerts, nullptr);
         light.resize(maxVerts, nullptr);
+        pathMinRoughness.resize(maxVerts, 1.0f);
     }
 
     void reset() { count = 0; }
