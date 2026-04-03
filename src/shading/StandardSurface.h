@@ -127,6 +127,8 @@ public:
         return m_p.roughness < 0.001f && (m_p.metalness > 0.999f || m_p.specular > 0.f);
     }
 
+    float roughness() const override { return m_p.roughness; }
+
     uint32_t flags() const override {
         uint32_t f = BSDFFlag_Reflection;
         if (m_p.roughness < 0.001f)  f |= BSDFFlag_Specular;
