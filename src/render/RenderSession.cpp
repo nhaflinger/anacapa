@@ -2,6 +2,9 @@
 #include "../accel/BVHBackend.h"
 #include "../integrator/PathIntegrator.h"
 #include "../integrator/BDPTIntegrator.h"
+#ifdef ANACAPA_ENABLE_METAL
+#  include "../gpu/metal/MetalPathIntegrator.h"
+#endif
 #include "../sampling/HaltonSampler.h"
 #include "../shading/Lambertian.h"
 #include "../shading/lights/AreaLight.h"
@@ -299,12 +302,33 @@ void RenderSession::render() {
                      m_settings.envPath, m_settings.envIntensity);
     }
 
-    m_film        = std::make_unique<Film>(m_settings.imageWidth,
-                                           m_settings.imageHeight);
-    if (m_settings.integrator == IntegratorType::BDPT)
-        m_integrator = std::make_unique<BDPTIntegrator>(m_settings.maxDepth);
-    else
-        m_integrator = std::make_unique<PathIntegrator>(m_settings.maxDepth);
+    m_film = std::make_unique<Film>(m_settings.imageWidth,
+                                    m_settings.imageHeight);
+
+#ifdef ANACAPA_ENABLE_METAL
+    if (m_settings.interactive) {
+        auto metalIntegrator = std::make_unique<MetalPathIntegrator>(
+            std::string(ANACAPA_METALLIB_PATH));
+        if (metalIntegrator->isValid()) {
+            spdlog::info("Interactive mode: using Metal GPU backend");
+            m_integrator = std::move(metalIntegrator);
+        } else {
+            spdlog::warn("--interactive: Metal backend unavailable, "
+                         "falling back to CPU path tracer");
+        }
+    }
+#else
+    if (m_settings.interactive)
+        spdlog::warn("--interactive: binary not built with ANACAPA_ENABLE_METAL, "
+                     "using CPU path tracer");
+#endif
+
+    if (!m_integrator) {
+        if (m_settings.integrator == IntegratorType::BDPT)
+            m_integrator = std::make_unique<BDPTIntegrator>(m_settings.maxDepth);
+        else
+            m_integrator = std::make_unique<PathIntegrator>(m_settings.maxDepth);
+    }
     m_baseSampler = std::make_unique<HaltonSampler>(m_settings.samplesPerPixel);
     m_threadPool  = std::make_unique<ThreadPool>(m_settings.numThreads);
 

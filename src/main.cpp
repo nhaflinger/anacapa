@@ -38,6 +38,10 @@ int main(int argc, char** argv) {
                    "Intensity multiplier for the environment map")
        ->default_val(1.f);
 
+    app.add_flag("--interactive", settings.interactive,
+                 "Use GPU (Metal) backend for fast preview renders — "
+                 "lower quality, much faster (requires ANACAPA_ENABLE_METAL)");
+
     app.add_flag("--denoise",    settings.denoise.enabled,
                  "Run Intel OIDN denoiser on the beauty buffer after rendering");
     app.add_flag("--write-aovs", settings.denoise.writeAOVs,

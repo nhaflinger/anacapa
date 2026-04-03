@@ -1,6 +1,7 @@
 #pragma once
 
 #include <anacapa/core/Types.h>
+#include <anacapa/accel/GeometryPool.h>
 #include <cstdint>
 
 namespace anacapa {
@@ -52,6 +53,10 @@ public:
 
     // Finalize geometry for rendering. Called once after all meshes are added.
     virtual void commit() = 0;
+
+    // Access the underlying geometry pool (needed by GPU backends to build
+    // hardware acceleration structures from the same data).
+    virtual const GeometryPool& pool() const = 0;
 
     // Single-ray full intersection (used inside integrator loops on CPU)
     virtual TraceResult trace(const Ray& ray) const = 0;

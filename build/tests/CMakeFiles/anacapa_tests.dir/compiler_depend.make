@@ -1962,6 +1962,7 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_bdpt.cpp.o: /Users/douglascreel/dev
   /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdarg.h \
   /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stddef.h \
   /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdint.h \
+  /Users/douglascreel/dev/anacapa/include/anacapa/accel/GeometryPool.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/accel/IAccelerationStructure.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/core/Types.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/integrator/MISWeight.h \
@@ -3973,6 +3974,7 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_phase4.cpp.o: /Users/douglascreel/d
   /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdarg.h \
   /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stddef.h \
   /Library/Developer/CommandLineTools/usr/lib/clang/17/include/stdint.h \
+  /Users/douglascreel/dev/anacapa/include/anacapa/accel/GeometryPool.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/accel/IAccelerationStructure.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/core/Types.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/shading/ILight.h \
@@ -6030,8 +6032,6 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o: /Users/douglascreel/de
 
 /Users/douglascreel/dev/anacapa/tests/unit/test_phase4.cpp:
 
-/Users/douglascreel/dev/anacapa/include/anacapa/accel/GeometryPool.h:
-
 /Users/douglascreel/dev/anacapa/tests/unit/test_bvh.cpp:
 
 /Users/douglascreel/dev/anacapa/src/integrator/LightSampler.h:
@@ -6041,6 +6041,8 @@ tests/CMakeFiles/anacapa_tests.dir/unit/test_types.cpp.o: /Users/douglascreel/de
 /Users/douglascreel/dev/anacapa/include/anacapa/core/Types.h:
 
 /Users/douglascreel/dev/anacapa/include/anacapa/accel/IAccelerationStructure.h:
+
+/Users/douglascreel/dev/anacapa/include/anacapa/accel/GeometryPool.h:
 
 /Users/douglascreel/dev/anacapa/tests/unit/test_bdpt.cpp:
 

@@ -181,6 +181,62 @@ CMakeFiles/anacapa_lib.dir/src/shading/lights/DomeLight.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/anacapa_lib.dir/src/shading/lights/DomeLight.cpp.s"
 	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /Users/douglascreel/dev/anacapa/src/shading/lights/DomeLight.cpp -o CMakeFiles/anacapa_lib.dir/src/shading/lights/DomeLight.cpp.s
 
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.o: CMakeFiles/anacapa_lib.dir/flags.make
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.o: /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalContext.mm
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.o: CMakeFiles/anacapa_lib.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Building CXX object CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.o"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.o -MF CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.o.d -o CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.o -c /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalContext.mm
+
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.i"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalContext.mm > CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.i
+
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.s"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalContext.mm -o CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.s
+
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.o: CMakeFiles/anacapa_lib.dir/flags.make
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.o: /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalBuffer.mm
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.o: CMakeFiles/anacapa_lib.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Building CXX object CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.o"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.o -MF CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.o.d -o CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.o -c /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalBuffer.mm
+
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.i"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalBuffer.mm > CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.i
+
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.s"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalBuffer.mm -o CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.s
+
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.o: CMakeFiles/anacapa_lib.dir/flags.make
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.o: /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalAccelStructure.mm
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.o: CMakeFiles/anacapa_lib.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Building CXX object CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.o"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.o -MF CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.o.d -o CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.o -c /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalAccelStructure.mm
+
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.i"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalAccelStructure.mm > CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.i
+
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.s"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalAccelStructure.mm -o CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.s
+
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.o: CMakeFiles/anacapa_lib.dir/flags.make
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.o: /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalPathIntegrator.mm
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.o: CMakeFiles/anacapa_lib.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_12) "Building CXX object CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.o"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.o -MF CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.o.d -o CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.o -c /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalPathIntegrator.mm
+
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.i"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalPathIntegrator.mm > CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.i
+
+CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.s"
+	/Library/Developer/CommandLineTools/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /Users/douglascreel/dev/anacapa/src/gpu/metal/MetalPathIntegrator.mm -o CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.s
+
 # Object files for target anacapa_lib
 anacapa_lib_OBJECTS = \
 "CMakeFiles/anacapa_lib.dir/src/accel/BVHBackend.cpp.o" \
@@ -190,7 +246,11 @@ anacapa_lib_OBJECTS = \
 "CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o" \
 "CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o" \
 "CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o" \
-"CMakeFiles/anacapa_lib.dir/src/shading/lights/DomeLight.cpp.o"
+"CMakeFiles/anacapa_lib.dir/src/shading/lights/DomeLight.cpp.o" \
+"CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.o" \
+"CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.o" \
+"CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.o" \
+"CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.o"
 
 # External object files for target anacapa_lib
 anacapa_lib_EXTERNAL_OBJECTS =
@@ -203,9 +263,13 @@ libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/scene/usd/USDLoader.cpp.o
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/shading/lights/DomeLight.cpp.o
+libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.o
+libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.o
+libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.o
+libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.o
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/build.make
 libanacapa_lib.a: CMakeFiles/anacapa_lib.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Linking CXX static library libanacapa_lib.a"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/douglascreel/dev/anacapa/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_13) "Linking CXX static library libanacapa_lib.a"
 	$(CMAKE_COMMAND) -P CMakeFiles/anacapa_lib.dir/cmake_clean_target.cmake
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/anacapa_lib.dir/link.txt --verbose=$(VERBOSE)
 

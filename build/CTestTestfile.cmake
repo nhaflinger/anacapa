@@ -7,4 +7,5 @@
 subdirs("_deps/spdlog-build")
 subdirs("_deps/cli11-build")
 subdirs("_deps/googletest-build")
+subdirs("src/gpu/metal")
 subdirs("tests")

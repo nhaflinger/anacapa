@@ -16,7 +16,7 @@ Named after Anacapa Island, part of California's Channel Islands.
 - **GGX multi-layer BSDF** — MaterialX `standard_surface` (metallic conductor, dielectric specular, Lambertian diffuse, clearcoat)
 - **HDRI dome lights** — equirectangular EXR/HDR with 2D piecewise-constant importance sampling
 - **OSL shading language** — optional (`-DANACAPA_ENABLE_OSL=ON`)
-- **GPU backends** — Metal (Apple Silicon) and CUDA+OptiX (NVIDIA) planned for Phase 6
+- **GPU-accelerated interactive rendering** — Metal backend (`--interactive`) for fast preview renders on Apple Silicon; hardware ray tracing via `MTLAccelerationStructure`
 - **Zero compiled third-party dependencies** in the core renderer
 
 ## Dependencies
@@ -92,6 +92,26 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 ./build/anacapa --help
 ```
 
+### Interactive (GPU) mode
+
+Pass `--interactive` to use the Metal GPU backend instead of the CPU path tracer.
+This is intended for fast iteration — loading a scene, checking composition, or
+previewing material changes — where render time matters more than accuracy.
+
+```bash
+# Fast preview render on Apple Silicon (Metal backend)
+./build/anacapa --scene scenes/kitchen_set.usdc --interactive \
+  --width 800 --height 800 --spp 64 -o preview.exr
+```
+
+The GPU backend requires a build with `ANACAPA_ENABLE_METAL` (enabled automatically
+on macOS when Xcode is present). If the Metal device cannot be initialised the
+renderer falls back to the CPU path tracer with a warning:
+
+```
+[warn] --interactive: Metal backend unavailable, falling back to CPU path tracer
+```
+
 The output is a linear HDR EXR file. Apply exposure compensation in your viewer — the scene uses physically-based light units.
 
 When `--write-aovs` is used the EXR contains four layer groups:
@@ -163,6 +183,64 @@ prim paths without any extra tooling:
 
 The built-in scene is at [scenes/cornell_box.usda](scenes/cornell_box.usda).
 
+## GPU-accelerated rendering
+
+The Metal backend (`--interactive`) uses Apple's hardware ray-tracing API to accelerate preview renders. It is a simplified, single-bounce-per-pass megakernel designed for speed rather than accuracy.
+
+### Performance
+
+Measured on Apple M3 Pro, 400×400 @ 64 spp:
+
+| Scene | CPU (BDPT, 11 threads) | GPU (Metal) | Speedup |
+|---|---|---|---|
+| Cornell box (36 tris) | ~1168 ms | ~301 ms | ~3.9× |
+| Blender kitchen set | — | — | ~17× |
+
+Speedup scales with scene complexity — the GPU's parallelism becomes more effective as triangle and material counts grow.
+
+### Simplifications vs. the CPU renderer
+
+The GPU backend trades correctness for speed in several areas:
+
+| Feature | CPU renderer | GPU (`--interactive`) |
+|---|---|---|
+| Integrator | Bidirectional path tracing (BDPT) with MIS | Unidirectional path tracing (megakernel) |
+| Direct lighting | Full MIS: BSDF + light sampling | Single random light sample per bounce, no MIS |
+| Indirect lighting | Full multi-bounce with Russian roulette | Up to `--depth` bounces, Russian roulette after bounce 3 |
+| Light types | Rect, sphere, directional, HDRI dome | Rect and directional only; dome lights ignored |
+| Material model | Full GGX `standard_surface` (multi-lobe, clearcoat) | Lambertian, GGX (roughness/metalness), emissive |
+| GGX parameters | Full `standard_surface` introspection | Roughness fixed at 0.5 for glossy materials |
+| Caustics | Yes (via light subpaths) | No |
+| AOVs | Albedo and normals written | Not written |
+| Denoising | Supported (`--denoise`) | Not supported |
+
+These simplifications are intentional — the goal is interactive feedback, not a reference render. Use the CPU renderer (default) for final-quality output.
+
+### Architecture
+
+The Metal backend is built only on macOS and is compiled as a separate set of Objective-C++ sources:
+
+```
+src/gpu/metal/
+  MetalContext.{h,mm}           Device + command queue + .metallib loader
+  MetalBuffer.{h,mm}            RAII MTLBuffer wrapper (MTLStorageModeShared)
+  MetalAccelStructure.{h,mm}    BLAS-per-mesh + TLAS build from GeometryPool
+  MetalPathIntegrator.{h,mm}    IIntegrator impl — prepare() and renderTile()
+  shaders/
+    SharedTypes.h               POD structs shared between C++ and MSL (packed_float3)
+    Shade.metal                 Megakernel: ray generation, intersection, BSDF, direct lighting
+    RayGen.metal                (reserved for future wavefront split)
+```
+
+The shaders are compiled to a `.metallib` at build time via `xcrun metal` / `metallib` and
+loaded at runtime. The path is baked in as `ANACAPA_METALLIB_PATH`.
+
+Key design points:
+- **PIMPL everywhere** — all `id<MTL*>` types are hidden behind `struct Impl` so C++ headers stay ObjC-free.
+- **`packed_float3`** — shared structs use `packed_float3` on the MSL side to match the 12-byte C++ layout; `float3` in constant address space is 16-byte aligned and would break the ABI.
+- **`useResource` per BLAS** — Metal requires explicit resource declarations for all acceleration structures accessed indirectly through the TLAS; omitting them causes silent no-hit.
+- **Tile-sized dispatch** — each `renderTile()` call dispatches only the tile's pixel region (not the full image), keeping GPU work proportional to tile area.
+
 ## Architecture
 
 ```
@@ -185,6 +263,7 @@ src/
   render/       ThreadPool, RenderSession
   shading/lights/ AreaLight, DirectionalLight, DomeLight (HDRI)
   scene/usd/    USDLoader (geometry, lights, materials, camera)
+  gpu/metal/    MetalContext, MetalAccelStructure, MetalPathIntegrator (macOS only)
 
 scenes/
   cornell_box.usda   built-in Cornell box reference scene
@@ -201,7 +280,7 @@ All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable
 | 3 | Complete | Intel OIDN denoising, albedo/normal AOVs, multi-layer EXR |
 | 4 | Complete | OpenUSD scene loading (geometry, materials, lights, camera) |
 | 5 | Complete | GGX `standard_surface` BSDF, HDRI dome lights, OSL adapter, `primvars:displayColor` support |
-| 6 | Planned | Metal backend (Apple Silicon), CUDA+OptiX backend (NVIDIA) |
+| 6 | In Progress | Metal backend (Apple Silicon), CUDA+OptiX backend (NVIDIA) |
 
 ## License
 

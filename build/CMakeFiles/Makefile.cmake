@@ -27,6 +27,7 @@ set(CMAKE_MAKEFILE_DEPENDS
   "_deps/spdlog-src/cmake/utils.cmake"
   "/Users/douglascreel/dev/anacapa/cmake/compiler_options.cmake"
   "/Users/douglascreel/dev/anacapa/cmake/deps.cmake"
+  "/Users/douglascreel/dev/anacapa/src/gpu/metal/CMakeLists.txt"
   "/Users/douglascreel/dev/anacapa/tests/CMakeLists.txt"
   "/Users/douglascreel/usd/cmake/pxrTargets-release.cmake"
   "/Users/douglascreel/usd/cmake/pxrTargets.cmake"
@@ -117,6 +118,7 @@ set(CMAKE_MAKEFILE_PRODUCTS
   "_deps/googletest-build/googletest/generated/gtest.pc"
   "_deps/googletest-build/googletest/generated/gtest_main.pc"
   "_deps/googletest-build/googletest/CMakeFiles/CMakeDirectoryInformation.cmake"
+  "src/gpu/metal/CMakeFiles/CMakeDirectoryInformation.cmake"
   "tests/CMakeFiles/CMakeDirectoryInformation.cmake"
   )
 
@@ -128,5 +130,6 @@ set(CMAKE_DEPEND_INFO_FILES
   "_deps/cli11-build/src/CMakeFiles/CLI11.dir/DependInfo.cmake"
   "_deps/googletest-build/googletest/CMakeFiles/gtest.dir/DependInfo.cmake"
   "_deps/googletest-build/googletest/CMakeFiles/gtest_main.dir/DependInfo.cmake"
+  "src/gpu/metal/CMakeFiles/anacapa_metallib.dir/DependInfo.cmake"
   "tests/CMakeFiles/anacapa_tests.dir/DependInfo.cmake"
   )
