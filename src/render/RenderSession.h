@@ -29,6 +29,7 @@ struct RenderSettings {
     std::string    envPath;                // HDRI dome light (empty = none)
     float          envIntensity    = 1.f;
     IntegratorType integrator      = IntegratorType::BDPT;
+    bool           interactive     = false; // Use GPU (Metal) backend when available
     DenoiseOptions denoise;
 };
 

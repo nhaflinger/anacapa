@@ -60,6 +60,14 @@
 /Users/douglascreel/dev/anacapa/build/_deps/googletest-build/googletest/CMakeFiles/install.dir
 /Users/douglascreel/dev/anacapa/build/_deps/googletest-build/googletest/CMakeFiles/install/local.dir
 /Users/douglascreel/dev/anacapa/build/_deps/googletest-build/googletest/CMakeFiles/install/strip.dir
+/Users/douglascreel/dev/anacapa/build/src/gpu/metal/CMakeFiles/anacapa_metallib.dir
+/Users/douglascreel/dev/anacapa/build/src/gpu/metal/CMakeFiles/test.dir
+/Users/douglascreel/dev/anacapa/build/src/gpu/metal/CMakeFiles/edit_cache.dir
+/Users/douglascreel/dev/anacapa/build/src/gpu/metal/CMakeFiles/rebuild_cache.dir
+/Users/douglascreel/dev/anacapa/build/src/gpu/metal/CMakeFiles/list_install_components.dir
+/Users/douglascreel/dev/anacapa/build/src/gpu/metal/CMakeFiles/install.dir
+/Users/douglascreel/dev/anacapa/build/src/gpu/metal/CMakeFiles/install/local.dir
+/Users/douglascreel/dev/anacapa/build/src/gpu/metal/CMakeFiles/install/strip.dir
 /Users/douglascreel/dev/anacapa/build/tests/CMakeFiles/anacapa_tests.dir
 /Users/douglascreel/dev/anacapa/build/tests/CMakeFiles/test.dir
 /Users/douglascreel/dev/anacapa/build/tests/CMakeFiles/edit_cache.dir

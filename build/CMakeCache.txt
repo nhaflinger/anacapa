@@ -21,7 +21,7 @@ ANACAPA_ENABLE_ASAN:BOOL=OFF
 ANACAPA_ENABLE_CUDA:BOOL=OFF
 
 //Build Metal GPU backend (Phase 5, macOS)
-ANACAPA_ENABLE_METAL:BOOL=OFF
+ANACAPA_ENABLE_METAL:BOOL=ON
 
 //Build with Intel OpenImageDenoise support
 ANACAPA_ENABLE_OIDN:BOOL=ON
@@ -64,7 +64,7 @@ CMAKE_AR:FILEPATH=/Library/Developer/CommandLineTools/usr/bin/ar
 
 //Choose the type of build, options are: None Debug Release RelWithDebInfo
 // MinSizeRel ...
-CMAKE_BUILD_TYPE:STRING=RelWithDebInfo
+CMAKE_BUILD_TYPE:STRING=Release
 
 //Enable/Disable color output during build.
 CMAKE_COLOR_MAKEFILE:BOOL=ON
@@ -352,6 +352,9 @@ FETCHCONTENT_UPDATES_DISCONNECTED_GOOGLETEST:BOOL=OFF
 //Enables UPDATE_DISCONNECTED behavior just for population of spdlog
 FETCHCONTENT_UPDATES_DISCONNECTED_SPDLOG:BOOL=OFF
 
+//Path to a library.
+FOUNDATION_LIB:FILEPATH=/Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/System/Library/Frameworks/Foundation.framework
+
 //Git command line client
 GIT_EXECUTABLE:FILEPATH=/usr/bin/git
 
@@ -366,11 +369,17 @@ INSTALL_GTEST:BOOL=ON
 //The directory containing a CMake configuration file for Imath.
 Imath_DIR:PATH=/opt/homebrew/lib/cmake/Imath
 
+//Path to a library.
+METAL_LIBRARY:FILEPATH=/Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/System/Library/Frameworks/Metal.framework
+
 //No help, variable specified on the command line.
 OpenImageDenoise_DIR:UNINITIALIZED=/opt/homebrew/Cellar/open-image-denoise/2.4.1/lib/cmake/OpenImageDenoise-2.4.1
 
 //The directory containing a CMake configuration file for OpenImageIO.
 OpenImageIO_DIR:PATH=/opt/homebrew/lib/cmake/OpenImageIO
+
+//Path to a library.
+QUARTZCORE_LIB:FILEPATH=/Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/System/Library/Frameworks/QuartzCore.framework
 
 //Build all artifacts
 SPDLOG_BUILD_ALL:BOOL=OFF
@@ -456,6 +465,9 @@ SPDLOG_WCHAR_SUPPORT:BOOL=OFF
 
 //OpenUSD install root
 USD_ROOT:PATH=/Users/douglascreel/usd
+
+//Path to a program.
+XCRUN:FILEPATH=/usr/bin/xcrun
 
 //Value Computed by CMake
 anacapa_BINARY_DIR:STATIC=/Users/douglascreel/dev/anacapa/build
@@ -648,7 +660,7 @@ CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_NM
 CMAKE_NM-ADVANCED:INTERNAL=1
 //number of local generators
-CMAKE_NUMBER_OF_MAKEFILES:INTERNAL=9
+CMAKE_NUMBER_OF_MAKEFILES:INTERNAL=10
 //ADVANCED property for variable: CMAKE_OBJCOPY
 CMAKE_OBJCOPY-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_OBJDUMP

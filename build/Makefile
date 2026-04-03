@@ -250,6 +250,19 @@ gtest_main/fast:
 .PHONY : gtest_main/fast
 
 #=============================================================================
+# Target rules for targets named anacapa_metallib
+
+# Build rule for target.
+anacapa_metallib: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 anacapa_metallib
+.PHONY : anacapa_metallib
+
+# fast build rule for target.
+anacapa_metallib/fast:
+	$(MAKE) $(MAKESILENT) -f src/gpu/metal/CMakeFiles/anacapa_metallib.dir/build.make src/gpu/metal/CMakeFiles/anacapa_metallib.dir/build
+.PHONY : anacapa_metallib/fast
+
+#=============================================================================
 # Target rules for targets named anacapa_tests
 
 # Build rule for target.
@@ -309,6 +322,102 @@ src/film/Film.s: src/film/Film.cpp.s
 src/film/Film.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.s
 .PHONY : src/film/Film.cpp.s
+
+src/gpu/metal/MetalAccelStructure.o: src/gpu/metal/MetalAccelStructure.mm.o
+.PHONY : src/gpu/metal/MetalAccelStructure.o
+
+# target to build an object file
+src/gpu/metal/MetalAccelStructure.mm.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.o
+.PHONY : src/gpu/metal/MetalAccelStructure.mm.o
+
+src/gpu/metal/MetalAccelStructure.i: src/gpu/metal/MetalAccelStructure.mm.i
+.PHONY : src/gpu/metal/MetalAccelStructure.i
+
+# target to preprocess a source file
+src/gpu/metal/MetalAccelStructure.mm.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.i
+.PHONY : src/gpu/metal/MetalAccelStructure.mm.i
+
+src/gpu/metal/MetalAccelStructure.s: src/gpu/metal/MetalAccelStructure.mm.s
+.PHONY : src/gpu/metal/MetalAccelStructure.s
+
+# target to generate assembly for a file
+src/gpu/metal/MetalAccelStructure.mm.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.s
+.PHONY : src/gpu/metal/MetalAccelStructure.mm.s
+
+src/gpu/metal/MetalBuffer.o: src/gpu/metal/MetalBuffer.mm.o
+.PHONY : src/gpu/metal/MetalBuffer.o
+
+# target to build an object file
+src/gpu/metal/MetalBuffer.mm.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.o
+.PHONY : src/gpu/metal/MetalBuffer.mm.o
+
+src/gpu/metal/MetalBuffer.i: src/gpu/metal/MetalBuffer.mm.i
+.PHONY : src/gpu/metal/MetalBuffer.i
+
+# target to preprocess a source file
+src/gpu/metal/MetalBuffer.mm.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.i
+.PHONY : src/gpu/metal/MetalBuffer.mm.i
+
+src/gpu/metal/MetalBuffer.s: src/gpu/metal/MetalBuffer.mm.s
+.PHONY : src/gpu/metal/MetalBuffer.s
+
+# target to generate assembly for a file
+src/gpu/metal/MetalBuffer.mm.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.s
+.PHONY : src/gpu/metal/MetalBuffer.mm.s
+
+src/gpu/metal/MetalContext.o: src/gpu/metal/MetalContext.mm.o
+.PHONY : src/gpu/metal/MetalContext.o
+
+# target to build an object file
+src/gpu/metal/MetalContext.mm.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.o
+.PHONY : src/gpu/metal/MetalContext.mm.o
+
+src/gpu/metal/MetalContext.i: src/gpu/metal/MetalContext.mm.i
+.PHONY : src/gpu/metal/MetalContext.i
+
+# target to preprocess a source file
+src/gpu/metal/MetalContext.mm.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.i
+.PHONY : src/gpu/metal/MetalContext.mm.i
+
+src/gpu/metal/MetalContext.s: src/gpu/metal/MetalContext.mm.s
+.PHONY : src/gpu/metal/MetalContext.s
+
+# target to generate assembly for a file
+src/gpu/metal/MetalContext.mm.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.s
+.PHONY : src/gpu/metal/MetalContext.mm.s
+
+src/gpu/metal/MetalPathIntegrator.o: src/gpu/metal/MetalPathIntegrator.mm.o
+.PHONY : src/gpu/metal/MetalPathIntegrator.o
+
+# target to build an object file
+src/gpu/metal/MetalPathIntegrator.mm.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.o
+.PHONY : src/gpu/metal/MetalPathIntegrator.mm.o
+
+src/gpu/metal/MetalPathIntegrator.i: src/gpu/metal/MetalPathIntegrator.mm.i
+.PHONY : src/gpu/metal/MetalPathIntegrator.i
+
+# target to preprocess a source file
+src/gpu/metal/MetalPathIntegrator.mm.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.i
+.PHONY : src/gpu/metal/MetalPathIntegrator.mm.i
+
+src/gpu/metal/MetalPathIntegrator.s: src/gpu/metal/MetalPathIntegrator.mm.s
+.PHONY : src/gpu/metal/MetalPathIntegrator.s
+
+# target to generate assembly for a file
+src/gpu/metal/MetalPathIntegrator.mm.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/anacapa_lib.dir/build.make CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.s
+.PHONY : src/gpu/metal/MetalPathIntegrator.mm.s
 
 src/integrator/BDPTIntegrator.o: src/integrator/BDPTIntegrator.cpp.o
 .PHONY : src/integrator/BDPTIntegrator.o
@@ -491,6 +600,7 @@ help:
 	@echo "... list_install_components"
 	@echo "... rebuild_cache"
 	@echo "... test"
+	@echo "... anacapa_metallib"
 	@echo "... CLI11"
 	@echo "... anacapa"
 	@echo "... anacapa_lib"
@@ -504,6 +614,18 @@ help:
 	@echo "... src/film/Film.o"
 	@echo "... src/film/Film.i"
 	@echo "... src/film/Film.s"
+	@echo "... src/gpu/metal/MetalAccelStructure.o"
+	@echo "... src/gpu/metal/MetalAccelStructure.i"
+	@echo "... src/gpu/metal/MetalAccelStructure.s"
+	@echo "... src/gpu/metal/MetalBuffer.o"
+	@echo "... src/gpu/metal/MetalBuffer.i"
+	@echo "... src/gpu/metal/MetalBuffer.s"
+	@echo "... src/gpu/metal/MetalContext.o"
+	@echo "... src/gpu/metal/MetalContext.i"
+	@echo "... src/gpu/metal/MetalContext.s"
+	@echo "... src/gpu/metal/MetalPathIntegrator.o"
+	@echo "... src/gpu/metal/MetalPathIntegrator.i"
+	@echo "... src/gpu/metal/MetalPathIntegrator.s"
 	@echo "... src/integrator/BDPTIntegrator.o"
 	@echo "... src/integrator/BDPTIntegrator.i"
 	@echo "... src/integrator/BDPTIntegrator.s"

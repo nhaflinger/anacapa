@@ -10,6 +10,10 @@ set(CMAKE_DEPENDS_LANGUAGES
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/Users/douglascreel/dev/anacapa/src/accel/BVHBackend.cpp" "CMakeFiles/anacapa_lib.dir/src/accel/BVHBackend.cpp.o" "gcc" "CMakeFiles/anacapa_lib.dir/src/accel/BVHBackend.cpp.o.d"
   "/Users/douglascreel/dev/anacapa/src/film/Film.cpp" "CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.o" "gcc" "CMakeFiles/anacapa_lib.dir/src/film/Film.cpp.o.d"
+  "/Users/douglascreel/dev/anacapa/src/gpu/metal/MetalAccelStructure.mm" "CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.o" "gcc" "CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalAccelStructure.mm.o.d"
+  "/Users/douglascreel/dev/anacapa/src/gpu/metal/MetalBuffer.mm" "CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.o" "gcc" "CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalBuffer.mm.o.d"
+  "/Users/douglascreel/dev/anacapa/src/gpu/metal/MetalContext.mm" "CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.o" "gcc" "CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalContext.mm.o.d"
+  "/Users/douglascreel/dev/anacapa/src/gpu/metal/MetalPathIntegrator.mm" "CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.o" "gcc" "CMakeFiles/anacapa_lib.dir/src/gpu/metal/MetalPathIntegrator.mm.o.d"
   "/Users/douglascreel/dev/anacapa/src/integrator/BDPTIntegrator.cpp" "CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o" "gcc" "CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o.d"
   "/Users/douglascreel/dev/anacapa/src/integrator/MISWeight.cpp" "CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o" "gcc" "CMakeFiles/anacapa_lib.dir/src/integrator/MISWeight.cpp.o.d"
   "/Users/douglascreel/dev/anacapa/src/integrator/PathIntegrator.cpp" "CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o" "gcc" "CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o.d"

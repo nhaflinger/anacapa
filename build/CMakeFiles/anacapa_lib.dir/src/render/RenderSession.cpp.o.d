@@ -964,6 +964,7 @@ CMakeFiles/anacapa_lib.dir/src/render/RenderSession.cpp.o: \
   /Users/douglascreel/dev/anacapa/include/anacapa/integrator/PathVertex.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/integrator/MISWeight.h \
   /Users/douglascreel/dev/anacapa/src/render/../integrator/LightSampler.h \
+  /Users/douglascreel/dev/anacapa/src/render/../gpu/metal/MetalPathIntegrator.h \
   /Users/douglascreel/dev/anacapa/src/render/../sampling/HaltonSampler.h \
   /Users/douglascreel/dev/anacapa/src/render/../sampling/PCGRng.h \
   /Users/douglascreel/dev/anacapa/src/render/../shading/Lambertian.h \

@@ -879,5 +879,6 @@ CMakeFiles/anacapa_lib.dir/src/integrator/PathIntegrator.cpp.o: \
   /Users/douglascreel/dev/anacapa/include/anacapa/shading/IMaterial.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/shading/ShadingContext.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/accel/IAccelerationStructure.h \
+  /Users/douglascreel/dev/anacapa/include/anacapa/accel/GeometryPool.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/shading/ILight.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/sampling/ISampler.h

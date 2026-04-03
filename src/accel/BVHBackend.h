@@ -70,6 +70,8 @@ public:
     TraceResult trace(const Ray& ray) const override;
     bool        occluded(const Ray& ray) const override;
 
+    const GeometryPool& pool() const override { return m_pool; }
+
 private:
     // -----------------------------------------------------------------------
     // Build

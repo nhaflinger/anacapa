@@ -66,7 +66,7 @@ if(ANACAPA_ENABLE_METAL)
         ${METAL_LIBRARY} ${FOUNDATION_LIB} ${QUARTZCORE_LIB}
     )
     target_compile_definitions(anacapa_lib PUBLIC ANACAPA_ENABLE_METAL)
-    add_subdirectory(src/backends/metal)
+    add_subdirectory(src/gpu/metal)
 endif()
 
 if(ANACAPA_ENABLE_OIDN)

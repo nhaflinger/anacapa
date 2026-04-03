@@ -878,6 +878,7 @@ CMakeFiles/anacapa_lib.dir/src/integrator/BDPTIntegrator.cpp.o: \
   /Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk/usr/include/c++/v1/cstdarg \
   /Users/douglascreel/dev/anacapa/include/anacapa/integrator/PathVertex.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/accel/IAccelerationStructure.h \
+  /Users/douglascreel/dev/anacapa/include/anacapa/accel/GeometryPool.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/integrator/MISWeight.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/shading/IMaterial.h \
   /Users/douglascreel/dev/anacapa/include/anacapa/shading/ShadingContext.h \
