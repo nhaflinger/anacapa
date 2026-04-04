@@ -34,7 +34,7 @@ Header-only dependencies (fetched automatically by CMake): spdlog, CLI11, Google
 
 ## Building
 
-CMake presets place compiled output in architecture-specific subdirectories (`build/Darwin-arm64`, `build/Linux-x86_64`, etc.) so binaries are never mixed with source files.
+CMake presets place compiled output in OS-specific subdirectories (`build/Darwin`, `build/Linux`, etc.) so binaries are never mixed with source files.
 
 ```bash
 # List available presets
@@ -45,7 +45,7 @@ brew install openimageio
 
 # Configure and build — macOS arm64, no optional features
 cmake --preset macos-arm64
-cmake --build build/Darwin-arm64 --parallel
+cmake --build build/Darwin --parallel
 
 # Build with USD + Metal (typical development setup on Apple Silicon)
 # OpenUSD must be built from source using Pixar's build script:
@@ -53,55 +53,55 @@ cmake --build build/Darwin-arm64 --parallel
 cmake --preset macos-arm64-usd \
   -DUSD_ROOT=~/usd \
   -DCMAKE_PREFIX_PATH=~/usd
-cmake --build build/Darwin-arm64 --parallel
+cmake --build build/Darwin --parallel
 
 # Build with Intel OIDN denoising
 brew install open-image-denoise
 cmake --preset macos-arm64 \
   -DANACAPA_ENABLE_OIDN=ON \
   -DOpenImageDenoise_DIR=/opt/homebrew/lib/cmake/OpenImageDenoise-2.4.1
-cmake --build build/Darwin-arm64 --parallel
+cmake --build build/Darwin --parallel
 
 # Run tests
-cd build/Darwin-arm64 && ctest --output-on-failure
+cd build/Darwin && ctest --output-on-failure
 ```
 
 ## Usage
 
 ```bash
 # Render the built-in Cornell box scene (BDPT, 64 spp)
-./build/Darwin-arm64/anacapa -o images/render.exr
+./build/Darwin/anacapa -o images/render.exr
 
 # Load a USD scene file
 DYLD_LIBRARY_PATH=~/usd/lib \
-./build/Darwin-arm64/anacapa --scene scenes/cornell_box.usda -o images/render.exr
+./build/Darwin/anacapa --scene scenes/cornell_box.usda -o images/render.exr
 
 # Render with motion blur (shutter read automatically from USD startTimeCode/endTimeCode)
 DYLD_LIBRARY_PATH=~/usd/lib \
-./build/Darwin-arm64/anacapa --scene scenes/cornell_box_motion.usda -o images/render.exr
+./build/Darwin/anacapa --scene scenes/cornell_box_motion.usda -o images/render.exr
 
 # Override shutter interval explicitly
-./build/Darwin-arm64/anacapa --scene scene.usda \
+./build/Darwin/anacapa --scene scene.usda \
   --shutter-open 0 --shutter-close 1 -o images/render.exr
 
 # Render with denoising
-./build/Darwin-arm64/anacapa --scene scenes/cornell_box.usda \
+./build/Darwin/anacapa --scene scenes/cornell_box.usda \
   -o images/render.exr --denoise
 
 # Render with denoising + write albedo and normals layers to the EXR
-./build/Darwin-arm64/anacapa --scene scenes/cornell_box.usda \
+./build/Darwin/anacapa --scene scenes/cornell_box.usda \
   -o images/render.exr --denoise --write-aovs
 
 # Render with depth of field (thin lens, f/4, focused at 5 units)
-./build/Darwin-arm64/anacapa --scene scenes/cornell_box.usda \
+./build/Darwin/anacapa --scene scenes/cornell_box.usda \
   -o images/render.exr --fstop 4 --focus-distance 5
 
 # Fast GPU preview on Apple Silicon
-./build/Darwin-arm64/anacapa --scene scenes/cornell_box.usda \
+./build/Darwin/anacapa --scene scenes/cornell_box.usda \
   --interactive --width 800 --height 800 --spp 64 -o preview.exr
 
 # Full options
-./build/Darwin-arm64/anacapa \
+./build/Darwin/anacapa \
   --scene          scenes/cornell_box.usda \
   --camera         /World/RenderCam       \
   --integrator     bdpt                   \
@@ -118,7 +118,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
   --write-aovs                            \
   --interactive
 
-./build/Darwin-arm64/anacapa --help
+./build/Darwin/anacapa --help
 ```
 
 ### Options reference
