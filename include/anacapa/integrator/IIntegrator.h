@@ -39,6 +39,12 @@ struct Camera {
     float apertureRadius = 0.f;  // Half the aperture diameter in world units
     float focalDistance  = 0.f;  // Distance from origin to the focal plane
 
+    // Motion blur shutter interval in normalized [0, 1] time.
+    // shutterOpen == shutterClose (both 0) means no motion blur —
+    // all rays get time=0 and transforms are sampled at t=0 only.
+    float shutterOpen  = 0.f;
+    float shutterClose = 0.f;
+
     static Camera makePinhole(Vec3f from, Vec3f at, Vec3f up,
                                float vfovDegrees,
                                uint32_t width, uint32_t height) {
@@ -79,9 +85,11 @@ struct Camera {
     // Generate a ray for pixel (px, py).
     //   jitterU, jitterV — sub-pixel jitter in [0, 1)
     //   lensU,   lensV   — aperture sample in [0, 1); ignored when apertureRadius == 0
+    //   timeU            — shutter time sample in [0, 1); mapped to [shutterOpen, shutterClose]
     Ray generateRay(uint32_t px, uint32_t py,
                     float jitterU, float jitterV,
-                    float lensU = 0.5f, float lensV = 0.5f) const {
+                    float lensU = 0.5f, float lensV = 0.5f,
+                    float timeU = 0.f) const {
         float s = (static_cast<float>(px) + jitterU) / static_cast<float>(imageWidth);
         // Flip py: row 0 is the top of the image, but lowerLeftCorner + vertical*0
         // is the bottom of the frustum. Invert so the image isn't upside-down.
@@ -90,8 +98,14 @@ struct Camera {
 
         Vec3f target = lowerLeftCorner + horizontal*s + vertical*t;
 
-        if (apertureRadius <= 0.f)
-            return Ray{origin, normalize(target - origin)};
+        // Map [0,1) time sample to the shutter interval
+        float rayTime = shutterOpen + timeU * (shutterClose - shutterOpen);
+
+        if (apertureRadius <= 0.f) {
+            Ray r{origin, normalize(target - origin)};
+            r.time = rayTime;
+            return r;
+        }
 
         // Thin lens: sample a point on the aperture disk using concentric
         // mapping (preserves uniform distribution, avoids clumping at center).
@@ -122,7 +136,9 @@ struct Camera {
         Vec3f focalPoint = origin + pinholeDir * focalDistance;
 
         // Rays from all lens points converge at the focal point.
-        return Ray{lensPoint, normalize(focalPoint - lensPoint)};
+        Ray r{lensPoint, normalize(focalPoint - lensPoint)};
+        r.time = rayTime;
+        return r;
     }
 };
 

@@ -54,6 +54,19 @@ static Vec3f transformPoint(const GfMatrix4d& m, const GfVec3d& p) {
              static_cast<float>(r[2]) };
 }
 
+static Mat4f toMat4f(const GfMatrix4d& m) {
+    // USD GfMatrix4d uses row-vector convention: p_world = p_local * M,
+    // so translation is in the last ROW (m[3][0..2]).
+    // Anacapa Mat4f uses column-vector convention: p_world = M * p_local,
+    // so translation must be in the last COLUMN (m[0..2][3]).
+    // Transpose on import to reconcile.
+    Mat4f r;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            r.m[i][j] = static_cast<float>(m[j][i]);  // transposed
+    return r;
+}
+
 // Apply a 4x4 world transform to a normal using inverse-transpose
 static Vec3f transformNormal(const GfMatrix4d& m, const GfVec3f& n) {
     GfVec3d nd(n[0], n[1], n[2]);
@@ -205,9 +218,15 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat) {
 // ---------------------------------------------------------------------------
 // loadMesh — triangulate a UsdGeomMesh and add it to the GeometryPool.
 // Returns the meshID assigned by the pool, or ~0u on failure.
+//
+// xform0 = world-from-object at shutter open (t=0).
+// xform1 = world-from-object at shutter close (t=1); equals xform0 for static meshes.
+// hasMotion = true when the prim has time-varying transforms.
 // ---------------------------------------------------------------------------
 static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
-                         const GfMatrix4d& xform,
+                         const GfMatrix4d& xform0,
+                         const GfMatrix4d& xform1,
+                         bool hasMotion,
                          GeometryPool& pool) {
     VtArray<GfVec3f> points;
     usdMesh.GetPointsAttr().Get(&points);
@@ -217,6 +236,9 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
     usdMesh.GetFaceVertexCountsAttr().Get(&fvcCounts);
     usdMesh.GetFaceVertexIndicesAttr().Get(&fvcIndices);
     if (fvcCounts.empty() || fvcIndices.empty()) return ~0u;
+
+    // For animated meshes we keep positions in object space and carry both transforms.
+    const GfMatrix4d& xform = xform0;
 
     // Normals — try face-varying first, then vertex, then compute flat
     VtArray<GfVec3f> normals;
@@ -255,22 +277,38 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
 
             uint32_t base = static_cast<uint32_t>(desc.positions.size());
 
-            // Positions (baked to world space)
-            desc.positions.push_back(transformPoint(xform, GfVec3d(points[i0])));
-            desc.positions.push_back(transformPoint(xform, GfVec3d(points[i1])));
-            desc.positions.push_back(transformPoint(xform, GfVec3d(points[i2])));
+            if (hasMotion) {
+                // Object-space positions — BVH will apply interpolated transform at ray.time
+                desc.positions.push_back({(float)points[i0][0], (float)points[i0][1], (float)points[i0][2]});
+                desc.positions.push_back({(float)points[i1][0], (float)points[i1][1], (float)points[i1][2]});
+                desc.positions.push_back({(float)points[i2][0], (float)points[i2][1], (float)points[i2][2]});
+            } else {
+                // Bake to world space (static mesh fast path)
+                desc.positions.push_back(transformPoint(xform, GfVec3d(points[i0])));
+                desc.positions.push_back(transformPoint(xform, GfVec3d(points[i1])));
+                desc.positions.push_back(transformPoint(xform, GfVec3d(points[i2])));
+            }
 
             // Normals
             auto getNormal = [&](int vi, int fvi) -> Vec3f {
                 if (!normals.empty()) {
                     int ni = (normalInterp == UsdGeomTokens->faceVarying) ? fvi : vi;
-                    if (ni < (int)normals.size())
+                    if (ni < (int)normals.size()) {
+                        if (hasMotion)
+                            return safeNormalize({normals[ni][0], normals[ni][1], normals[ni][2]});
                         return transformNormal(xform, normals[ni]);
+                    }
                 }
                 // Compute geometric normal
-                Vec3f a = transformPoint(xform, GfVec3d(points[i0]));
-                Vec3f b = transformPoint(xform, GfVec3d(points[i1]));
-                Vec3f c = transformPoint(xform, GfVec3d(points[i2]));
+                Vec3f a = hasMotion
+                    ? Vec3f{(float)points[i0][0], (float)points[i0][1], (float)points[i0][2]}
+                    : transformPoint(xform, GfVec3d(points[i0]));
+                Vec3f b = hasMotion
+                    ? Vec3f{(float)points[i1][0], (float)points[i1][1], (float)points[i1][2]}
+                    : transformPoint(xform, GfVec3d(points[i1]));
+                Vec3f c = hasMotion
+                    ? Vec3f{(float)points[i2][0], (float)points[i2][1], (float)points[i2][2]}
+                    : transformPoint(xform, GfVec3d(points[i2]));
                 return safeNormalize(cross(b - a, c - a));
             };
             desc.normals.push_back(getNormal(i0, fvi0));
@@ -298,6 +336,16 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
     }
 
     if (desc.positions.empty()) return ~0u;
+
+    if (hasMotion) {
+        desc.objectToWorld  = toMat4f(xform0);
+        desc.worldToObject  = toMat4f(xform0.GetInverse());
+        desc.objectToWorld1 = toMat4f(xform1);
+        desc.worldToObject1 = toMat4f(xform1.GetInverse());
+        desc.hasMotion      = true;
+    }
+    // Static meshes: positions already in world space; objectToWorld stays identity.
+
     return pool.addMesh(std::move(desc));
 }
 
@@ -388,7 +436,28 @@ LoadedScene loadUSD(const std::string& path,
                  path,
                  UsdGeomGetStageUpAxis(stage).GetString());
 
-    UsdGeomXformCache xformCache;
+    // Use the stage's authored time range for motion detection.
+    // Falls back to 0/1 if the stage has no time codes (static scenes).
+    double startTime = stage->HasAuthoredTimeCodeRange()
+                         ? stage->GetStartTimeCode() : 0.0;
+    double endTime   = stage->HasAuthoredTimeCodeRange()
+                         ? stage->GetEndTimeCode()   : 1.0;
+
+    // Convert time code range to a normalized [0,1] shutter interval.
+    // timeCodesPerSecond defaults to 24 in USD if not authored.
+    double tcps = stage->GetTimeCodesPerSecond();
+    if (tcps <= 0.0) tcps = 24.0;
+    double durationSec = (endTime - startTime) / tcps;
+    // Normalized: open=0, close=1 spans the full startTime→endTime interval.
+    result.shutterOpen  = 0.f;
+    result.shutterClose = (durationSec > 0.0) ? 1.f : 0.f;
+    spdlog::info("USDLoader: time range [{}, {}] @ {} tcps ({:.4f}s)",
+                 startTime, endTime, tcps, durationSec);
+
+    UsdTimeCode tcOpen{startTime};
+    UsdTimeCode tcClose{endTime};
+    UsdGeomXformCache xformCache{tcOpen};    // shutter-open
+    UsdGeomXformCache xformCacheT1{tcClose}; // shutter-close (motion detection)
 
     // Cache material → IMaterial* to avoid duplicating per-mesh
     std::unordered_map<std::string, uint32_t> matPathToIdx;
@@ -410,9 +479,19 @@ LoadedScene loadUSD(const std::string& path,
         // ---- Mesh ----
         if (prim.IsA<UsdGeomMesh>()) {
             UsdGeomMesh usdMesh(prim);
-            GfMatrix4d xform = xformCache.GetLocalToWorldTransform(prim);
 
-            uint32_t meshID = loadMesh(usdMesh, xform, result.geomPool);
+            // Detect animated transforms by comparing the full world transform
+            // (including parent hierarchy) at t=0 vs t=1.  This catches motion
+            // that lives on a parent Xform prim rather than on the Mesh itself.
+            GfMatrix4d xform0 = xformCache.GetLocalToWorldTransform(prim);
+            GfMatrix4d xform1 = xformCacheT1.GetLocalToWorldTransform(prim);
+            bool hasMotion = (xform0 != xform1);
+
+            if (hasMotion)
+                spdlog::info("USDLoader: animated mesh '{}' (motion blur active)",
+                             prim.GetPath().GetString());
+
+            uint32_t meshID = loadMesh(usdMesh, xform0, xform1, hasMotion, result.geomPool);
             if (meshID == ~0u) {
                 spdlog::warn("USDLoader: skipped mesh '{}' (no geometry)",
                              prim.GetPath().GetString());

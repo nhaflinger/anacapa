@@ -70,6 +70,10 @@ struct PathVertexBuffer {
     // near zero and the contribution would be discarded after MIS weighting.
     std::vector<float> pathMinRoughness;
 
+    // Scene time sampled for this subpath — propagated to all spawned rays so
+    // the entire path evaluates the scene at one consistent moment in time.
+    float sceneTime = 0.f;
+
     uint32_t count    = 0;
     uint32_t capacity = 0;
 

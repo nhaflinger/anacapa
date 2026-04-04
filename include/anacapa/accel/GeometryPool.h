@@ -24,9 +24,15 @@ struct MeshDesc {
     // Indices: every 3 consecutive indices form a triangle
     std::vector<uint32_t> indices;
 
-    // World-from-object transform (identity = world space already)
-    Mat4f objectToWorld = Mat4f::identity();
-    Mat4f worldToObject = Mat4f::identity();  // Precomputed inverse
+    // World-from-object transform at shutter-open (t=0)
+    Mat4f objectToWorld  = Mat4f::identity();
+    Mat4f worldToObject  = Mat4f::identity();  // Precomputed inverse
+
+    // World-from-object transform at shutter-close (t=1).
+    // Only used when hasMotion == true.
+    Mat4f objectToWorld1 = Mat4f::identity();
+    Mat4f worldToObject1 = Mat4f::identity();
+    bool  hasMotion      = false;
 
     // Material index into SceneGraph::materials
     uint32_t materialIndex = 0;

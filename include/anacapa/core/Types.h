@@ -182,6 +182,51 @@ struct Mat4f {
                 r.m[i][j] = m[j][i];
         return r;
     }
+
+    // Linear interpolation between two matrices (used for motion blur).
+    // Correct for translation and scale; approximate for rotation
+    // (sufficient for small angular velocities between shutter samples).
+    static Mat4f lerp(const Mat4f& a, const Mat4f& b, float t) {
+        Mat4f r;
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                r.m[i][j] = a.m[i][j] * (1.f - t) + b.m[i][j] * t;
+        return r;
+    }
+
+    // Gauss-Jordan elimination. Returns identity if matrix is singular.
+    Mat4f inverse() const {
+        float a[4][8];
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) a[i][j]     = m[i][j];
+            for (int j = 0; j < 4; ++j) a[i][j + 4] = (i == j) ? 1.f : 0.f;
+        }
+        for (int col = 0; col < 4; ++col) {
+            // Partial pivoting
+            int pivot = col;
+            for (int row = col + 1; row < 4; ++row)
+                if (std::abs(a[row][col]) > std::abs(a[pivot][col]))
+                    pivot = row;
+            if (pivot != col)
+                for (int j = 0; j < 8; ++j)
+                    std::swap(a[col][j], a[pivot][j]);
+            float diag = a[col][col];
+            if (std::abs(diag) < 1e-10f) return identity(); // singular
+            float invDiag = 1.f / diag;
+            for (int j = 0; j < 8; ++j) a[col][j] *= invDiag;
+            for (int row = 0; row < 4; ++row) {
+                if (row == col) continue;
+                float factor = a[row][col];
+                for (int j = 0; j < 8; ++j)
+                    a[row][j] -= factor * a[col][j];
+            }
+        }
+        Mat4f r;
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                r.m[i][j] = a[i][j + 4];
+        return r;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -211,6 +256,7 @@ struct Ray {
     float  tMin  = 1e-4f;
     float  tMax  = std::numeric_limits<float>::infinity();
     uint32_t depth = 0;
+    float  time  = 0.f; // Normalized shutter time in [0, 1]; 0 = shutter open
 
     Ray() = default;
     Ray(Vec3f o, Vec3f d, float tMin = 1e-4f, float tMax = std::numeric_limits<float>::infinity())

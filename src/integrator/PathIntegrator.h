@@ -42,13 +42,15 @@ private:
                 ISampler& sampler, uint32_t depth,
                 Spectrum& outAlbedo, Vec3f& outNormal) const;
 
-    // Direct lighting: sample one light, return MIS-weighted contribution
+    // Direct lighting: sample one light, return MIS-weighted contribution.
+    // sceneTime is stamped on shadow rays for temporal consistency.
     Spectrum estimateDirect(const SurfaceInteraction& si,
                              const IMaterial& mat,
                              Vec3f wo,
                              const ILight& light,
                              const SceneView& scene,
-                             ISampler& sampler) const;
+                             ISampler& sampler,
+                             float sceneTime) const;
 
     static float powerHeuristic(float nF, float pdfF,
                                   float nG, float pdfG) {

@@ -47,6 +47,15 @@ int main(int argc, char** argv) {
                    "Overrides the USD camera value if present.")
        ->default_val(0.f);
 
+    app.add_option("--shutter-open", settings.shutterOpen,
+                   "Shutter open time (USD time units, default 0). "
+                   "Must be less than --shutter-close to enable motion blur.")
+       ->default_val(0.f);
+    app.add_option("--shutter-close", settings.shutterClose,
+                   "Shutter close time (USD time units, default 0). "
+                   "Set > shutter-open to enable transformation motion blur.")
+       ->default_val(0.f);
+
     app.add_flag("--interactive", settings.interactive,
                  "Use GPU (Metal) backend for fast preview renders — "
                  "lower quality, much faster (requires ANACAPA_ENABLE_METAL)");

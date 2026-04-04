@@ -32,7 +32,8 @@ void PathIntegrator::renderTile(const SceneView& scene,
                 sampler.startPixelSample(px, py, tile.sampleStart + s);
                 Vec2f jitter = sampler.get2D();
                 Vec2f lens   = sampler.get2D();
-                Ray ray = cam.generateRay(px, py, jitter.x, jitter.y, lens.x, lens.y);
+                float timeU  = sampler.get1D();
+                Ray ray = cam.generateRay(px, py, jitter.x, jitter.y, lens.x, lens.y, timeU);
 
                 Spectrum albedo = {};
                 Vec3f    normal = {};
@@ -110,7 +111,7 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
 
             Spectrum Ld = estimateDirect(si, *mat, wo,
                                           *scene.lights[lightIdx],
-                                          scene, sampler);
+                                          scene, sampler, ray.time);
             L += beta * Ld * static_cast<float>(scene.lights.size());
         }
 
@@ -120,6 +121,7 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
         specularBounce = bs.isDelta();
         beta *= bs.f / bs.pdf;
         r = spawnRay(si.p, si.n, bs.wi);
+        r.time = ray.time;  // freeze scene at the same moment for all bounces
 
         if (bounce >= m_minDepth) {
             float q = 1.f - std::min(beta.maxComponent(), 0.95f);
@@ -136,7 +138,8 @@ Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
                                          Vec3f wo,
                                          const ILight& light,
                                          const SceneView& scene,
-                                         ISampler& sampler) const {
+                                         ISampler& sampler,
+                                         float sceneTime) const {
     Spectrum Ld = {};
     ShadingContext ctx(si, -wo);
 
@@ -147,6 +150,7 @@ Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
             BSDFEval be = mat.evaluate(ctx, wo, ls.wi);
             if (!isBlack(be.f)) {
                 Ray shadowRay = spawnRayTo(si.p, si.n, si.p + ls.wi * ls.dist);
+                shadowRay.time = sceneTime;
                 if (!scene.accel->occluded(shadowRay)) {
                     float weight = ls.isDelta
                         ? 1.f
@@ -170,6 +174,7 @@ Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
 
                 Ray shadowRay = spawnRay(si.p, si.n, bs.wi);
                 shadowRay.tMax = 1e10f;
+                shadowRay.time = sceneTime;
                 TraceResult hit = scene.accel->trace(shadowRay);
 
                 Spectrum Li = {};
