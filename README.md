@@ -7,14 +7,16 @@ Named after Anacapa Island, part of California's Channel Islands.
 ## Features
 
 - **Bidirectional path tracing (BDPT)** with multiple importance sampling and Veach MIS weights
-- **OpenUSD scene loading** — geometry, materials, lights, and camera from `.usda`/`.usdc` files
+- **OpenUSD scene loading** — geometry, materials, lights, camera, and animated transforms from `.usda`/`.usdc` files
+- **Transformation motion blur** — time-sampled USD xformOps interpolated per ray; shutter interval read automatically from the stage's `startTimeCode`/`endTimeCode`
 - **Intel OIDN denoising** — AI denoiser with albedo and normal auxiliary buffers, optional
-- **Custom SAH BVH** — surface area heuristic build with 12-bucket binning, Möller–Trumbore traversal
+- **Custom SAH BVH** — surface area heuristic build with 12-bucket binning, Möller–Trumbore traversal; time-expanded bounds for animated meshes
 - **Custom thread pool** — tile-parallel rendering with `std::thread`, no external threading library
 - **Scrambled Halton sampler** — low-discrepancy sampling up to 128 dimensions
 - **Multi-layer EXR output** — beauty, denoised, albedo, and normals layers via OpenImageIO
 - **GGX multi-layer BSDF** — MaterialX `standard_surface` (metallic conductor, dielectric specular, Lambertian diffuse, clearcoat)
 - **HDRI dome lights** — equirectangular EXR/HDR with 2D piecewise-constant importance sampling
+- **Depth of field** — thin-lens model; f-stop and focus distance from the USD camera or CLI override
 - **OSL shading language** — optional (`-DANACAPA_ENABLE_OSL=ON`)
 - **GPU-accelerated interactive rendering** — Metal backend (`--interactive`) for Apple Silicon (hardware ray tracing via `MTLAccelerationStructure`); CUDA+OptiX backend planned for NVIDIA
 - **Zero compiled third-party dependencies** in the core renderer
@@ -26,145 +28,160 @@ Named after Anacapa Island, part of California's Channel Islands.
 | OpenImageIO | Yes | `brew install openimageio` |
 | OpenUSD | No (`-DANACAPA_ENABLE_USD=ON`) | Build from source — see below |
 | OpenImageDenoise | No (`-DANACAPA_ENABLE_OIDN=ON`) | `brew install open-image-denoise` |
-| Open Shading Language | No (`-DANACAPA_ENABLE_OSL=ON`) | `brew install open-shading-language` (if available) |
+| Open Shading Language | No (`-DANACAPA_ENABLE_OSL=ON`) | `brew install open-shading-language` |
 
 Header-only dependencies (fetched automatically by CMake): spdlog, CLI11, GoogleTest.
 
 ## Building
 
+CMake presets place compiled output in architecture-specific subdirectories (`build/Darwin-arm64`, `build/Linux-x86_64`, etc.) so binaries are never mixed with source files.
+
 ```bash
+# List available presets
+cmake --list-presets
+
 # Prerequisites (macOS)
 brew install openimageio
 
-# Configure and build (no USD, no OIDN)
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
+# Configure and build — macOS arm64, no optional features
+cmake --preset macos-arm64
+cmake --build build/Darwin-arm64 --parallel
 
-# Build with Intel OIDN denoising support
-brew install open-image-denoise
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DANACAPA_ENABLE_OIDN=ON \
-  -DOpenImageDenoise_DIR=/opt/homebrew/lib/cmake/OpenImageDenoise-2.4.1
-cmake --build build --parallel
-
-# Build with OpenUSD support
+# Build with USD + Metal (typical development setup on Apple Silicon)
 # OpenUSD must be built from source using Pixar's build script:
 #   python3 USD/build_scripts/build_usd.py ~/usd
-# Then configure with:
-cmake -B build -DCMAKE_BUILD_TYPE=Release \
-  -DANACAPA_ENABLE_USD=ON -DUSD_ROOT=~/usd \
+cmake --preset macos-arm64-usd \
+  -DUSD_ROOT=~/usd \
+  -DCMAKE_PREFIX_PATH=~/usd
+cmake --build build/Darwin-arm64 --parallel
+
+# Build with Intel OIDN denoising
+brew install open-image-denoise
+cmake --preset macos-arm64 \
   -DANACAPA_ENABLE_OIDN=ON \
   -DOpenImageDenoise_DIR=/opt/homebrew/lib/cmake/OpenImageDenoise-2.4.1
-cmake --build build --parallel
+cmake --build build/Darwin-arm64 --parallel
 
 # Run tests
-cd build && ctest --output-on-failure
+cd build/Darwin-arm64 && ctest --output-on-failure
 ```
 
 ## Usage
 
 ```bash
 # Render the built-in Cornell box scene (BDPT, 64 spp)
-./build/anacapa -o images/render.exr
+./build/Darwin-arm64/anacapa -o images/render.exr
 
 # Load a USD scene file
 DYLD_LIBRARY_PATH=~/usd/lib \
-./build/anacapa --scene scenes/cornell_box.usda -o images/render.exr
+./build/Darwin-arm64/anacapa --scene scenes/cornell_box.usda -o images/render.exr
+
+# Render with motion blur (shutter read automatically from USD startTimeCode/endTimeCode)
+DYLD_LIBRARY_PATH=~/usd/lib \
+./build/Darwin-arm64/anacapa --scene scenes/cornell_box_motion.usda -o images/render.exr
+
+# Override shutter interval explicitly
+./build/Darwin-arm64/anacapa --scene scene.usda \
+  --shutter-open 0 --shutter-close 1 -o images/render.exr
 
 # Render with denoising
-./build/anacapa --scene scenes/cornell_box.usda -o images/render.exr --denoise
+./build/Darwin-arm64/anacapa --scene scenes/cornell_box.usda \
+  -o images/render.exr --denoise
 
 # Render with denoising + write albedo and normals layers to the EXR
-./build/anacapa --scene scenes/cornell_box.usda -o images/render.exr --denoise --write-aovs
+./build/Darwin-arm64/anacapa --scene scenes/cornell_box.usda \
+  -o images/render.exr --denoise --write-aovs
 
 # Render with depth of field (thin lens, f/4, focused at 5 units)
-./build/anacapa --scene scenes/cornell_box.usda -o images/render.exr \
-  --fstop 4 --focus-distance 5
+./build/Darwin-arm64/anacapa --scene scenes/cornell_box.usda \
+  -o images/render.exr --fstop 4 --focus-distance 5
 
 # Fast GPU preview on Apple Silicon
-./build/anacapa --scene scenes/kitchen_set.usdc --interactive \
-  --width 800 --height 800 --spp 64 -o preview.exr
+./build/Darwin-arm64/anacapa --scene scenes/cornell_box.usda \
+  --interactive --width 800 --height 800 --spp 64 -o preview.exr
 
 # Full options
-./build/anacapa \
+./build/Darwin-arm64/anacapa \
   --scene          scenes/cornell_box.usda \
-  --camera         /World/RenderCam \
-  --integrator     bdpt \
-  --width          800  \
-  --height         800  \
-  --spp            256  \
-  --depth          8    \
-  --fstop          2.8  \
-  --focus-distance 10   \
-  --output         images/render.exr \
-  --denoise             \
-  --write-aovs          \
+  --camera         /World/RenderCam       \
+  --integrator     bdpt                   \
+  --width          800                    \
+  --height         800                    \
+  --spp            256                    \
+  --depth          8                      \
+  --fstop          2.8                    \
+  --focus-distance 10                     \
+  --shutter-open   0                      \
+  --shutter-close  1                      \
+  --output         images/render.exr      \
+  --denoise                               \
+  --write-aovs                            \
   --interactive
 
-./build/anacapa --help
+./build/Darwin-arm64/anacapa --help
 ```
 
-`--spp` controls quality vs. speed. Lower values (16–32) are useful for quick composition checks;
-256+ is recommended for final renders. Defaults to 64.
+### Options reference
 
-`--fstop` and `--focus-distance` enable depth of field using a thin lens model. Both must be
-provided together — either on the command line or via `fStop`/`focusDistance` attributes on the
-`UsdGeomCamera` in the scene file. Command-line values take priority over USD values. If neither
-is present the camera falls back to pinhole (infinite depth of field). Typical f-stops: 1.4
-(very shallow DoF), 2.8 (moderate), 8 (near-infinite).
+| Flag | Default | Description |
+|---|---|---|
+| `-o, --output` | `out.exr` | Output EXR path |
+| `-W, --width` | `800` | Image width in pixels |
+| `-H, --height` | `800` | Image height in pixels |
+| `-s, --spp` | `64` | Samples per pixel |
+| `-d, --depth` | `8` | Maximum path depth |
+| `-t, --threads` | `0` (auto) | Thread count; 0 = hardware concurrency |
+| `--tile-size` | `64` | Tile size in pixels |
+| `--integrator` | `bdpt` | `bdpt` or `path` |
+| `--scene` | — | USD/USDA/USDC scene file |
+| `--camera` | — | USD prim path of camera (e.g. `/World/RenderCam`) |
+| `--env` | — | Equirectangular HDRI environment map (EXR or HDR) |
+| `--env-intensity` | `1.0` | Intensity multiplier for the environment map |
+| `--fstop` | `0` | Lens f-stop; enables DoF when combined with `--focus-distance` |
+| `--focus-distance` | `0` | Distance to focal plane in scene units |
+| `--shutter-open` | `0` | Shutter open override (0 = `startTimeCode`) |
+| `--shutter-close` | `0` | Shutter close override (1 = `endTimeCode`); leave at 0 to use the scene's time range |
+| `--denoise` | off | Run Intel OIDN denoiser after rendering |
+| `--write-aovs` | off | Include albedo and normals layers in the output EXR |
+| `--interactive` | off | Use Metal GPU backend for fast preview (Apple Silicon) |
 
-`--interactive` switches to the Metal GPU backend, which can be significantly faster — especially
-on complex scenes — at the cost of some accuracy. See [Interactive (GPU) mode](#interactive-gpu-mode) below.
-All three flags are optional and independent of each other.
+`--spp`: 16–32 for quick composition checks; 256+ for final renders.
 
-### Interactive (GPU) mode
+`--fstop` and `--focus-distance` both must be provided to enable depth of field. They override the USD camera values when present; if neither is set the camera falls back to pinhole.
 
-Pass `--interactive` to use the Metal GPU backend instead of the CPU path tracer.
-This is intended for fast iteration — loading a scene, checking composition, or
-previewing material changes — where render time matters more than accuracy.
+`--shutter-open`/`--shutter-close` override the motion blur shutter. When omitted, the shutter is derived from the stage's `startTimeCode`, `endTimeCode`, and `timeCodesPerSecond` automatically. Set both to 0 to disable motion blur on an animated scene.
 
-```bash
-# Fast preview render on Apple Silicon (Metal backend)
-./build/anacapa --scene scenes/kitchen_set.usdc --interactive \
-  --width 800 --height 800 --spp 64 -o preview.exr
+## Motion Blur
+
+Transformation motion blur is driven by time-sampled `xformOp` attributes on USD prims. A minimal animated scene:
+
+```usda
+#usda 1.0
+(
+    startTimeCode = 1
+    endTimeCode   = 24
+)
+
+def Xform "MovingObject" {
+    double3 xformOp:translate.timeSamples = {
+        1:  (-0.5, 0, 0),
+        24: ( 0.5, 0, 0)
+    }
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+    def Mesh "Box" { ... }
+}
 ```
 
-The GPU backend requires a build with `ANACAPA_ENABLE_METAL` (enabled automatically
-on macOS when Xcode is present). If the Metal device cannot be initialised the
-renderer falls back to the CPU path tracer with a warning:
+No CLI flags are needed — the shutter interval is inferred from `startTimeCode`/`endTimeCode` and `timeCodesPerSecond`. Motion blur activates automatically when animated meshes are detected.
 
-```
-[warn] --interactive: Metal backend unavailable, falling back to CPU path tracer
-```
+See [scenes/cornell_box_motion.usda](scenes/cornell_box_motion.usda) for a complete example.
 
-The output is a linear HDR EXR file. Apply exposure compensation in your viewer — the scene uses physically-based light units.
+### Implementation notes
 
-When `--write-aovs` is used the EXR contains four layer groups:
-
-| Channels | Contents |
-|---|---|
-| `R, G, B` | Raw beauty (full Monte Carlo integral) |
-| `denoised.R/G/B` | OIDN-denoised beauty |
-| `albedo.R/G/B` | First-hit diffuse reflectance (denoising hint) |
-| `normals.R/G/B` | First-hit world-space normals (denoising hint) |
-
-### Viewing EXR output
-
-macOS Preview does not support multi-layer EXR or channel selection. To compare
-the raw beauty against the denoised result, use `oiiotool` (installed with
-OpenImageIO) to extract individual layers:
-
-```bash
-# Extract just the denoised beauty as a standard RGB EXR
-oiiotool out.exr --ch "denoised.R,denoised.G,denoised.B" --chnames "R,G,B" -o denoised.exr
-
-# Extract raw beauty
-oiiotool out.exr --ch "R,G,B" -o beauty.exr
-```
-
-For interactive layer switching use one of these free viewers:
-
-- **[mrViewer](https://mrviewer.sourceforge.io)** — macOS/Linux/Windows, designed for VFX
-- **[DJV](https://darbyjohnston.github.io/DJV/)** — cross-platform, lightweight
+- Animated mesh vertices are stored in **object space**. The BVH stores time-expanded world-space bounds (union of bounds at start and end time) to correctly enclose all motion.
+- At intersection time, `objectToWorld` is interpolated as `lerp(M_start, M_end, ray.time)` and inverted to transform the ray into object space. The lerped forward matrix is inverted — lerping the inverse matrices directly is incorrect when rotation is present.
+- `ray.time` is sampled once per path on the primary camera ray and propagated to all secondary rays and shadow rays to keep the scene temporally consistent across a path.
 
 ## Scene Format
 
@@ -172,30 +189,27 @@ Scenes are authored in OpenUSD (`.usda` text, `.usdc` binary, or `.usd` auto-det
 
 | USD Prim | Anacapa |
 |---|---|
-| `UsdGeomMesh` | Triangulated mesh, world-space baked |
-| `UsdShadeMaterial` + `UsdPreviewSurface` | `LambertianMaterial` or `EmissiveMaterial` |
+| `UsdGeomMesh` | Triangulated mesh — static (world-space baked) or animated (object-space + transform pair) |
+| `UsdShadeMaterial` + `UsdPreviewSurface` | `LambertianMaterial` or `StandardSurfaceMaterial` |
 | `primvars:displayColor` | `LambertianMaterial` (Blender USD export fallback) |
 | `UsdLuxRectLight` | `AreaLight` |
 | `UsdLuxSphereLight` | `AreaLight` (approximated) |
 | `UsdLuxDistantLight` | `DirectionalLight` |
 | `UsdLuxDomeLight` | `DomeLight` (equirectangular HDRI) |
-| `UsdGeomCamera` | Pinhole camera (focal length + aperture → FOV) |
+| `UsdGeomCamera` | Pinhole or thin-lens camera |
 | `UsdRenderSettings` | Declares the render camera via `.camera` relationship |
 
-When no `UsdShadeMaterial` binding is present the loader falls back to `primvars:displayColor`, which is the default export path from Blender.
-All mesh positions and normals are baked into world space at load time.
+When no `UsdShadeMaterial` binding is present the loader falls back to `primvars:displayColor`. Static mesh positions and normals are baked into world space at load time; animated mesh positions are kept in object space and transformed per-ray.
 
 ### Camera selection
 
-When a scene contains multiple cameras the loader resolves which one to use in
-priority order:
+When a scene contains multiple cameras the loader resolves which one to use in priority order:
 
-1. **`--camera /Prim/Path`** — explicit prim path passed on the command line
-2. **`UsdRenderSettings.camera`** — the relationship declared in the scene's render settings
-3. **First `UsdGeomCamera` found** — fallback when no other selection is made
+1. **`--camera /Prim/Path`** — explicit prim path on the command line
+2. **`UsdRenderSettings.camera`** — relationship declared in the scene's render settings
+3. **First `UsdGeomCamera` found** — fallback
 
-Every render logs all cameras present in the file so you can see the available
-prim paths without any extra tooling:
+All cameras found are logged so you can see available prim paths without any extra tooling:
 
 ```
 [info] USDLoader: 2 camera(s) found in scene:
@@ -205,11 +219,49 @@ prim paths without any extra tooling:
        Use --camera <path> to select another.
 ```
 
-The built-in scene is at [scenes/cornell_box.usda](scenes/cornell_box.usda).
+## EXR Output
 
-## GPU-accelerated rendering
+Output is a linear HDR EXR file. Apply exposure or tone mapping in your viewer.
 
-The Metal backend (`--interactive`) uses Apple's hardware ray-tracing API to accelerate preview renders. It is a simplified, single-bounce-per-pass megakernel designed for speed rather than accuracy.
+When `--write-aovs` is used the EXR contains additional channel layers:
+
+| Channels | Contents |
+|---|---|
+| `R, G, B` | Raw beauty (full Monte Carlo integral) |
+| `denoised.R/G/B` | OIDN-denoised beauty (requires `--denoise`) |
+| `albedo.R/G/B` | First-hit diffuse reflectance |
+| `normals.R/G/B` | First-hit world-space normals (signed, unit length) |
+
+To extract individual layers with `oiiotool` (installed with OpenImageIO):
+
+```bash
+# Extract raw beauty
+oiiotool out.exr --ch "R,G,B" -o beauty.exr
+
+# Extract denoised beauty
+oiiotool out.exr --ch "denoised.R,denoised.G,denoised.B" --chnames "R,G,B" -o denoised.exr
+
+# Extract albedo
+oiiotool out.exr --ch "albedo.R,albedo.G,albedo.B" --chnames "R,G,B" -o albedo.exr
+
+# Extract normals (remap [-1,1] → [0,1] for viewing)
+oiiotool out.exr --ch "normals.R,normals.G,normals.B" --chnames "R,G,B" \
+  --addc 1,1,1 --mulc 0.5,0.5,0.5 -o normals.exr
+
+# Apply gamma for display
+oiiotool beauty.exr --powc 0.45,0.45,0.45,1.0 -o beauty.png
+```
+
+For interactive layer switching:
+
+- **[mrViewer](https://mrviewer.sourceforge.io)** — macOS/Linux/Windows, designed for VFX
+- **[DJV](https://darbyjohnston.github.io/DJV/)** — cross-platform, lightweight
+
+## Interactive (GPU) Mode
+
+Pass `--interactive` to use the Metal GPU backend instead of the CPU path tracer. Intended for fast iteration — checking composition, previewing lighting — where speed matters more than accuracy.
+
+The GPU backend requires a build with `ANACAPA_ENABLE_METAL` (enabled via the `macos-arm64-usd` preset). If Metal cannot be initialised the renderer falls back to CPU with a warning.
 
 ### Performance
 
@@ -218,82 +270,49 @@ Measured on Apple M3 Pro, 400×400 @ 64 spp:
 | Scene | CPU (BDPT, 11 threads) | GPU (Metal) | Speedup |
 |---|---|---|---|
 | Cornell box (36 tris) | ~1168 ms | ~301 ms | ~3.9× |
-| Blender kitchen set | — | — | ~17× |
-
-Speedup scales with scene complexity — the GPU's parallelism becomes more effective as triangle and material counts grow.
 
 ### Simplifications vs. the CPU renderer
 
-The GPU backend trades correctness for speed in several areas:
-
 | Feature | CPU renderer | GPU (`--interactive`) |
 |---|---|---|
-| Integrator | Bidirectional path tracing (BDPT) with MIS | Unidirectional path tracing (megakernel) |
-| Direct lighting | Full MIS: BSDF + light sampling | Single random light sample per bounce, no MIS |
-| Indirect lighting | Full multi-bounce with Russian roulette | Up to `--depth` bounces, Russian roulette after bounce 3 |
-| Light types | Rect, sphere, directional, HDRI dome | Rect and directional only; dome lights ignored |
-| Material model | Full GGX `standard_surface` (multi-lobe, clearcoat) | Lambertian, GGX (roughness/metalness), emissive |
-| GGX parameters | Full `standard_surface` introspection | Roughness fixed at 0.5 for glossy materials |
-| Caustics | Yes (via light subpaths) | No |
-| AOVs | Albedo and normals written | Not written |
-| Denoising | Supported (`--denoise`) | Not supported |
-
-These simplifications are intentional — the goal is interactive feedback, not a reference render. Use the CPU renderer (default) for final-quality output.
-
-### Architecture
-
-The Metal backend is built only on macOS and is compiled as a separate set of Objective-C++ sources:
-
-```
-src/gpu/metal/
-  MetalContext.{h,mm}           Device + command queue + .metallib loader
-  MetalBuffer.{h,mm}            RAII MTLBuffer wrapper (MTLStorageModeShared)
-  MetalAccelStructure.{h,mm}    BLAS-per-mesh + TLAS build from GeometryPool
-  MetalPathIntegrator.{h,mm}    IIntegrator impl — prepare() and renderTile()
-  shaders/
-    SharedTypes.h               POD structs shared between C++ and MSL (packed_float3)
-    Shade.metal                 Megakernel: ray generation, intersection, BSDF, direct lighting
-    RayGen.metal                (reserved for future wavefront split)
-```
-
-The shaders are compiled to a `.metallib` at build time via `xcrun metal` / `metallib` and
-loaded at runtime. The path is baked in as `ANACAPA_METALLIB_PATH`.
-
-Key design points:
-- **PIMPL everywhere** — all `id<MTL*>` types are hidden behind `struct Impl` so C++ headers stay ObjC-free.
-- **`packed_float3`** — shared structs use `packed_float3` on the MSL side to match the 12-byte C++ layout; `float3` in constant address space is 16-byte aligned and would break the ABI.
-- **`useResource` per BLAS** — Metal requires explicit resource declarations for all acceleration structures accessed indirectly through the TLAS; omitting them causes silent no-hit.
-- **Tile-sized dispatch** — each `renderTile()` call dispatches only the tile's pixel region (not the full image), keeping GPU work proportional to tile area.
+| Integrator | BDPT with MIS | Unidirectional path tracing |
+| Direct lighting | Full MIS: BSDF + light sampling | Single random light sample, no MIS |
+| Light types | Rect, sphere, directional, HDRI dome | Rect and directional only |
+| Material model | Full GGX `standard_surface` | Lambertian + GGX (roughness fixed at 0.5) |
+| Caustics | Yes | No |
+| Motion blur | Yes | No |
+| AOVs / denoising | Supported | Not supported |
 
 ## Architecture
 
 ```
 include/anacapa/
   core/         Types (Vec3f, Ray, Spectrum, BBox3f), ArenaAllocator
-  accel/        IAccelerationStructure, GeometryPool
+  accel/        IAccelerationStructure, GeometryPool (MeshDesc with motion fields)
   shading/      IMaterial, ILight, ShadingContext
   sampling/     ISampler, SamplerState
   film/         Film, TileBuffer, DenoiseOptions
-  integrator/   IIntegrator, Camera, SceneView
-  scene/        SceneLoader (LoadedScene)
+  integrator/   IIntegrator, Camera (shutter interval), SceneView
+  scene/        SceneLoader (LoadedScene, shutter fields)
 
 src/
-  accel/        BVHBackend (custom SAH BVH)
-  shading/      Lambertian, EmissiveMaterial, AreaLight
+  accel/        BVHBackend — SAH BVH; time-expanded bounds + object-space ray transform for animated meshes
+  shading/      Lambertian, StandardSurface, EmissiveMaterial
+  shading/lights/  AreaLight, DirectionalLight, DomeLight (HDRI)
   sampling/     PCGRng, HaltonSampler
   integrator/   PathIntegrator (reference), BDPTIntegrator
                 LightSampler (Vose alias table), MISWeight
-  film/         Film (atomic accumulation, OIDN denoising, multi-layer EXR)
-  render/       ThreadPool, RenderSession
-  shading/lights/ AreaLight, DirectionalLight, DomeLight (HDRI)
-  scene/usd/    USDLoader (geometry, lights, materials, camera)
+  film/         Film — atomic accumulation, OIDN denoising, multi-layer EXR
+  render/       ThreadPool, RenderSession — shutter wiring from scene or CLI
+  scene/usd/    USDLoader — geometry, lights, materials, camera, animated transforms
   gpu/metal/    MetalContext, MetalAccelStructure, MetalPathIntegrator (macOS only)
 
 scenes/
-  cornell_box.usda   built-in Cornell box reference scene
+  cornell_box.usda        Static Cornell box reference scene
+  cornell_box_motion.usda Cornell box with animated ShortBlock (motion blur test)
 ```
 
-All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable zero-copy migration to GPU backends in Phase 6.
+All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable zero-copy migration to GPU backends.
 
 ## Roadmap
 
@@ -303,8 +322,9 @@ All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable
 | 2 | Complete | Bidirectional path tracing with MIS, alias-table light sampler |
 | 3 | Complete | Intel OIDN denoising, albedo/normal AOVs, multi-layer EXR |
 | 4 | Complete | OpenUSD scene loading (geometry, materials, lights, camera) |
-| 5 | Complete | GGX `standard_surface` BSDF, HDRI dome lights, OSL adapter, `primvars:displayColor` support |
-| 6 | In Progress | Metal backend (Apple Silicon), CUDA+OptiX backend (NVIDIA) |
+| 5 | Complete | GGX `standard_surface` BSDF, HDRI dome lights, depth of field |
+| 6 | Complete | Transformation motion blur (time-sampled USD xforms, temporal BVH, per-ray time) |
+| 7 | In Progress | Metal backend (Apple Silicon), CUDA+OptiX backend (NVIDIA) |
 
 ## License
 
