@@ -1,13 +1,14 @@
-# Build
+# Build — arch-specific subdirectories (build/Darwin-arm64, build/Linux-x86_64, etc.)
 build/
 
 # Render output
 images/*
 !images/.gitkeep
 
-# Scene files — only the built-in Cornell box is committed
+# Scene files — only committed test scenes, no large/generated content
 scenes/*
 !scenes/cornell_box.usda
+!scenes/cornell_box_motion.usda
 
 # macOS
 .DS_Store

@@ -51,9 +51,12 @@ private:
                                  PathVertexBuffer& path) const;
 
     // Build the light subpath starting from a sampled point on a light.
+    // sceneTime is the same time sampled for the camera subpath — ensures both
+    // subpaths evaluate animated geometry at the same moment in time.
     // Returns number of vertices written into `path`.
     uint32_t traceLightSubpath(const SceneView& scene,
                                 uint32_t lightIdx,
+                                float sceneTime,
                                 ISampler& sampler,
                                 PathVertexBuffer& path) const;
 

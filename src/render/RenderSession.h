@@ -35,6 +35,12 @@ struct RenderSettings {
     // if USD also has none the camera falls back to pinhole.
     float          fStop         = 0.f;
     float          focusDistance = 0.f;
+
+    // Motion blur shutter interval.  Both 0 = no motion blur (rays all get
+    // time=0, animated transforms sampled only at t=0).  When shutterClose > 0
+    // each primary ray gets a random time in [shutterOpen, shutterClose].
+    float          shutterOpen   = 0.f;
+    float          shutterClose  = 0.f;
     IntegratorType integrator      = IntegratorType::BDPT;
     bool           interactive     = false; // Use GPU (Metal) backend when available
     DenoiseOptions denoise;
@@ -71,6 +77,10 @@ private:
     std::unique_ptr<IIntegrator>          m_integrator;
     std::unique_ptr<ISampler>             m_baseSampler;
     std::unique_ptr<ThreadPool>           m_threadPool;
+
+    // Shutter interval from the scene file (overridden by RenderSettings if set)
+    float m_sceneShutterOpen  = 0.f;
+    float m_sceneShutterClose = 0.f;
 
     // Owned materials and lights (scene takes non-owning pointers)
     std::vector<std::unique_ptr<IMaterial>> m_materials;

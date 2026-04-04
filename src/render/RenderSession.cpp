@@ -58,11 +58,13 @@ void RenderSession::loadScene() {
                           m_settings.scenePath);
             std::exit(1);
         }
-        m_geomPool  = std::move(loaded.geomPool);
-        m_scene     = std::move(loaded.sceneView);
-        m_camera    = std::move(loaded.camera);
-        m_materials = std::move(loaded.materials);
-        m_lights    = std::move(loaded.lights);
+        m_geomPool           = std::move(loaded.geomPool);
+        m_scene              = std::move(loaded.sceneView);
+        m_camera             = std::move(loaded.camera);
+        m_materials          = std::move(loaded.materials);
+        m_lights             = std::move(loaded.lights);
+        m_sceneShutterOpen   = loaded.shutterOpen;
+        m_sceneShutterClose  = loaded.shutterClose;
         m_scene.camera = m_camera;
         m_scene.accel  = nullptr;
 
@@ -82,6 +84,19 @@ void RenderSession::loadScene() {
             spdlog::info("DoF override: fStop={:.1f} focusDist={:.3f} apertureR={:.4f}",
                          m_settings.fStop, m_settings.focusDistance,
                          cam.apertureRadius);
+        }
+
+        // ---- Motion blur shutter -------------------------------------------
+        // CLI flags take priority; fall back to the shutter authored in the scene.
+        float sOpen  = m_settings.shutterClose > m_settings.shutterOpen
+                         ? m_settings.shutterOpen  : m_sceneShutterOpen;
+        float sClose = m_settings.shutterClose > m_settings.shutterOpen
+                         ? m_settings.shutterClose : m_sceneShutterClose;
+        if (m_scene.camera && sClose > sOpen) {
+            Camera& cam = *m_scene.camera;
+            cam.shutterOpen  = sOpen;
+            cam.shutterClose = sClose;
+            spdlog::info("Motion blur: shutter [{:.3f}, {:.3f}]", sOpen, sClose);
         }
 
         // ---- Auto-camera: frame the scene if no camera was found ------------

@@ -23,6 +23,11 @@ struct LoadedScene {
     std::vector<std::unique_ptr<IMaterial>> materials;
     std::vector<std::unique_ptr<ILight>>   lights;
     std::optional<Camera>                  camera;
+
+    // Shutter interval in normalized [0,1] time, derived from the scene's
+    // time code range and timeCodesPerSecond.  Both are 0 for static scenes.
+    float shutterOpen  = 0.f;
+    float shutterClose = 0.f;
 };
 
 } // namespace anacapa

@@ -39,8 +39,12 @@ struct BVHNode {
 static_assert(sizeof(BVHNode) == 32, "BVHNode must be 32 bytes");
 
 // ---------------------------------------------------------------------------
-// Triangle — flattened, world-space, for fast intersection
-// Precomputed edges avoid redundant subtractions in the Möller–Trumbore test.
+// Triangle — for fast intersection.
+//
+// Static meshes: v0/e1/e2/n/sn* are pre-baked to world space (isObjectSpace=false).
+// Animated meshes: v0/e1/e2/n/sn* remain in object space (isObjectSpace=true).
+//   At intersection time, the triangle is transformed using the mesh's
+//   interpolated objectToWorld at ray.time.
 // ---------------------------------------------------------------------------
 struct BVHTriangle {
     Vec3f v0;
@@ -51,6 +55,7 @@ struct BVHTriangle {
     Vec3f sn0, sn1, sn2;  // Shading normals per vertex
     uint32_t meshID;
     uint32_t primID;
+    bool isObjectSpace = false; // true for animated meshes with motion blur
 };
 
 // ---------------------------------------------------------------------------
@@ -102,6 +107,7 @@ private:
     };
 
     static Ray4 makeRay4(const Ray& ray);
+    static Ray4 makeObjectSpaceRay4(const Ray& ray, const Mat4f& worldToObject);
 
     // Returns true if ray intersects the AABB, updates tMin/tMax
     static bool intersectAABB(const BVHNode& node, const Ray4& r,
@@ -114,6 +120,7 @@ private:
 
     void fillSurfaceInteraction(const BVHTriangle& tri,
                                 float t, float u, float v,
+                                const Mat4f* worldXfm,   // nullptr for static (already world-space)
                                 SurfaceInteraction& si) const;
 
     // Actual traversal implementation (trace() delegates here)

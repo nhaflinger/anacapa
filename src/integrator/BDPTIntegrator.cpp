@@ -74,6 +74,8 @@ uint32_t BDPTIntegrator::traceCameraSubpath(const SceneView& scene,
     path.reset();
     if (path.full()) return 0;
 
+    path.sceneTime = primaryRay.time;  // freeze scene at this time for the whole path
+
     // Vertex 0: camera endpoint
     uint32_t vi = path.count++;
     path.position[vi] = primaryRay.origin;
@@ -165,6 +167,7 @@ uint32_t BDPTIntegrator::traceCameraSubpath(const SceneView& scene,
         beta   *= bs.f / bs.pdf;
         pdfFwd  = bs.pdf;
         ray     = spawnRay(si.p, si.n, bs.wi);
+        ray.time = path.sceneTime;  // maintain temporal consistency across bounces
     }
 
     return path.count;
@@ -175,10 +178,13 @@ uint32_t BDPTIntegrator::traceCameraSubpath(const SceneView& scene,
 // ---------------------------------------------------------------------------
 uint32_t BDPTIntegrator::traceLightSubpath(const SceneView& scene,
                                              uint32_t lightIdx,
+                                             float sceneTime,
                                              ISampler& sampler,
                                              PathVertexBuffer& path) const {
     path.reset();
     if (path.full() || m_lightSampler.empty()) return 0;
+
+    path.sceneTime = sceneTime;
 
     const ILight* light    = scene.lights[lightIdx];
     float         lightPdf = m_lightSampler.pdf(lightIdx);
@@ -208,6 +214,7 @@ uint32_t BDPTIntegrator::traceLightSubpath(const SceneView& scene,
 
     Ray   ray    = Ray{ls.pos, ls.dir};
     ray.tMin     = 1e-4f;
+    ray.time     = sceneTime;
     float pdfFwd = ls.pdfDir;   // directional PDF (solid angle from light surface)
 
     for (uint32_t depth = 0; depth < m_maxDepth && !path.full(); ++depth) {
@@ -260,6 +267,7 @@ uint32_t BDPTIntegrator::traceLightSubpath(const SceneView& scene,
         beta   *= bs.f / bs.pdf;
         pdfFwd  = bs.pdf;
         ray     = spawnRay(si.p, si.n, bs.wi);
+        ray.time = path.sceneTime;
     }
 
     return path.count;
@@ -312,6 +320,7 @@ Spectrum BDPTIntegrator::connect(const SceneView& scene,
 
         // Visibility
         Ray shadowRay = spawnRayTo(cp.position[ct], cp.normal[ct], lp.position[0]);
+        shadowRay.time = cp.sceneTime;
         if (scene.accel->occluded(shadowRay)) return {};
 
         // Evaluate BSDF at camera vertex
@@ -359,6 +368,7 @@ Spectrum BDPTIntegrator::connect(const SceneView& scene,
 
     // Visibility
     Ray shadowRay = spawnRayTo(lp.position[ls], lp.normal[ls], cp.position[ct]);
+    shadowRay.time = cp.sceneTime;  // camera subpath is authoritative for scene time
     if (scene.accel->occluded(shadowRay)) return {};
 
     Vec3f d    = cp.position[ct] - lp.position[ls];
@@ -417,7 +427,8 @@ void BDPTIntegrator::renderTile(const SceneView& scene,
                 // --- Camera subpath ---
                 Vec2f jitter = sampler.get2D();
                 Vec2f lens   = sampler.get2D();
-                Ray primaryRay = cam.generateRay(px, py, jitter.x, jitter.y, lens.x, lens.y);
+                float timeU  = sampler.get1D();
+                Ray primaryRay = cam.generateRay(px, py, jitter.x, jitter.y, lens.x, lens.y, timeU);
                 // Pinhole camera: area PDF = 1 (we treat it as a single point)
                 traceCameraSubpath(scene, primaryRay, 1.f, sampler, camPath);
 
@@ -439,7 +450,7 @@ void BDPTIntegrator::renderTile(const SceneView& scene,
                     auto sel = m_lightSampler.sample(sampler.get1D());
                     lightIdx = sel.index;
                 }
-                traceLightSubpath(scene, lightIdx, sampler, lightPath);
+                traceLightSubpath(scene, lightIdx, primaryRay.time, sampler, lightPath);
 
                 // --- Connect all (s, t) strategies ---
                 Spectrum sampleL = {};
