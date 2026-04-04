@@ -21,7 +21,9 @@ void BVHBackend::commit() {
 
     for (uint32_t meshID = 0; meshID < m_pool.numMeshes(); ++meshID) {
         const MeshDesc& mesh = m_pool.mesh(meshID);
-        const Mat4f&    xfm  = mesh.objectToWorld;
+        // Static meshes have positions pre-baked to world space by the loader;
+        // the identity transform is a no-op and is used only for normal transform.
+        const Mat4f xfm = Mat4f::identity();
 
         uint32_t numTris = mesh.numTriangles();
         for (uint32_t ti = 0; ti < numTris; ++ti) {
@@ -30,7 +32,7 @@ void BVHBackend::commit() {
             uint32_t i2 = mesh.indices[ti * 3 + 2];
 
             BVHTriangle tri;
-            if (mesh.hasMotion) {
+            if (mesh.hasMotion()) {
                 // Keep vertices in object space; transform at ray intersection time.
                 tri.v0 = mesh.positions[i0];
                 Vec3f v1 = mesh.positions[i1];
@@ -82,13 +84,12 @@ void BVHBackend::commit() {
         const BVHTriangle& tri = m_tris[i];
         BBox3f b;
         if (tri.isObjectSpace) {
-            // Time-expanded bounds: union of world-space AABB at t=0 and t=1
+            // Time-expanded bounds: union of world-space AABB across all motion keys
             const MeshDesc& mesh = m_pool.mesh(tri.meshID);
-            for (int step = 0; step <= 1; ++step) {
-                const Mat4f& xfm = (step == 0) ? mesh.objectToWorld : mesh.objectToWorld1;
-                Vec3f w0 = xfm.transformPoint(tri.v0);
-                Vec3f w1 = xfm.transformPoint(tri.v0 + tri.e1);
-                Vec3f w2 = xfm.transformPoint(tri.v0 + tri.e2);
+            for (const MotionKey& key : mesh.motionKeys) {
+                Vec3f w0 = key.objectToWorld.transformPoint(tri.v0);
+                Vec3f w1 = key.objectToWorld.transformPoint(tri.v0 + tri.e1);
+                Vec3f w2 = key.objectToWorld.transformPoint(tri.v0 + tri.e2);
                 b.expand(w0); b.expand(w1); b.expand(w2);
             }
         } else {
@@ -353,11 +354,11 @@ TraceResult BVHBackend::traceImpl(const Ray& ray) const {
                 const BVHTriangle& tri = m_tris[idx];
                 float t, u, v;
                 if (tri.isObjectSpace) {
-                    // Lerp the FORWARD transform and invert — lerping inverse matrices
-                    // directly is wrong when rotation is present (lerp(A^-1, B^-1) ≠
-                    // lerp(A,B)^-1 for non-commuting transforms).
+                    // Piecewise-linear lerp of the FORWARD transform across all motion
+                    // keys, then invert — lerping inverse matrices directly is wrong
+                    // when rotation is present (lerp(A^-1,B^-1) ≠ lerp(A,B)^-1).
                     const MeshDesc& mesh = m_pool.mesh(tri.meshID);
-                    Mat4f o2w = Mat4f::lerp(mesh.objectToWorld, mesh.objectToWorld1, ray.time);
+                    Mat4f o2w = mesh.interpolateO2W(ray.time);
                     Mat4f w2o = o2w.inverse();
                     Ray4 ro = makeObjectSpaceRay4(ray, w2o);
                     ro.tMax = closestT;
@@ -393,7 +394,7 @@ TraceResult BVHBackend::traceImpl(const Ray& ray) const {
         const BVHTriangle& tri = m_tris[hitIdx];
         if (tri.isObjectSpace) {
             const MeshDesc& mesh = m_pool.mesh(tri.meshID);
-            Mat4f o2w = Mat4f::lerp(mesh.objectToWorld, mesh.objectToWorld1, ray.time);
+            Mat4f o2w = mesh.interpolateO2W(ray.time);
             fillSurfaceInteraction(tri, closestT, hitU, hitV, &o2w, result.si);
         } else {
             fillSurfaceInteraction(tri, closestT, hitU, hitV, nullptr, result.si);
@@ -426,7 +427,7 @@ bool BVHBackend::occluded(const Ray& ray) const {
                 const BVHTriangle& tri = m_tris[idx];
                 if (tri.isObjectSpace) {
                     const MeshDesc& mesh = m_pool.mesh(tri.meshID);
-                    Mat4f o2w = Mat4f::lerp(mesh.objectToWorld, mesh.objectToWorld1, ray.time);
+                    Mat4f o2w = mesh.interpolateO2W(ray.time);
                     Mat4f w2o = o2w.inverse();
                     Ray4 ro = makeObjectSpaceRay4(ray, w2o);
                     if (intersectTriangle(tri, ro, t, u, v)) return true;

@@ -30,13 +30,20 @@ execute_process(
     ERROR_QUIET)
 
 if(NOT METAL_COMPILER OR NOT METALLIB_LINKER)
-    # Fallback: search inside Xcode.app directly
-    find_program(METAL_COMPILER metal
-        HINTS /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin
-        REQUIRED)
-    find_program(METALLIB_LINKER metallib
-        HINTS /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin
-        REQUIRED)
+    # xcrun failed (xcode-select may point at Command Line Tools instead of Xcode).
+    # Walk known Xcode toolchain paths directly rather than using find_program,
+    # which may return a stale empty-string cache entry.
+    set(_XCODE_TC "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin")
+    if(EXISTS "${_XCODE_TC}/metal")
+        # Set both the cache variable (for persistence) and the local variable
+        # (which shadows cache variables and is what add_custom_command sees).
+        set(METAL_COMPILER  "${_XCODE_TC}/metal")
+        set(METALLIB_LINKER "${_XCODE_TC}/metallib")
+    else()
+        message(FATAL_ERROR
+            "Cannot find the Metal compiler. Either install Xcode (not just Command Line Tools) "
+            "or run: sudo xcode-select -s /Applications/Xcode.app")
+    endif()
 endif()
 
 message(STATUS "Metal compiler : ${METAL_COMPILER}")

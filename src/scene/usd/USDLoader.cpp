@@ -28,7 +28,9 @@
 #include <pxr/base/vt/array.h>
 
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <cmath>
+#include <string>
 #include <unordered_map>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -215,19 +217,120 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat) {
     return std::make_unique<LambertianMaterial>(diffuse);
 }
 
+// Collect all authored time samples from xformOp:* attributes on a prim.
+// Direct attribute enumeration is more reliable than GetOrderedXformOps(),
+// which can silently return empty results on prims that don't satisfy all
+// of UsdGeomXformable's requirements.
+static void collectXformTimeSamples(const UsdPrim& prim, std::vector<double>& times) {
+    for (const UsdAttribute& attr : prim.GetAttributes()) {
+        // Match any attribute in the "xformOp" namespace (e.g. xformOp:translate,
+        // xformOp:rotateXYZ).  Using GetNamespace() is more reliable than string
+        // prefix matching on GetName(), which can behave unexpectedly across USD
+        // versions when attribute names are stored as TfTokens.
+        if (attr.GetNamespace() == TfToken("xformOp")) {
+            std::vector<double> attrTimes;
+            attr.GetTimeSamples(&attrTimes);
+            if (!attrTimes.empty())
+                spdlog::debug("USDLoader: '{}' attr '{}' has {} time sample(s)",
+                              prim.GetPath().GetString(),
+                              attr.GetName().GetString(),
+                              attrTimes.size());
+            for (double t : attrTimes)
+                times.push_back(t);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// collectMotionKeys — build a sorted list of MotionKey from a USD prim's
+// animated world transform.
+//
+// Gathers the union of all authored time samples from every xformOp on the
+// prim (translate, rotate, scale, etc.) plus the parent hierarchy, evaluates
+// the full local-to-world transform at each sample, and normalizes the time
+// codes to [0, 1] relative to [startTime, endTime].
+//
+// Returns an empty vector for static prims.
+// ---------------------------------------------------------------------------
+static std::vector<MotionKey> collectMotionKeys(
+        const UsdPrim& prim,
+        double startTime,
+        double endTime)
+{
+    // Collect the union of all authored xformOp time samples from the prim
+    // and every ancestor, since animation may live on a parent Xform prim.
+    std::vector<double> times;
+    collectXformTimeSamples(prim, times);
+    UsdPrim parent = prim.GetParent();
+    while (parent && parent.IsValid()) {
+        collectXformTimeSamples(parent, times);
+        parent = parent.GetParent();
+    }
+
+    // Deduplicate and sort
+    std::sort(times.begin(), times.end());
+    times.erase(std::unique(times.begin(), times.end()), times.end());
+
+    {
+        std::string timesStr;
+        for (double t : times) { timesStr += std::to_string(t) + " "; }
+        spdlog::info("USDLoader: collectMotionKeys for '{}': {} raw sample(s): [{}]",
+                     prim.GetPath().GetString(), times.size(), timesStr);
+    }
+
+    // Always include the stage endpoints so the full shutter is covered
+    times.insert(times.begin(), startTime);
+    times.push_back(endTime);
+    std::sort(times.begin(), times.end());
+    times.erase(std::unique(times.begin(), times.end()), times.end());
+
+    if (times.size() < 2) return {};
+
+    double range = endTime - startTime;
+
+    std::vector<MotionKey> keys;
+    keys.reserve(times.size());
+    for (double tc : times) {
+        float normalizedTime = (range > 0.0)
+            ? static_cast<float>((tc - startTime) / range)
+            : 0.f;
+
+        UsdGeomXformCache cache{UsdTimeCode(tc)};
+        GfMatrix4d xfm = cache.GetLocalToWorldTransform(prim);
+
+        MotionKey key;
+        key.time          = normalizedTime;
+        key.objectToWorld = toMat4f(xfm);
+        key.worldToObject = toMat4f(xfm.GetInverse());
+        keys.push_back(key);
+    }
+    // Log each key's translation so we can verify the arc is being captured
+    for (const MotionKey& k : keys) {
+        // Translation is in the last column of the column-major anacapa Mat4f
+        spdlog::info("USDLoader:   key t={:.3f} translate=({:.3f},{:.3f},{:.3f})",
+                     k.time,
+                     k.objectToWorld.m[0][3],
+                     k.objectToWorld.m[1][3],
+                     k.objectToWorld.m[2][3]);
+    }
+
+    return keys;
+}
+
 // ---------------------------------------------------------------------------
 // loadMesh — triangulate a UsdGeomMesh and add it to the GeometryPool.
 // Returns the meshID assigned by the pool, or ~0u on failure.
 //
-// xform0 = world-from-object at shutter open (t=0).
-// xform1 = world-from-object at shutter close (t=1); equals xform0 for static meshes.
-// hasMotion = true when the prim has time-varying transforms.
+// xform0     = world-from-object at shutter open (used for static mesh baking
+//              and as a fallback).
+// motionKeys = piecewise-linear transform samples, normalized to [0,1].
+//              Empty for static meshes.
 // ---------------------------------------------------------------------------
 static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
                          const GfMatrix4d& xform0,
-                         const GfMatrix4d& xform1,
-                         bool hasMotion,
+                         std::vector<MotionKey> motionKeys,
                          GeometryPool& pool) {
+    const bool hasMotion = !motionKeys.empty();
     VtArray<GfVec3f> points;
     usdMesh.GetPointsAttr().Get(&points);
     if (points.empty()) return ~0u;
@@ -338,13 +441,9 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
     if (desc.positions.empty()) return ~0u;
 
     if (hasMotion) {
-        desc.objectToWorld  = toMat4f(xform0);
-        desc.worldToObject  = toMat4f(xform0.GetInverse());
-        desc.objectToWorld1 = toMat4f(xform1);
-        desc.worldToObject1 = toMat4f(xform1.GetInverse());
-        desc.hasMotion      = true;
+        desc.motionKeys = std::move(motionKeys);
     }
-    // Static meshes: positions already in world space; objectToWorld stays identity.
+    // Static meshes: positions already in world space; motionKeys stays empty.
 
     return pool.addMesh(std::move(desc));
 }
@@ -487,11 +586,14 @@ LoadedScene loadUSD(const std::string& path,
             GfMatrix4d xform1 = xformCacheT1.GetLocalToWorldTransform(prim);
             bool hasMotion = (xform0 != xform1);
 
-            if (hasMotion)
-                spdlog::info("USDLoader: animated mesh '{}' (motion blur active)",
-                             prim.GetPath().GetString());
+            std::vector<MotionKey> motionKeys;
+            if (hasMotion) {
+                motionKeys = collectMotionKeys(prim, startTime, endTime);
+                spdlog::info("USDLoader: animated mesh '{}' ({} motion key(s), motion blur active)",
+                             prim.GetPath().GetString(), motionKeys.size());
+            }
 
-            uint32_t meshID = loadMesh(usdMesh, xform0, xform1, hasMotion, result.geomPool);
+            uint32_t meshID = loadMesh(usdMesh, xform0, std::move(motionKeys), result.geomPool);
             if (meshID == ~0u) {
                 spdlog::warn("USDLoader: skipped mesh '{}' (no geometry)",
                              prim.GetPath().GetString());
@@ -737,10 +839,31 @@ LoadedScene loadUSD(const std::string& path,
                          selectedCamPrim.GetPath().GetString());
     }
 
-    if (selectedCamPrim)
+    if (selectedCamPrim) {
         result.camera = buildCamera(selectedCamPrim, xformCache, filmWidth, filmHeight);
-    else
+
+        // Read shutter:open / shutter:close from the camera prim.
+        // Must use UsdTimeCode::Default() for non-time-varying attributes and
+        // check the return value — if Get() returns false the output variable
+        // is left unchanged at its initialised value (0.0), which would make
+        // the condition camShutterClose > camShutterOpen silently false.
+        UsdGeomCamera usdCam(selectedCamPrim);
+        double camShutterOpen  = 0.0;
+        double camShutterClose = 0.0;
+        bool gotOpen  = usdCam.GetShutterOpenAttr() .Get(&camShutterOpen,  UsdTimeCode::Default());
+        bool gotClose = usdCam.GetShutterCloseAttr().Get(&camShutterClose, UsdTimeCode::Default());
+        spdlog::info("USDLoader: camera shutter:open={:.4f} (authored={}) "
+                     "shutter:close={:.4f} (authored={})",
+                     camShutterOpen, gotOpen, camShutterClose, gotClose);
+        if (gotClose && camShutterClose > camShutterOpen) {
+            result.shutterOpen  = static_cast<float>(camShutterOpen);
+            result.shutterClose = static_cast<float>(camShutterClose);
+            spdlog::info("USDLoader: using camera shutter [{:.4f}, {:.4f}]",
+                         result.shutterOpen, result.shutterClose);
+        }
+    } else {
         spdlog::info("USDLoader: no camera in scene; renderer will use default");
+    }
 
     // Pad materials vector to cover all mesh IDs
     result.sceneView.materials.resize(result.geomPool.numMeshes(), nullptr);
