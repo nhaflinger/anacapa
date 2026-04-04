@@ -1,4 +1,4 @@
-# Build — arch-specific subdirectories (build/Darwin-arm64, build/Linux-x86_64, etc.)
+# Build — OS-specific subdirectories (build/Darwin, build/Linux, etc.)
 build/
 
 # Render output
