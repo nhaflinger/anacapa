@@ -9,6 +9,7 @@
     upAxis = "Y"
     startTimeCode = 1
     endTimeCode = 24
+    timeCodesPerSecond = 24
 )
 
 def Xform "World"
@@ -166,7 +167,10 @@ def Xform "World"
         }
 
         float3 xformOp:translate.timeSamples = {
-            1: (0, 0.1, 0),
+            1: (0.0, 0.1, 0),
+            6: (0.05, 0.15, 0),
+            12: (-0.1, 0.2, 0),
+            18: (-0.15, 0.15, 0),
             24: (-0.2, 0.1, 0)
         }
         uniform token[] xformOpOrder = ["xformOp:translate"]
@@ -191,7 +195,7 @@ def Xform "World"
         float focusDistance = 0
         float fStop = 0
         double shutter:open = 0
-        double shutter:close = 0.5
+        double shutter:close = 1.0
         float horizontalAperture = 46.631
         float verticalAperture = 46.631
         double3 xformOp:rotateXYZ = (0, 180, 0)

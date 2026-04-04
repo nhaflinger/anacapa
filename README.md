@@ -8,8 +8,8 @@ Named after Anacapa Island, part of California's Channel Islands.
 
 - **Bidirectional path tracing (BDPT)** with multiple importance sampling and Veach MIS weights
 - **OpenUSD scene loading** — geometry, materials, lights, camera, and animated transforms from `.usda`/`.usdc` files
-- **Transformation motion blur** — time-sampled USD xformOps interpolated per ray; shutter interval read automatically from the stage's `startTimeCode`/`endTimeCode`
-- **Intel OIDN denoising** — AI denoiser with albedo and normal auxiliary buffers, optional
+- **Transformation motion blur** — multi-sample USD xformOps with piecewise-linear interpolation per ray; arbitrary number of time samples supported for curved blur streaks; shutter interval read automatically from the camera prim's `shutter:open`/`shutter:close`, falling back to stage `startTimeCode`/`endTimeCode`
+- **Intel OIDN denoising** — AI denoiser with albedo and normal auxiliary buffers, enabled by default
 - **Custom SAH BVH** — surface area heuristic build with 12-bucket binning, Möller–Trumbore traversal; time-expanded bounds for animated meshes
 - **Custom thread pool** — tile-parallel rendering with `std::thread`, no external threading library
 - **Scrambled Halton sampler** — low-discrepancy sampling up to 128 dimensions
@@ -27,7 +27,7 @@ Named after Anacapa Island, part of California's Channel Islands.
 |---|---|---|
 | OpenImageIO | Yes | `brew install openimageio` |
 | OpenUSD | No (`-DANACAPA_ENABLE_USD=ON`) | Build from source — see below |
-| OpenImageDenoise | No (`-DANACAPA_ENABLE_OIDN=ON`) | `brew install open-image-denoise` |
+| OpenImageDenoise | Yes (all presets) | `brew install open-image-denoise` |
 | Open Shading Language | No (`-DANACAPA_ENABLE_OSL=ON`) | `brew install open-shading-language` |
 
 Header-only dependencies (fetched automatically by CMake): spdlog, CLI11, GoogleTest.
@@ -40,10 +40,10 @@ CMake presets place compiled output in OS-specific subdirectories (`build/Darwin
 # List available presets
 cmake --list-presets
 
-# Prerequisites (macOS)
-brew install openimageio
+# Prerequisites (macOS) — OIDN is required by all presets
+brew install openimageio open-image-denoise
 
-# Configure and build — macOS arm64, no optional features
+# Configure and build — macOS arm64
 cmake --preset macos-arm64
 cmake --build build/Darwin --parallel
 
@@ -55,16 +55,11 @@ cmake --preset macos-arm64-usd \
   -DCMAKE_PREFIX_PATH=~/usd
 cmake --build build/Darwin --parallel
 
-# Build with Intel OIDN denoising
-brew install open-image-denoise
-cmake --preset macos-arm64 \
-  -DANACAPA_ENABLE_OIDN=ON \
-  -DOpenImageDenoise_DIR=/opt/homebrew/lib/cmake/OpenImageDenoise-2.4.1
-cmake --build build/Darwin --parallel
-
 # Run tests
 cd build/Darwin && ctest --output-on-failure
 ```
+
+> **Note (macOS):** The Metal shader compiler requires a full Xcode installation, not just Command Line Tools. If `xcode-select -p` points at `/Library/Developer/CommandLineTools`, CMake will locate the compiler directly inside Xcode.app automatically. No manual intervention is needed as long as Xcode is installed.
 
 ## Usage
 
@@ -179,8 +174,9 @@ See [scenes/cornell_box_motion.usda](scenes/cornell_box_motion.usda) for a compl
 
 ### Implementation notes
 
-- Animated mesh vertices are stored in **object space**. The BVH stores time-expanded world-space bounds (union of bounds at start and end time) to correctly enclose all motion.
-- At intersection time, `objectToWorld` is interpolated as `lerp(M_start, M_end, ray.time)` and inverted to transform the ray into object space. The lerped forward matrix is inverted — lerping the inverse matrices directly is incorrect when rotation is present.
+- Animated mesh vertices are stored in **object space**. The BVH stores time-expanded world-space bounds (union across all motion keys) to correctly enclose the full arc.
+- All authored `xformOp:*` time samples are read from the prim and its parent hierarchy. The shutter interval is read from the camera prim's `shutter:open`/`shutter:close` attributes, falling back to the stage's `startTimeCode`/`endTimeCode`.
+- At intersection time, a binary search finds the bracketing key pair and `objectToWorld` is piecewise-linearly interpolated, then inverted to transform the ray into object space. Lerping the forward matrix and inverting is correct; lerping inverse matrices directly is not when rotation is present.
 - `ray.time` is sampled once per path on the primary camera ray and propagated to all secondary rays and shadow rays to keep the scene temporally consistent across a path.
 
 ## Scene Format
@@ -189,7 +185,7 @@ Scenes are authored in OpenUSD (`.usda` text, `.usdc` binary, or `.usd` auto-det
 
 | USD Prim | Anacapa |
 |---|---|
-| `UsdGeomMesh` | Triangulated mesh — static (world-space baked) or animated (object-space + transform pair) |
+| `UsdGeomMesh` | Triangulated mesh — static (world-space baked) or animated (object-space + N motion keys) |
 | `UsdShadeMaterial` + `UsdPreviewSurface` | `LambertianMaterial` or `StandardSurfaceMaterial` |
 | `primvars:displayColor` | `LambertianMaterial` (Blender USD export fallback) |
 | `UsdLuxRectLight` | `AreaLight` |
@@ -288,7 +284,7 @@ Measured on Apple M3 Pro, 400×400 @ 64 spp:
 ```
 include/anacapa/
   core/         Types (Vec3f, Ray, Spectrum, BBox3f), ArenaAllocator
-  accel/        IAccelerationStructure, GeometryPool (MeshDesc with motion fields)
+  accel/        IAccelerationStructure, GeometryPool (MeshDesc with MotionKey array)
   shading/      IMaterial, ILight, ShadingContext
   sampling/     ISampler, SamplerState
   film/         Film, TileBuffer, DenoiseOptions
@@ -296,7 +292,7 @@ include/anacapa/
   scene/        SceneLoader (LoadedScene, shutter fields)
 
 src/
-  accel/        BVHBackend — SAH BVH; time-expanded bounds + object-space ray transform for animated meshes
+  accel/        BVHBackend — SAH BVH; time-expanded bounds across all motion keys + piecewise-linear interpolation at intersection
   shading/      Lambertian, StandardSurface, EmissiveMaterial
   shading/lights/  AreaLight, DirectionalLight, DomeLight (HDRI)
   sampling/     PCGRng, HaltonSampler
