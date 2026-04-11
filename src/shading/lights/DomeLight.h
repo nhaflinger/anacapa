@@ -91,9 +91,24 @@ public:
         , m_sceneRadius(sceneRadius)
         , m_sceneCenter(sceneCenter)
     {
+        // Identity rotation by default
+        m_rot[0] = {1,0,0}; m_rot[1] = {0,1,0}; m_rot[2] = {0,0,1};
         if (!hdriPath.empty())
             loadImage(hdriPath);
         buildDistribution();
+    }
+
+    // Set a world-to-envmap rotation (3x3, column-major like Mat4f).
+    // When a world-space direction wo is looked up in the envmap, it is first
+    // transformed by this matrix.  Set to the DomeLight's world xform (upper 3x3
+    // of the local-to-world matrix, transposed to get world-to-local).
+    void setRotation(Vec3f col0, Vec3f col1, Vec3f col2) {
+        // Store as rows for efficient dot-product lookup
+        // m_rot[i] = row i of the rotation matrix
+        // We want to rotate wo: result = R * wo
+        m_rot[0] = col0;   // first row  = first column of R
+        m_rot[1] = col1;   // second row = second column of R
+        m_rot[2] = col2;   // third row  = third column of R
     }
 
     // -----------------------------------------------------------------------
@@ -167,12 +182,41 @@ public:
     bool isDelta()    const override { return false; }
 
     // -----------------------------------------------------------------------
-    // Accessors (for RenderSession)
+    // Accessors (for RenderSession and GPU upload)
     // -----------------------------------------------------------------------
     void setSceneRadius(float r) { m_sceneRadius = r; }
     void setSceneCenter(Vec3f c) { m_sceneCenter = c; }
+    float intensity() const { return m_intensity; }
+
+    // Raw pixel data for GPU upload (RGB float, row-major, row 0 = zenith)
+    const float* pixels()    const { return m_pixels.data(); }
+    uint32_t     envWidth()  const { return m_width; }
+    uint32_t     envHeight() const { return m_height; }
+
+    // Rotation rows: world-to-envmap matrix stored as three row vectors
+    void getRotation(Vec3f& r0, Vec3f& r1, Vec3f& r2) const {
+        r0 = m_rot[0]; r1 = m_rot[1]; r2 = m_rot[2];
+    }
 
 private:
+    // Apply the stored rotation: world direction → envmap local direction
+    Vec3f rotateToEnv(Vec3f wo) const {
+        return {
+            dot(m_rot[0], wo),
+            dot(m_rot[1], wo),
+            dot(m_rot[2], wo)
+        };
+    }
+    // Apply inverse rotation (transpose of orthogonal matrix): envmap dir → world dir
+    Vec3f rotateFromEnv(Vec3f v) const {
+        // m_rot rows are columns of the original matrix, so transpose = original columns
+        return {
+            m_rot[0].x * v.x + m_rot[1].x * v.y + m_rot[2].x * v.z,
+            m_rot[0].y * v.x + m_rot[1].y * v.y + m_rot[2].y * v.z,
+            m_rot[0].z * v.x + m_rot[1].z * v.y + m_rot[2].z * v.z
+        };
+    }
+
     // -----------------------------------------------------------------------
     // Image loading via OpenImageIO (defined in DomeLight.cpp)
     // -----------------------------------------------------------------------
@@ -232,11 +276,13 @@ private:
         float sinTheta = std::sin(theta);
         float cosTheta = std::cos(theta);
 
-        Vec3f dir = {
+        // Direction in envmap local space, then rotate to world space
+        Vec3f envDir = {
             sinTheta * std::sin(phi),
             cosTheta,
             sinTheta * std::cos(phi)
         };
+        Vec3f dir = rotateFromEnv(envDir);
 
         // p_uv = pdfRow * pdfCol  (marginal * conditional, already normalized)
         // p_omega = p_uv / (2*pi^2 * sinTheta)
@@ -252,8 +298,9 @@ private:
     // Evaluate solid-angle PDF for a given world direction
     // -----------------------------------------------------------------------
     float evalPdf(Vec3f wo) const {
-        float theta = std::acos(std::max(-1.f, std::min(1.f, wo.y)));
-        float phi   = std::atan2(wo.x, wo.z);
+        Vec3f local = rotateToEnv(wo);
+        float theta = std::acos(std::max(-1.f, std::min(1.f, local.y)));
+        float phi   = std::atan2(local.x, local.z);
         if (phi < 0.f) phi += k2Pi;
 
         float uu = phi / k2Pi;
@@ -277,8 +324,9 @@ private:
     // Evaluate environment map color at world direction wo
     // -----------------------------------------------------------------------
     Spectrum evalEnvmap(Vec3f wo) const {
-        float theta = std::acos(std::max(-1.f, std::min(1.f, wo.y)));
-        float phi   = std::atan2(wo.x, wo.z);
+        Vec3f local = rotateToEnv(wo);
+        float theta = std::acos(std::max(-1.f, std::min(1.f, local.y)));
+        float phi   = std::atan2(local.x, local.z);
         if (phi < 0.f) phi += k2Pi;
 
         float uu = phi / k2Pi;
@@ -333,6 +381,10 @@ private:
     float    m_sceneRadius  = 10.f;
     Vec3f    m_sceneCenter  = {};
     float    m_envIntegral  = 1.f;               // for power()
+
+    // Rotation from world space to envmap local space (rows of rotation matrix).
+    // Default = identity.  Set via setRotation() from the USD DomeLight xform.
+    Vec3f    m_rot[3] = {{1,0,0},{0,1,0},{0,0,1}};
 };
 
 } // namespace anacapa

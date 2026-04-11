@@ -1,6 +1,7 @@
 #pragma once
 
 #include <anacapa/shading/IMaterial.h>
+#include "Texture.h"
 #include <cmath>
 
 namespace anacapa {
@@ -94,29 +95,39 @@ class StandardSurfaceMaterial : public IMaterial {
 public:
     struct Params {
         // Base layer
-        Spectrum base_color     = {0.8f, 0.8f, 0.8f};
-        float    base           = 1.0f;       // overall base weight [0,1]
-        float    metalness      = 0.0f;       // 0=dielectric, 1=conductor
+        SpectrumTOV base_color     = SpectrumTOV({0.8f, 0.8f, 0.8f});
+        float        base          = 1.0f;       // overall base weight [0,1]
+        FloatTOV     metalness     = FloatTOV(0.0f);
 
         // Specular layer
-        float    roughness      = 0.5f;       // perceptual roughness (alpha = roughness^2)
-        float    specular       = 1.0f;       // specular weight
-        Spectrum specular_color = {1.f,1.f,1.f}; // F0 tint for dielectric
-        float    specular_IOR   = 1.5f;       // IOR for dielectric Fresnel
+        FloatTOV     roughness     = FloatTOV(0.5f);
+        FloatTOV     specular      = FloatTOV(1.0f);
+        Spectrum     specular_color = {1.f,1.f,1.f}; // F0 tint for dielectric
+        float        specular_IOR  = 1.5f;
 
         // Coat layer (thin dielectric on top)
-        float    coat           = 0.0f;       // coat weight [0,1]
-        float    coat_roughness = 0.1f;       // coat GGX roughness
-        // coat IOR = 1.5 (fixed)
+        float        coat           = 0.0f;
+        float        coat_roughness = 0.1f;
+
+        // Normal map (tangent-space RGB texture, bias/scale from UsdUVTexture)
+        SpectrumTOV  normal_map    = SpectrumTOV({0.5f, 0.5f, 1.0f});
+        bool         has_normal_map = false;
+        // UsdUVTexture bias/scale for normal: typically scale=(2,2,2,2) bias=(-1,-1,-1,-1)
+        float        normal_scale  = 2.f;
+        float        normal_bias   = -1.f;
+
+        // Opacity
+        FloatTOV     opacity       = FloatTOV(1.0f);
 
         // Emission
-        float    emission       = 0.0f;
-        Spectrum emission_color = {0.f, 0.f, 0.f};
+        float        emission       = 0.0f;
+        Spectrum     emission_color = {0.f, 0.f, 0.f};
     };
 
     explicit StandardSurfaceMaterial(const Params& p) : m_p(p) {
-        m_alpha      = std::max(1e-4f, m_p.roughness * m_p.roughness);
-        m_alpha2     = m_alpha * m_alpha;
+        float r  = std::max(1e-4f, m_p.roughness.value);
+        m_alpha  = r * r;
+        m_alpha2 = m_alpha * m_alpha;
         m_coatAlpha  = std::max(1e-4f, m_p.coat_roughness * m_p.coat_roughness);
         m_coatAlpha2 = m_coatAlpha * m_coatAlpha;
         m_f0Dielectric = F0_fromIOR(m_p.specular_IOR);
@@ -124,15 +135,19 @@ public:
     }
 
     bool isDelta() const override {
-        return m_p.roughness < 0.001f && (m_p.metalness > 0.999f || m_p.specular > 0.f);
+        float r = m_p.roughness.value;
+        float m = m_p.metalness.value;
+        float s = m_p.specular.value;
+        return r < 0.001f && (m > 0.999f || s > 0.f);
     }
 
-    float roughness() const override { return m_p.roughness; }
+    float roughness() const override { return m_p.roughness.value; }
+    float metalness() const override { return m_p.metalness.value; }
 
     uint32_t flags() const override {
         uint32_t f = BSDFFlag_Reflection;
-        if (m_p.roughness < 0.001f)  f |= BSDFFlag_Specular;
-        else if (m_p.roughness < 0.3f) f |= BSDFFlag_Glossy;
+        if (m_p.roughness.value < 0.001f)  f |= BSDFFlag_Specular;
+        else if (m_p.roughness.value < 0.3f) f |= BSDFFlag_Glossy;
         else                          f |= BSDFFlag_Diffuse;
         return f;
     }
@@ -143,12 +158,12 @@ public:
         return {};
     }
 
-    Spectrum reflectance(const ShadingContext&) const override {
-        // For denoising AOV: weighted average of base color and specular
-        float spec  = m_p.specular * (1.f - m_p.metalness);
-        float metal = m_p.metalness;
-        float diff  = (1.f - metal) * (1.f - spec * 0.5f);
-        return m_p.base_color * m_p.base * (diff + metal);
+    Spectrum reflectance(const ShadingContext& ctx) const override {
+        Spectrum base_color = evalTOV(m_p.base_color, ctx.uv);
+        float    metal      = evalTOV(m_p.metalness,  ctx.uv);
+        float    spec       = evalTOV(m_p.specular,   ctx.uv);
+        float    diff       = (1.f - metal) * (1.f - spec * 0.5f);
+        return base_color * m_p.base * (diff + metal);
     }
 
     // -----------------------------------------------------------------------
@@ -156,8 +171,16 @@ public:
     // -----------------------------------------------------------------------
     BSDFSample sample(const ShadingContext& ctx,
                       Vec3f wo, Vec2f u, float uComponent) const override {
-        Vec3f woLocal = ctx.toLocal(wo);
+        ShadingContext sctx = applyNormalMap(ctx);
+        Vec3f woLocal = sctx.toLocal(wo);
         if (woLocal.z <= 0.f) return {};   // backface
+
+        Spectrum base_color = evalTOV(m_p.base_color, ctx.uv);
+        float metal = evalTOV(m_p.metalness, ctx.uv);
+        float spec  = evalTOV(m_p.specular,  ctx.uv);
+        float rough = evalTOV(m_p.roughness, ctx.uv);
+        float alpha  = std::max(1e-4f, rough * rough);
+        float alpha2 = alpha * alpha;
 
         // --- Compute Fresnel at wo for layer selection ---
         float coatF = schlickDielectric(woLocal.z, m_coatF0);
@@ -165,10 +188,10 @@ public:
 
         // Layer selection weights (all in [0,1], then renormalize)
         float wCoat  = m_p.coat * coatF;
-        float wMetal = m_p.metalness * (1.f - wCoat);
-        float wSpec  = m_p.specular * (1.f - m_p.metalness) * specF * (1.f - wCoat);
-        float wDiff  = m_p.base * (1.f - m_p.metalness)
-                     * (1.f - m_p.specular * specF) * (1.f - wCoat);
+        float wMetal = metal * (1.f - wCoat);
+        float wSpec  = spec * (1.f - metal) * specF * (1.f - wCoat);
+        float wDiff  = m_p.base * (1.f - metal)
+                     * (1.f - spec * specF) * (1.f - wCoat);
 
         float wSum = wCoat + wMetal + wSpec + wDiff;
         if (wSum <= 0.f) return {};
@@ -181,31 +204,31 @@ public:
         // Choose component
         BSDFSample result;
         if (uComponent < wCoat) {
-            result = sampleGGX(ctx, woLocal, u, m_coatAlpha, m_coatAlpha2,
+            result = sampleGGX(sctx, woLocal, u, m_coatAlpha, m_coatAlpha2,
                                Spectrum{m_coatF0, m_coatF0, m_coatF0}, false);
         } else if (uComponent < wCoat + wMetal) {
             // Conductor: F0 = base_color
-            result = sampleGGX(ctx, woLocal, u, m_alpha, m_alpha2,
-                               m_p.base_color * m_p.base, false);
+            result = sampleGGX(sctx, woLocal, u, alpha, alpha2,
+                               base_color * m_p.base, false);
         } else if (uComponent < wCoat + wMetal + wSpec) {
             // Dielectric specular: F0 = specular * specular_color * f0_from_IOR
-            Spectrum f0 = m_p.specular_color
-                        * (m_p.specular * m_f0Dielectric);
-            result = sampleGGX(ctx, woLocal, u, m_alpha, m_alpha2, f0, false);
+            Spectrum f0 = m_p.specular_color * (spec * m_f0Dielectric);
+            result = sampleGGX(sctx, woLocal, u, alpha, alpha2, f0, false);
         } else {
             // Diffuse
-            result = sampleDiffuse(ctx, woLocal, u);
+            result = sampleDiffuse(sctx, woLocal, u, base_color);
         }
 
         if (!result.isValid()) return {};
 
         // Compute combined PDF and f across all layers (for firefly-free evaluation)
         float pdfFwd = 0.f, pdfRev = 0.f;
-        Spectrum fCombined = evalCombined(ctx, woLocal, ctx.toLocal(result.wi),
+        Spectrum fCombined = evalCombined(ctx, woLocal, sctx.toLocal(result.wi),
                                           wCoat, wMetal, wSpec, wDiff,
+                                          base_color, spec, alpha2,
                                           pdfFwd, pdfRev);
 
-        result.f      = fCombined * std::abs(ctx.toLocal(result.wi).z);
+        result.f      = fCombined * std::abs(sctx.toLocal(result.wi).z);
         result.pdf    = pdfFwd;
         result.pdfRev = pdfRev;
         result.flags  = flags();
@@ -221,14 +244,21 @@ public:
         Vec3f wiLocal = ctx.toLocal(wi);
         if (!sameHemisphere(woLocal, wiLocal)) return {};
 
+        Spectrum base_color = evalTOV(m_p.base_color, ctx.uv);
+        float metal = evalTOV(m_p.metalness, ctx.uv);
+        float spec  = evalTOV(m_p.specular,  ctx.uv);
+        float rough = evalTOV(m_p.roughness, ctx.uv);
+        float alpha  = std::max(1e-4f, rough * rough);
+        float alpha2 = alpha * alpha;
+
         float coatF = schlickDielectric(woLocal.z, m_coatF0);
         float specF = schlickDielectric(woLocal.z, m_f0Dielectric);
 
         float wCoat  = m_p.coat * coatF;
-        float wMetal = m_p.metalness * (1.f - wCoat);
-        float wSpec  = m_p.specular * (1.f - m_p.metalness) * specF * (1.f - wCoat);
-        float wDiff  = m_p.base * (1.f - m_p.metalness)
-                     * (1.f - m_p.specular * specF) * (1.f - wCoat);
+        float wMetal = metal * (1.f - wCoat);
+        float wSpec  = spec * (1.f - metal) * specF * (1.f - wCoat);
+        float wDiff  = m_p.base * (1.f - metal)
+                     * (1.f - spec * specF) * (1.f - wCoat);
 
         float wSum = wCoat + wMetal + wSpec + wDiff;
         if (wSum <= 0.f) return {};
@@ -238,6 +268,7 @@ public:
         float pdfFwd, pdfRev;
         Spectrum f = evalCombined(ctx, woLocal, wiLocal,
                                   wCoat, wMetal, wSpec, wDiff,
+                                  base_color, spec, alpha2,
                                   pdfFwd, pdfRev);
 
         BSDFEval e;
@@ -296,7 +327,8 @@ private:
     // sampleDiffuse — cosine-weighted Lambertian
     // -----------------------------------------------------------------------
     BSDFSample sampleDiffuse(const ShadingContext& ctx,
-                              Vec3f woLocal, Vec2f u) const {
+                              Vec3f woLocal, Vec2f u,
+                              Spectrum base_color) const {
         float phi = 2.f * kSS_Pi * u.x;
         float r   = std::sqrt(u.y);
         float z   = std::sqrt(std::max(0.f, 1.f - u.y));
@@ -308,7 +340,7 @@ private:
 
         BSDFSample s;
         s.wi     = ctx.toWorld(wiLocal);
-        s.f      = m_p.base_color * m_p.base * (kSS_InvPi * cosI);
+        s.f      = base_color * m_p.base * (kSS_InvPi * cosI);
         s.pdf    = p;
         s.pdfRev = std::abs(woLocal.z) * kSS_InvPi;
         s.flags  = BSDFFlag_Diffuse | BSDFFlag_Reflection;
@@ -351,6 +383,7 @@ private:
     Spectrum evalCombined(const ShadingContext& /*ctx*/,
                            Vec3f woLocal, Vec3f wiLocal,
                            float wCoat, float wMetal, float wSpec, float wDiff,
+                           Spectrum base_color, float spec, float alpha2,
                            float& pdfFwd, float& pdfRev) const {
         Spectrum f = {};
         pdfFwd = pdfRev = 0.f;
@@ -370,8 +403,8 @@ private:
         // Metallic layer
         if (wMetal > 0.f) {
             float pF, pR;
-            Spectrum fM = evalGGX(woLocal, wiLocal, m_alpha2,
-                                   m_p.base_color * m_p.base, pF, pR);
+            Spectrum fM = evalGGX(woLocal, wiLocal, alpha2,
+                                   base_color * m_p.base, pF, pR);
             f += fM * wMetal;
             pdfFwd += pF * wMetal;
             pdfRev += pR * wMetal;
@@ -380,8 +413,8 @@ private:
         // Dielectric specular layer
         if (wSpec > 0.f) {
             float pF, pR;
-            Spectrum f0 = m_p.specular_color * (m_p.specular * m_f0Dielectric);
-            Spectrum fS = evalGGX(woLocal, wiLocal, m_alpha2, f0, pF, pR);
+            Spectrum f0 = m_p.specular_color * (spec * m_f0Dielectric);
+            Spectrum fS = evalGGX(woLocal, wiLocal, alpha2, f0, pF, pR);
             f += fS * wSpec;
             pdfFwd += pF * wSpec;
             pdfRev += pR * wSpec;
@@ -391,7 +424,7 @@ private:
         if (wDiff > 0.f) {
             float cosI  = std::abs(wiLocal.z);
             float cosO  = std::abs(woLocal.z);
-            Spectrum fD = m_p.base_color * m_p.base * kSS_InvPi;
+            Spectrum fD = base_color * m_p.base * kSS_InvPi;
             float pF    = cosI * kSS_InvPi;
             float pR    = cosO * kSS_InvPi;
             f += fD * wDiff;
@@ -400,6 +433,29 @@ private:
         }
 
         return f;
+    }
+
+    // -----------------------------------------------------------------------
+    // applyNormalMap — perturb shading normal using tangent-space normal map
+    // Returns a modified ShadingContext with the new normal and rebuilt basis.
+    // -----------------------------------------------------------------------
+    ShadingContext applyNormalMap(const ShadingContext& ctx) const {
+        if (!m_p.has_normal_map || !m_p.normal_map.hasTexture()) return ctx;
+
+        Spectrum s = evalTOV(m_p.normal_map, ctx.uv);
+        // Decode tangent-space normal: typically scale=2, bias=-1
+        Vec3f nts = {
+            s.x * m_p.normal_scale + m_p.normal_bias,
+            s.y * m_p.normal_scale + m_p.normal_bias,
+            s.z * m_p.normal_scale + m_p.normal_bias
+        };
+        // Transform from tangent space to world space using TBN
+        Vec3f nWorld = safeNormalize(ctx.t * nts.x + ctx.bt * nts.y + ctx.n * nts.z);
+
+        ShadingContext result = ctx;
+        result.n = nWorld;
+        buildOrthonormalBasis(result.n, result.t, result.bt);
+        return result;
     }
 
     Params   m_p;

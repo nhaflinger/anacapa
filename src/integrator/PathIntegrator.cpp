@@ -37,7 +37,8 @@ void PathIntegrator::renderTile(const SceneView& scene,
 
                 Spectrum albedo = {};
                 Vec3f    normal = {};
-                accum += Li(ray, scene, sampler, 0, albedo, normal);
+                Spectrum sample = Li(ray, scene, sampler, 0, albedo, normal);
+                if (sample.isFinite()) accum += sample;
                 accumAlbedo += albedo;
                 accumNormal = accumNormal + normal;
                 ++aovCount;
@@ -73,7 +74,7 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
         if (!hit.hit) {
             if (bounce == 0 || specularBounce) {
                 Spectrum bg = scene.envLight
-                    ? scene.envLight->Le({}, {}, -r.direction)
+                    ? scene.envLight->Le({}, {}, r.direction)
                     : scene.envRadiance;
                 L += beta * bg;
             }

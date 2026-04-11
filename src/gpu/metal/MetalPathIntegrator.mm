@@ -17,6 +17,7 @@
 #include "../../shading/StandardSurface.h"
 #include "../../shading/lights/AreaLight.h"
 #include "../../shading/lights/DirectionalLight.h"
+#include "../../shading/lights/DomeLight.h"
 
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
@@ -39,6 +40,12 @@ struct MetalPathIntegrator::Impl {
     // GPU-side scene data (uploaded once in prepare())
     std::unique_ptr<MetalBuffer<GpuMaterial>> matBuf;
     std::unique_ptr<MetalBuffer<GpuLight>>    lightBuf;
+
+    // HDRI environment texture (RGBA32Float, or 1x1 white fallback)
+    id<MTLTexture> envTexture     = nil;
+    id<MTLTexture> fallbackEnvTex = nil;
+    Vec3f          envRot[3]      = {{1,0,0},{0,1,0},{0,0,1}};
+    float          envIntensity   = 1.0f;
 
     uint32_t numMaterials = 0;
     uint32_t numLights    = 0;
@@ -101,15 +108,12 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
     // StandardSurfaceMaterial — check for GGX by flags
     if (mat->flags() & BSDFFlag_Glossy) {
         gm.type = kMatGGX;
-        // Reflectance gives base_color approximation
         SurfaceInteraction si; si.n = si.ng = {0,0,1};
         ShadingContext ctx(si, {0,0,1});
         Spectrum alb = mat->reflectance(ctx);
         gm.baseColor = {alb.x, alb.y, alb.z};
-        // roughness / metalness — approximate defaults for now (full introspection
-        // would require a virtual accessor; acceptable for interactive preview)
-        gm.roughness = 0.5f;
-        gm.metalness = 0.f;
+        gm.roughness = mat->roughness();
+        gm.metalness = mat->metalness();
         return gm;
     }
 
@@ -130,25 +134,20 @@ static GpuLight extractGpuLight(const ILight* light) {
     const AreaLight* al = dynamic_cast<const AreaLight*>(light);
     if (al) {
         gl.type = kLightRect;
-        LightSample ls = al->sample({0,0,0}, {0,1,0}, {0.5f, 0.5f});
-        gl.Le   = {ls.Li.x, ls.Li.y, ls.Li.z};
-        // Recover geometry via sampleLe
-        LightLeSample le = al->sampleLe({0.5f, 0.5f}, {0.5f, 0.5f});
+        // Use sampleLe for all geometry — it always returns Le regardless of orientation,
+        // unlike sample() which returns {} when the query point is behind the light.
+        LightLeSample le   = al->sampleLe({0.5f, 0.5f}, {0.5f, 0.5f});
+        LightLeSample le0  = al->sampleLe({0.f,  0.5f}, {0.5f, 0.5f});
+        LightLeSample le1  = al->sampleLe({1.f,  0.5f}, {0.5f, 0.5f});
+        LightLeSample le2  = al->sampleLe({0.5f, 0.f},  {0.5f, 0.5f});
+        LightLeSample le3  = al->sampleLe({0.5f, 1.f},  {0.5f, 0.5f});
+        gl.Le       = {le.Le.x,     le.Le.y,     le.Le.z};
         gl.position = {le.pos.x,    le.pos.y,    le.pos.z};
         gl.normal   = {le.normal.x, le.normal.y, le.normal.z};
         gl.area     = 1.0f / le.pdfPos;
-        // uHalf/vHalf — extract by sampling two corners
-        LightLeSample le0 = al->sampleLe({0.f, 0.5f}, {0.5f,0.5f});
-        LightLeSample le1 = al->sampleLe({1.f, 0.5f}, {0.5f,0.5f});
-        Vec3f uFull = {le1.pos.x - le0.pos.x,
-                       le1.pos.y - le0.pos.y,
-                       le1.pos.z - le0.pos.z};
+        Vec3f uFull = {le1.pos.x - le0.pos.x, le1.pos.y - le0.pos.y, le1.pos.z - le0.pos.z};
+        Vec3f vFull = {le3.pos.x - le2.pos.x, le3.pos.y - le2.pos.y, le3.pos.z - le2.pos.z};
         gl.uHalf = {uFull.x * 0.5f, uFull.y * 0.5f, uFull.z * 0.5f};
-        LightLeSample le2 = al->sampleLe({0.5f, 0.f}, {0.5f,0.5f});
-        LightLeSample le3 = al->sampleLe({0.5f, 1.f}, {0.5f,0.5f});
-        Vec3f vFull = {le3.pos.x - le2.pos.x,
-                       le3.pos.y - le2.pos.y,
-                       le3.pos.z - le2.pos.z};
         gl.vHalf = {vFull.x * 0.5f, vFull.y * 0.5f, vFull.z * 0.5f};
         return gl;
     }
@@ -162,9 +161,29 @@ static GpuLight extractGpuLight(const ILight* light) {
         return gl;
     }
 
-    // Fallback: point-like with Le from power
+    // DomeLight (infinite environment light)
+    const DomeLight* dome = dynamic_cast<const DomeLight*>(light);
+    if (dome) {
+        gl.type = kLightDome;
+        // Approximate average Le by sampling cardinal and diagonal directions
+        static const Vec3f kSampleDirs[] = {
+            {0,1,0},  {0,-1,0}, {1,0,0}, {-1,0,0}, {0,0,1}, {0,0,-1},
+            { 0.577f, 0.577f,  0.577f}, {-0.577f, 0.577f,  0.577f},
+            { 0.577f, 0.577f, -0.577f}, {-0.577f, 0.577f, -0.577f},
+            { 0.577f,-0.577f,  0.577f}, {-0.577f,-0.577f,  0.577f},
+            { 0.577f,-0.577f, -0.577f}, {-0.577f,-0.577f, -0.577f},
+        };
+        Spectrum avg{};
+        for (const Vec3f& d : kSampleDirs)
+            avg += dome->Le({}, {}, d);
+        avg = avg * (1.f / 14.f);
+        gl.Le = {avg.x, avg.y, avg.z};
+        return gl;
+    }
+
+    // Fallback: unknown light type — skip
     gl.type = kLightRect;
-    gl.Le   = {0.5f, 0.5f, 0.5f};
+    gl.Le   = {0.f, 0.f, 0.f};
     return gl;
 }
 
@@ -226,10 +245,10 @@ void MetalPathIntegrator::prepare(const SceneView& scene) {
         (*m_impl->matBuf)[i] = extractGpuMaterial(scene.materials[i]);
     m_impl->numMaterials = nMat;
 
-    // Upload lights (skip infinite/dome lights — handled as sky for now)
+    // Upload lights (including dome/infinite lights)
     std::vector<GpuLight> gpuLights;
     for (const ILight* l : scene.lights) {
-        if (l && !l->isInfinite())
+        if (l)
             gpuLights.push_back(extractGpuLight(l));
     }
     m_impl->numLights = static_cast<uint32_t>(gpuLights.size());
@@ -237,6 +256,67 @@ void MetalPathIntegrator::prepare(const SceneView& scene) {
         (__bridge void*)dev, std::max((uint32_t)gpuLights.size(), 1u));
     for (uint32_t i = 0; i < gpuLights.size(); ++i)
         (*m_impl->lightBuf)[i] = gpuLights[i];
+
+    // Upload HDRI environment map texture (RGBA32Float, padded from RGB)
+    m_impl->envTexture = nil;
+    const DomeLight* domeLight = nullptr;
+    for (const ILight* l : scene.lights) {
+        if ((domeLight = dynamic_cast<const DomeLight*>(l))) break;
+    }
+    if (domeLight && domeLight->envWidth() > 0) {
+        uint32_t ew = domeLight->envWidth();
+        uint32_t eh = domeLight->envHeight();
+        const float* rgb = domeLight->pixels();
+
+        MTLTextureDescriptor* td = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
+            width:ew height:eh mipmapped:NO];
+        td.usage       = MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModeShared;
+
+        id<MTLTexture> tex = [dev newTextureWithDescriptor:td];
+
+        // Pad RGB → RGBA row by row
+        std::vector<float> rgba(static_cast<size_t>(ew) * eh * 4);
+        for (uint32_t i = 0; i < ew * eh; ++i) {
+            rgba[i*4+0] = rgb[i*3+0];
+            rgba[i*4+1] = rgb[i*3+1];
+            rgba[i*4+2] = rgb[i*3+2];
+            rgba[i*4+3] = 1.f;
+        }
+        [tex replaceRegion:MTLRegionMake2D(0, 0, ew, eh)
+              mipmapLevel:0
+                withBytes:rgba.data()
+              bytesPerRow:ew * 4 * sizeof(float)];
+
+        m_impl->envTexture = tex;
+
+        // Store the rotation rows and intensity for use in renderTile()
+        Vec3f r0, r1, r2;
+        domeLight->getRotation(r0, r1, r2);
+        m_impl->envRot[0]     = r0;
+        m_impl->envRot[1]     = r1;
+        m_impl->envRot[2]     = r2;
+        m_impl->envIntensity  = domeLight->intensity();
+
+        spdlog::info("MetalPathIntegrator: uploaded {}x{} HDRI env texture", ew, eh);
+    }
+
+    // 1×1 white fallback texture (used when no dome light is present)
+    {
+        MTLTextureDescriptor* td = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
+            width:1 height:1 mipmapped:NO];
+        td.usage       = MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModeShared;
+        id<MTLTexture> fb = [dev newTextureWithDescriptor:td];
+        float white[4] = {1.f, 1.f, 1.f, 1.f};
+        [fb replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+             mipmapLevel:0
+               withBytes:white
+             bytesPerRow:4 * sizeof(float)];
+        m_impl->fallbackEnvTex = fb;
+    }
 
     spdlog::info("MetalPathIntegrator::prepare — {} materials, {} lights, "
                  "{} verts, {} tris",
@@ -286,6 +366,31 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
     camParams.tileY0    = tile.y0;
     camParams.tileWidth  = tileW;
     camParams.tileHeight = tileH;
+
+    // Environment/dome light
+    camParams.hasEnvLight  = 0;
+    camParams.envLe        = {0.f, 0.f, 0.f};
+    camParams.envIntensity = 1.0f;
+    camParams.envRot0 = {1.f, 0.f, 0.f};
+    camParams.envRot1 = {0.f, 1.f, 0.f};
+    camParams.envRot2 = {0.f, 0.f, 1.f};
+    if (scene.envLight) {
+        camParams.hasEnvLight  = 1;
+        camParams.envIntensity = m_impl->envIntensity;
+        // Rotation rows for directional HDRI lookup in shader
+        camParams.envRot0 = {m_impl->envRot[0].x, m_impl->envRot[0].y, m_impl->envRot[0].z};
+        camParams.envRot1 = {m_impl->envRot[1].x, m_impl->envRot[1].y, m_impl->envRot[1].z};
+        camParams.envRot2 = {m_impl->envRot[2].x, m_impl->envRot[2].y, m_impl->envRot[2].z};
+        // Average Le as fallback for any path that doesn't hit the texture
+        static const Vec3f kDirs[] = {
+            {0,1,0}, {0.577f,0.577f,0.577f}, {-0.577f,0.577f,0.577f},
+                     {0.577f,0.577f,-0.577f}, {-0.577f,0.577f,-0.577f},
+        };
+        Spectrum avg{};
+        for (const Vec3f& d : kDirs) avg += scene.envLight->Le({}, {}, d);
+        avg = avg * (1.f / 5.f);
+        camParams.envLe = {avg.x, avg.y, avg.z};
+    }
 
     // Tile-sized accum buffer (gid is local; shader writes gid.y*tileW+gid.x)
     size_t accumBytes   = tileW * tileH * sizeof(GpuAccumPixel);
@@ -340,6 +445,12 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
         setB (11, sampleIdxMTL);
 
         [enc setAccelerationStructure:tlas atBufferIndex:12];
+
+        // Environment texture (index 0); fallback 1×1 white if no HDRI loaded
+        id<MTLTexture> envTex = m_impl->envTexture
+                              ? m_impl->envTexture
+                              : m_impl->fallbackEnvTex;
+        [enc setTexture:envTex atIndex:0];
 
         // Mark TLAS + all BLAS as used — required for GPU hazard tracking.
         // Without this, the GPU cannot access the BLAS data and intersections

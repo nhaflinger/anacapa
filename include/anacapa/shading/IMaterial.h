@@ -94,6 +94,7 @@ public:
     // vertices where the geometry-sampling PDF would be near zero.
     // Default (1.0) is safe for any material that doesn't override this.
     virtual float roughness() const { return 1.0f; }
+    virtual float metalness() const { return 0.0f; }
 };
 
 } // namespace anacapa

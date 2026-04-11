@@ -1,0 +1,52 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./build/anacapa --scene /Users/douglascreel/Downloads/blender-4.1-splash.usdc --integrator path --spp 64 -o out.exr --png out.png)",
+      "Bash(c++ -std=c++17 -I/opt/homebrew/Cellar/openimageio/3.1.11.0/include -I/opt/homebrew/Cellar/fmt/12.1.0/include -L/opt/homebrew/Cellar/openimageio/3.1.11.0/lib -lOpenImageIO -lOpenImageIO_Util /tmp/read_exr.cpp -o /tmp/read_exr)",
+      "Bash(/tmp/read_exr)",
+      "Bash(__NEW_LINE_3d76c0a826c4995c__ /tmp/read_exr)",
+      "Bash(./build/anacapa --scene /Users/douglascreel/Downloads/blender-4.1-splash.usdc --integrator path --spp 64 -o out.exr --png out_ev2.png --exposure 2)",
+      "Bash(open out_ev2.png out.png)",
+      "Read(//Users/douglascreel/dev/anacapa/**)",
+      "Bash(oiiotool /Users/douglascreel/Downloads/textures/air_museum_playground_4k.exr --resize 16x8 -o /tmp/hdri_small.exr 2)",
+      "Bash(1 /tmp/read_exr /tmp/hdri_small.exr)",
+      "Bash(/tmp/read_hdri /tmp/hdri_small.exr)",
+      "Bash(/tmp/read_hdri.cpp:*)",
+      "Bash(c++ -std=c++17 -I/opt/homebrew/Cellar/openimageio/3.1.11.0/include -I/opt/homebrew/Cellar/fmt/12.1.0/include -L/opt/douglascreel/usd/include -L/opt/homebrew/Cellar/openimageio/3.1.11.0/lib -lOpenImageIO -lOpenImageIO_Util /tmp/read_hdri.cpp -o /tmp/read_hdri)",
+      "Bash(open out_nohdr.png)",
+      "Bash(open out.png)",
+      "Bash(open /tmp/out_grid.png)",
+      "Bash(ls \"/Users/douglascreel/Downloads/textures/Fabric Maxbrute \\(20\\).jpg\")",
+      "Bash(/tmp/test_fabric.cpp:*)",
+      "Bash(c++ -std=c++17 -I/opt/homebrew/Cellar/openimageio/3.1.11.0/include -I/opt/homebrew/Cellar/fmt/12.1.0/include -L/opt/homebrew/Cellar/openimageio/3.1.11.0/lib -lOpenImageIO -lOpenImageIO_Util /tmp/test_fabric.cpp -o /tmp/test_fabric)",
+      "Bash(/tmp/test_fabric)",
+      "Bash(./build/anacapa --scene /Users/douglascreel/Downloads/blender-4.1-splash.usdc --integrator path --spp 64 -o out.exr --png out.png --exposure 2)",
+      "Bash(./build/anacapa --scene /Users/douglascreel/Downloads/blender-4.1-splash.usdc --integrator path --spp 256 -o out.exr --png out.png --exposure 2)",
+      "Bash(ls *.png)",
+      "Bash(ls /Users/douglascreel/dev/anacapa/*.png)",
+      "Bash(ls *.png *.exr)",
+      "Bash(find /Users/douglascreel/dev/anacapa -name *.usd -o -name *.usda -o -name *.usdc -o -name *.usdz)",
+      "Read(//private/var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/anacapa_15_mrhw8/**)",
+      "Bash(find /Users/douglascreel/dev/anacapa/src -name GeomPool*)",
+      "Bash(head -10 grep -rn \"uint32_t addMesh\\\\|addMesh\\(\" /Users/douglascreel/dev/anacapa/src/)",
+      "Bash(cmake --build . --target anacapa_lib -j4)",
+      "Bash(cmake --build . --target anacapa -j4)",
+      "Bash(/Users/douglascreel/dev/anacapa/build/anacapa /private/var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/anacapa_15_mrhw8/scene.usda --spp 1 --output /tmp/test.exr)",
+      "Bash(/Users/douglascreel/dev/anacapa/build/anacapa --help)",
+      "Bash(/Users/douglascreel/dev/anacapa/build/anacapa --scene /private/var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/anacapa_15_mrhw8/scene.usda --spp 1 --output /tmp/test.exr)",
+      "Bash(/Users/douglascreel/dev/anacapa/build/anacapa --scene /private/var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/anacapa_15_mrhw8/scene.usda --spp 16 --output /tmp/override_mats.exr --png /tmp/override_mats.png --exposure 2 --override-materials)",
+      "Bash(awk 'NR>=5560 && NR<=5590' /private/var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/anacapa_15_mrhw8/scene.usda)",
+      "Bash(/Users/douglascreel/dev/anacapa/build/anacapa --scene /private/var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/anacapa_15_mrhw8/scene.usda --spp 16 --output /tmp/override_lights.exr --png /tmp/override_lights.png --exposure 2 --override-lights)",
+      "Bash(grep -v \"^$\")",
+      "Read(//Users/douglascreel/dev/anacapa/images/**)",
+      "Bash(awk 'NR>0')",
+      "Bash(exr='/private/var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/anacapa_15_mrhw8/textures/air_museum_playground_4k.exr' oiiotool \"$exr\" --crop 4096x50+0+0 -o /tmp/hdri_top.exr 2)",
+      "Bash(exr='/private/var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/anacapa_15_mrhw8/textures/air_museum_playground_4k.exr' echo \"=== HDRI Row Averages by Zone ===\" echo \"Top quarter \\(sky\\):\" oiiotool \"$exr\" --crop '4096x512+0+0' --stats)",
+      "Bash(cmake /Users/douglascreel/dev/anacapa)",
+      "Bash(xargs cat:*)"
+    ],
+    "additionalDirectories": [
+      "/private/var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/anacapa_15_mrhw8"
+    ]
+  }
+}
