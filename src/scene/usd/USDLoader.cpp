@@ -47,13 +47,24 @@ static Vec3f toVec3f(const GfVec3d& v) {
             static_cast<float>(v[2])};
 }
 
+// Z-up → Y-up correction: swap Y and Z, negate new Z (= old Y) to preserve handedness.
+// Applied to every world-space point/vector/normal when upAxis == "Z".
+// The matrix is:  [1  0  0]   i.e. x→x, y→z, z→-y
+//                 [0  0 -1]
+//                 [0  1  0]
+// This rotates -90° around X: Z-up becomes Y-up.
+static Vec3f applyUpCorrection(Vec3f v, bool zUp) {
+    if (!zUp) return v;
+    return { v.x, v.z, -v.y };
+}
+
 // Apply a 4x4 world transform to a point using GfMatrix4d::Transform
 // (USD uses row-vector convention: p_world = m.Transform(p_local))
-static Vec3f transformPoint(const GfMatrix4d& m, const GfVec3d& p) {
+static Vec3f transformPoint(const GfMatrix4d& m, const GfVec3d& p, bool zUp = false) {
     GfVec3d r = m.Transform(p);
-    return { static_cast<float>(r[0]),
-             static_cast<float>(r[1]),
-             static_cast<float>(r[2]) };
+    return applyUpCorrection({ static_cast<float>(r[0]),
+                               static_cast<float>(r[1]),
+                               static_cast<float>(r[2]) }, zUp);
 }
 
 static Mat4f toMat4f(const GfMatrix4d& m) {
@@ -70,75 +81,144 @@ static Mat4f toMat4f(const GfMatrix4d& m) {
 }
 
 // Apply a 4x4 world transform to a normal using inverse-transpose
-static Vec3f transformNormal(const GfMatrix4d& m, const GfVec3f& n) {
+static Vec3f transformNormal(const GfMatrix4d& m, const GfVec3f& n, bool zUp = false) {
     GfVec3d nd(n[0], n[1], n[2]);
     GfVec3d r = m.GetInverse().GetTranspose().TransformDir(nd);
-    return safeNormalize(Vec3f{static_cast<float>(r[0]),
-                                static_cast<float>(r[1]),
-                                static_cast<float>(r[2])});
+    return safeNormalize(applyUpCorrection(Vec3f{static_cast<float>(r[0]),
+                                                  static_cast<float>(r[1]),
+                                                  static_cast<float>(r[2])}, zUp));
 }
 
 // ---------------------------------------------------------------------------
-// resolveColorInput — read a Vec3f color from a UsdShadeInput.
-//
-// If the input has a direct value, return it.
-// If it is connected (e.g. to a UsdUVTexture), follow the connection and try:
-//   1. UsdUVTexture.fallback  (Vec4f — common in Pixar sample scenes)
-//   2. A hue derived from the texture filename so different materials get
-//      different flat colors (better than every material being the same grey).
+// UVTextureInfo — extracted data from a UsdUVTexture node
 // ---------------------------------------------------------------------------
-static Spectrum resolveColorInput(const UsdShadeInput& input,
-                                   const Spectrum& defaultVal) {
-    if (!input) return defaultVal;
+struct UVTextureInfo {
+    std::string path;
+    Vec2f       uvScale       = {1.f, 1.f};
+    Vec2f       uvTranslation = {0.f, 0.f};
+    float       uvRotation    = 0.f;
+    GfVec4f     fallback      = {0.5f, 0.5f, 0.5f, 1.f};
+    GfVec4f     scale         = {1.f, 1.f, 1.f, 1.f};
+    GfVec4f     bias          = {0.f, 0.f, 0.f, 0.f};
+    bool        isSRGB        = false; // true when sourceColorSpace == "sRGB" or "auto" + color file
+    // Output channel from the UsdUVTexture: "r","g","b","a","rgb","rgba"
+    // Empty means full RGB. Used for packed ORM textures.
+    std::string outputChannel;
+};
 
-    GfVec3f col;
-    if (input.Get(&col)) return {col[0], col[1], col[2]};
-
-    // Input is texture-connected — follow the connection.
-    UsdShadeSourceInfoVector sources = input.GetConnectedSources();
-    if (sources.empty()) return defaultVal;
-
-    UsdShadeShader texShader(sources[0].source.GetPrim());
-    if (!texShader) return defaultVal;
-
+// resolveUVTexture — extract texture info from a UsdUVTexture shader node.
+// Also follows the st input to pick up UsdTransform2d UV transforms.
+// stageDir: directory of the USD file, used to resolve relative texture paths.
+// Returns true if a valid file path was found.
+static bool resolveUVTexture(const UsdShadeShader& texShader,
+                              const std::string& stageDir,
+                              UVTextureInfo& out) {
     TfToken shaderId;
     texShader.GetShaderId(&shaderId);
+    if (shaderId != TfToken("UsdUVTexture")) return false;
 
-    if (shaderId == TfToken("UsdUVTexture")) {
-        // Try the fallback value first (authored on the texture node).
-        UsdShadeInput fallbackIn = texShader.GetInput(TfToken("fallback"));
-        GfVec4f fb;
-        if (fallbackIn && fallbackIn.Get(&fb))
-            return {fb[0], fb[1], fb[2]};
-
-        // No fallback authored — derive a stable hue from the texture path so
-        // different materials are visually distinguishable.
-        UsdShadeInput fileIn = texShader.GetInput(TfToken("file"));
-        if (fileIn) {
-            SdfAssetPath ap;
-            if (fileIn.Get(&ap)) {
-                // Hash the path to a hue in [0, 1), map to a saturated pastel.
-                std::size_t h = std::hash<std::string>{}(ap.GetAssetPath());
-                float hue = static_cast<float>(h % 360) / 360.f;
-                // HSV→RGB with S=0.5, V=0.8 (pastel, not too bright)
-                float H = hue * 6.f;
-                int   i = static_cast<int>(H);
-                float f = H - static_cast<float>(i);
-                float p = 0.8f * 0.5f, q = 0.8f * (1.f - 0.5f * f),
-                      t = 0.8f * (1.f - 0.5f * (1.f - f)), v = 0.8f;
-                switch (i % 6) {
-                    case 0: return {v, t, p};
-                    case 1: return {q, v, p};
-                    case 2: return {p, v, t};
-                    case 3: return {p, q, v};
-                    case 4: return {t, p, v};
-                    default: return {v, p, q};
+    UsdShadeInput fileIn = texShader.GetInput(TfToken("file"));
+    if (fileIn) {
+        SdfAssetPath ap;
+        if (fileIn.Get(&ap)) {
+            // Prefer the USD-resolved absolute path; fall back to manual join
+            // with the stage directory for relative paths.
+            if (!ap.GetResolvedPath().empty()) {
+                out.path = ap.GetResolvedPath();
+            } else if (!ap.GetAssetPath().empty()) {
+                const std::string& asset = ap.GetAssetPath();
+                if (!asset.empty() && asset[0] == '/') {
+                    out.path = asset;  // already absolute
+                } else if (!stageDir.empty()) {
+                    out.path = stageDir + "/" + asset;
+                } else {
+                    out.path = asset;
                 }
             }
         }
     }
 
-    return defaultVal;
+    UsdShadeInput fbIn = texShader.GetInput(TfToken("fallback"));
+    if (fbIn) fbIn.Get(&out.fallback);
+
+    UsdShadeInput scaleIn = texShader.GetInput(TfToken("scale"));
+    if (scaleIn) scaleIn.Get(&out.scale);
+
+    UsdShadeInput biasIn = texShader.GetInput(TfToken("bias"));
+    if (biasIn) biasIn.Get(&out.bias);
+
+    // sourceColorSpace: "sRGB" or "auto" means the file is gamma-encoded.
+    // "raw" means linear (used for roughness, metallic, normals).
+    UsdShadeInput csIn = texShader.GetInput(TfToken("sourceColorSpace"));
+    if (csIn) {
+        TfToken cs;
+        if (csIn.Get(&cs)) {
+            out.isSRGB = (cs == TfToken("sRGB") || cs == TfToken("auto"));
+        }
+    } else {
+        // No sourceColorSpace authored — default is "auto" which treats
+        // 8-bit files (PNG/JPG) as sRGB. Err on the side of linearizing
+        // color inputs to avoid overly dark renders.
+        out.isSRGB = true;
+    }
+
+    // Follow st → optional UsdTransform2d for UV transforms
+    UsdShadeInput stIn = texShader.GetInput(TfToken("st"));
+    if (stIn && stIn.HasConnectedSource()) {
+        UsdShadeSourceInfoVector stSources = stIn.GetConnectedSources();
+        if (!stSources.empty()) {
+            UsdShadeShader stShader(stSources[0].source.GetPrim());
+            if (stShader) {
+                TfToken stId;
+                stShader.GetShaderId(&stId);
+                if (stId == TfToken("UsdTransform2d")) {
+                    GfVec2f sc{1.f, 1.f}, tr{0.f, 0.f};
+                    float   rot = 0.f;
+                    UsdShadeInput scIn  = stShader.GetInput(TfToken("scale"));
+                    UsdShadeInput trIn  = stShader.GetInput(TfToken("translation"));
+                    UsdShadeInput rotIn = stShader.GetInput(TfToken("rotation"));
+                    if (scIn)  scIn.Get(&sc);
+                    if (trIn)  trIn.Get(&tr);
+                    if (rotIn) rotIn.Get(&rot);
+                    out.uvScale       = {sc[0], sc[1]};
+                    out.uvTranslation = {tr[0], tr[1]};
+                    out.uvRotation    = rot;
+                }
+            }
+        }
+    }
+    return !out.path.empty();
+}
+
+// resolveColorTOV — read a color input, returning a SpectrumTOV that carries
+// either a constant value or a file texture path + UV transform.
+static SpectrumTOV resolveColorTOV(const UsdShadeInput& input,
+                                    const Spectrum& defaultVal,
+                                    const std::string& stageDir) {
+    if (!input) return SpectrumTOV(defaultVal);
+
+    GfVec3f col;
+    if (input.Get(&col)) return SpectrumTOV(Spectrum{col[0], col[1], col[2]});
+
+    UsdShadeSourceInfoVector sources = input.GetConnectedSources();
+    if (sources.empty()) return SpectrumTOV(defaultVal);
+
+    UsdShadeShader texShader(sources[0].source.GetPrim());
+    if (!texShader) return SpectrumTOV(defaultVal);
+
+    UVTextureInfo info;
+    info.fallback       = {defaultVal.x, defaultVal.y, defaultVal.z, 1.f};
+    info.outputChannel  = sources[0].sourceName.GetString(); // e.g. "rgb", "r", "g"
+    if (resolveUVTexture(texShader, stageDir, info)) {
+        SpectrumTOV tov(Spectrum{info.fallback[0], info.fallback[1], info.fallback[2]});
+        tov.path          = info.path;
+        tov.uvScale       = info.uvScale;
+        tov.uvTranslation = info.uvTranslation;
+        tov.uvRotation    = info.uvRotation;
+        tov.linearize     = info.isSRGB;
+        return tov;
+    }
+    return SpectrumTOV(Spectrum{info.fallback[0], info.fallback[1], info.fallback[2]});
 }
 
 // resolveIntensity — apply USD exposure attribute: finalIntensity = intensity * 2^exposure
@@ -158,63 +238,100 @@ static BBox3f computePoolBounds(const GeometryPool& pool) {
     return b;
 }
 
-// resolveFloatInput — read a scalar UsdShadeInput, returning defaultVal if
-// not authored or connected to a texture (textures are not yet supported).
-static float resolveFloatInput(const UsdShadeInput& input, float defaultVal) {
-    if (!input) return defaultVal;
-    // Ignore texture connections — fall back to default
-    if (input.HasConnectedSource()) return defaultVal;
+// resolveFloatTOV — read a scalar input, returning a FloatTOV that carries
+// either a constant value or a file texture path + UV transform.
+static FloatTOV resolveFloatTOV(const UsdShadeInput& input, float defaultVal,
+                                  const std::string& stageDir) {
+    if (!input) return FloatTOV(defaultVal);
+
     float val = defaultVal;
-    input.Get(&val);
-    return val;
+    if (input.Get(&val)) return FloatTOV(val);
+
+    UsdShadeSourceInfoVector sources = input.GetConnectedSources();
+    if (sources.empty()) return FloatTOV(defaultVal);
+
+    UsdShadeShader texShader(sources[0].source.GetPrim());
+    if (!texShader) return FloatTOV(defaultVal);
+
+    UVTextureInfo info;
+    info.fallback       = {defaultVal, defaultVal, defaultVal, 1.f};
+    info.outputChannel  = sources[0].sourceName.GetString();
+    if (resolveUVTexture(texShader, stageDir, info)) {
+        FloatTOV tov(info.fallback[0]);
+        tov.path          = info.path;
+        tov.uvScale       = info.uvScale;
+        tov.uvTranslation = info.uvTranslation;
+        tov.uvRotation    = info.uvRotation;
+        // Store channel in path suffix so evalTOV can select correctly.
+        // Encode as a null-terminated tag after a pipe: "path|g" means G channel.
+        if (!info.outputChannel.empty() && info.outputChannel != "r" && info.outputChannel != "rgb")
+            tov.path += "|" + info.outputChannel;
+        return tov;
+    }
+    return FloatTOV(info.fallback[0]);
 }
 
 // resolveMaterial — walk a UsdShadeMaterial's surface output to find
-// a UsdPreviewSurface shader and extract diffuseColor, emissiveColor,
-// roughness, and metallic. Returns the most appropriate material type:
-//   - EmissiveMaterial   if emissiveColor is non-black
-//   - StandardSurfaceMaterial if metallic > 0 or roughness < 0.9
-//   - LambertianMaterial otherwise (pure diffuse)
+// a UsdPreviewSurface shader and extract all material parameters including
+// file textures, UV transforms, normal maps, opacity, and clearcoat.
 // ---------------------------------------------------------------------------
-static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat) {
-    Spectrum diffuse{0.5f, 0.5f, 0.5f};
-    Spectrum emission{};
-    float    roughness = 1.0f;
-    float    metallic  = 0.0f;
-
+static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
+                                                    const std::string& stageDir) {
     UsdShadeShader surface = mat.ComputeSurfaceSource();
     if (!surface)
-        return std::make_unique<LambertianMaterial>(diffuse);
+        return std::make_unique<LambertianMaterial>(Spectrum{0.5f, 0.5f, 0.5f});
 
     TfToken shaderId;
     surface.GetShaderId(&shaderId);
 
-    if (shaderId == TfToken("UsdPreviewSurface")) {
-        diffuse   = resolveColorInput(surface.GetInput(TfToken("diffuseColor")),
-                                      diffuse);
-        emission  = resolveColorInput(surface.GetInput(TfToken("emissiveColor")),
-                                      emission);
-        roughness = resolveFloatInput(surface.GetInput(TfToken("roughness")),
-                                      roughness);
-        metallic  = resolveFloatInput(surface.GetInput(TfToken("metallic")),
-                                      metallic);
+    if (shaderId != TfToken("UsdPreviewSurface"))
+        return std::make_unique<LambertianMaterial>(Spectrum{0.5f, 0.5f, 0.5f});
+
+    StandardSurfaceMaterial::Params p;
+    p.base_color = resolveColorTOV(surface.GetInput(TfToken("diffuseColor")),
+                                    Spectrum{0.5f, 0.5f, 0.5f}, stageDir);
+    p.roughness  = resolveFloatTOV(surface.GetInput(TfToken("roughness")),  1.0f, stageDir);
+    p.metalness  = resolveFloatTOV(surface.GetInput(TfToken("metallic")),   0.0f, stageDir);
+    p.opacity    = resolveFloatTOV(surface.GetInput(TfToken("opacity")),    1.0f, stageDir);
+
+    // Specular: USD UsdPreviewSurface has no separate specular weight input;
+    // use 0 for metals (they have no dielectric specular) and 0.5 for others.
+    p.specular = FloatTOV(p.metalness.value > 0.01f ? 0.f : 0.5f);
+
+    // Clearcoat
+    p.coat           = resolveFloatTOV(surface.GetInput(TfToken("clearcoat")), 0.f, stageDir).value;
+    p.coat_roughness = resolveFloatTOV(surface.GetInput(TfToken("clearcoatRoughness")), 0.1f, stageDir).value;
+
+    // Emission
+    Spectrum emission = resolveColorTOV(
+        surface.GetInput(TfToken("emissiveColor")), Spectrum{}, stageDir).value;
+    p.emission_color = emission;
+    p.emission       = emission.x + emission.y + emission.z > 0.f ? 1.f : 0.f;
+
+    // Normal map (tangent-space): bias/scale come from UsdUVTexture inputs
+    UsdShadeInput normalIn = surface.GetInput(TfToken("normal"));
+    if (normalIn && normalIn.HasConnectedSource()) {
+        UsdShadeSourceInfoVector nSources = normalIn.GetConnectedSources();
+        if (!nSources.empty()) {
+            UsdShadeShader nShader(nSources[0].source.GetPrim());
+            if (nShader) {
+                UVTextureInfo nInfo;
+                nInfo.fallback = {0.5f, 0.5f, 1.0f, 1.0f};
+                if (resolveUVTexture(nShader, stageDir, nInfo)) {
+                    p.normal_map.path          = nInfo.path;
+                    p.normal_map.value         = {nInfo.fallback[0], nInfo.fallback[1], nInfo.fallback[2]};
+                    p.normal_map.uvScale       = nInfo.uvScale;
+                    p.normal_map.uvTranslation = nInfo.uvTranslation;
+                    p.normal_map.uvRotation    = nInfo.uvRotation;
+                    p.normal_scale             = nInfo.scale[0];
+                    p.normal_bias              = nInfo.bias[0];
+                    p.has_normal_map           = true;
+                }
+            }
+        }
     }
 
-    if (!isBlack(emission))
-        return std::make_unique<EmissiveMaterial>(diffuse, emission);
-
-    // Use StandardSurfaceMaterial when the surface has any specular character.
-    // Pure Lambertian (roughness=1, metallic=0) stays as LambertianMaterial.
-    if (metallic > 0.01f || roughness < 0.95f) {
-        StandardSurfaceMaterial::Params p;
-        p.base_color = diffuse;
-        p.roughness  = roughness;
-        p.metalness  = metallic;
-        p.specular   = metallic > 0.01f ? 0.f : 0.5f;  // no dielectric spec on metals
-        return std::make_unique<StandardSurfaceMaterial>(p);
-    }
-
-    return std::make_unique<LambertianMaterial>(diffuse);
+    return std::make_unique<StandardSurfaceMaterial>(p);
 }
 
 // Collect all authored time samples from xformOp:* attributes on a prim.
@@ -329,7 +446,8 @@ static std::vector<MotionKey> collectMotionKeys(
 static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
                          const GfMatrix4d& xform0,
                          std::vector<MotionKey> motionKeys,
-                         GeometryPool& pool) {
+                         GeometryPool& pool,
+                         bool zUp = false) {
     const bool hasMotion = !motionKeys.empty();
     VtArray<GfVec3f> points;
     usdMesh.GetPointsAttr().Get(&points);
@@ -350,13 +468,16 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
     normalInterp = usdMesh.GetNormalsInterpolation();
 
     // UVs — look for primvar st (texCoord2f[])
+    // Use ComputeFlattened() to expand indexed primvars (Blender USD exports always
+    // use primvars:st:indices, so Get() returns the raw deduplicated values and gives
+    // wrong UVs when used with face-varying fvi indices).
     VtArray<GfVec2f> uvs;
     TfToken uvInterp;
     UsdGeomPrimvarsAPI pvAPI(usdMesh.GetPrim());
     UsdGeomPrimvar stPrimvar = pvAPI.GetPrimvar(TfToken("st"));
     if (!stPrimvar) stPrimvar = pvAPI.GetPrimvar(TfToken("UVMap"));
     if (stPrimvar) {
-        stPrimvar.Get(&uvs);
+        stPrimvar.ComputeFlattened(&uvs);
         uvInterp = stPrimvar.GetInterpolation();
     }
 
@@ -387,9 +508,9 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
                 desc.positions.push_back({(float)points[i2][0], (float)points[i2][1], (float)points[i2][2]});
             } else {
                 // Bake to world space (static mesh fast path)
-                desc.positions.push_back(transformPoint(xform, GfVec3d(points[i0])));
-                desc.positions.push_back(transformPoint(xform, GfVec3d(points[i1])));
-                desc.positions.push_back(transformPoint(xform, GfVec3d(points[i2])));
+                desc.positions.push_back(transformPoint(xform, GfVec3d(points[i0]), zUp));
+                desc.positions.push_back(transformPoint(xform, GfVec3d(points[i1]), zUp));
+                desc.positions.push_back(transformPoint(xform, GfVec3d(points[i2]), zUp));
             }
 
             // Normals
@@ -398,20 +519,20 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
                     int ni = (normalInterp == UsdGeomTokens->faceVarying) ? fvi : vi;
                     if (ni < (int)normals.size()) {
                         if (hasMotion)
-                            return safeNormalize({normals[ni][0], normals[ni][1], normals[ni][2]});
-                        return transformNormal(xform, normals[ni]);
+                            return applyUpCorrection(safeNormalize({normals[ni][0], normals[ni][1], normals[ni][2]}), zUp);
+                        return transformNormal(xform, normals[ni], zUp);
                     }
                 }
                 // Compute geometric normal
                 Vec3f a = hasMotion
-                    ? Vec3f{(float)points[i0][0], (float)points[i0][1], (float)points[i0][2]}
-                    : transformPoint(xform, GfVec3d(points[i0]));
+                    ? applyUpCorrection(Vec3f{(float)points[i0][0], (float)points[i0][1], (float)points[i0][2]}, zUp)
+                    : transformPoint(xform, GfVec3d(points[i0]), zUp);
                 Vec3f b = hasMotion
-                    ? Vec3f{(float)points[i1][0], (float)points[i1][1], (float)points[i1][2]}
-                    : transformPoint(xform, GfVec3d(points[i1]));
+                    ? applyUpCorrection(Vec3f{(float)points[i1][0], (float)points[i1][1], (float)points[i1][2]}, zUp)
+                    : transformPoint(xform, GfVec3d(points[i1]), zUp);
                 Vec3f c = hasMotion
-                    ? Vec3f{(float)points[i2][0], (float)points[i2][1], (float)points[i2][2]}
-                    : transformPoint(xform, GfVec3d(points[i2]));
+                    ? applyUpCorrection(Vec3f{(float)points[i2][0], (float)points[i2][1], (float)points[i2][2]}, zUp)
+                    : transformPoint(xform, GfVec3d(points[i2]), zUp);
                 return safeNormalize(cross(b - a, c - a));
             };
             desc.normals.push_back(getNormal(i0, fvi0));
@@ -456,7 +577,8 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
 // ---------------------------------------------------------------------------
 static Camera buildCamera(const UsdPrim& prim,
                            UsdGeomXformCache& xformCache,
-                           uint32_t filmWidth, uint32_t filmHeight) {
+                           uint32_t filmWidth, uint32_t filmHeight,
+                           bool zUp = false) {
     UsdGeomCamera usdCam(prim);
 
     bool resetXformStack = false;
@@ -467,9 +589,9 @@ static Camera buildCamera(const UsdPrim& prim,
     GfMatrix4d parentXform = xformCache.GetParentToWorldTransform(prim);
     GfMatrix4d fullXform   = localToWorld * parentXform;
 
-    Vec3f origin = transformPoint(fullXform, GfVec3d(0, 0,  0));
-    Vec3f target = transformPoint(fullXform, GfVec3d(0, 0, -1));
-    Vec3f upWS   = transformPoint(fullXform, GfVec3d(0, 1,  0));
+    Vec3f origin = transformPoint(fullXform, GfVec3d(0, 0,  0), zUp);
+    Vec3f target = transformPoint(fullXform, GfVec3d(0, 0, -1), zUp);
+    Vec3f upWS   = transformPoint(fullXform, GfVec3d(0, 1,  0), zUp);
     Vec3f up     = safeNormalize(upWS - origin);
 
     GfCamera gc  = usdCam.GetCamera(UsdTimeCode::Default());
@@ -531,9 +653,20 @@ LoadedScene loadUSD(const std::string& path,
     }
     result.valid = true;
 
-    spdlog::info("USDLoader: opened '{}' (up-axis: {})",
+    // Compute stage directory for resolving relative texture paths
+    std::string stageDir;
+    {
+        std::string stagePath = stage->GetRootLayer()->GetRealPath();
+        if (stagePath.empty()) stagePath = path;
+        auto slash = stagePath.rfind('/');
+        stageDir = (slash != std::string::npos) ? stagePath.substr(0, slash) : ".";
+    }
+
+    const bool zUp = (UsdGeomGetStageUpAxis(stage) == UsdGeomTokens->z);
+    spdlog::info("USDLoader: opened '{}' (up-axis: {}{})",
                  path,
-                 UsdGeomGetStageUpAxis(stage).GetString());
+                 UsdGeomGetStageUpAxis(stage).GetString(),
+                 zUp ? " — applying Y↔Z correction" : "");
 
     // Use the stage's authored time range for motion detection.
     // Falls back to 0/1 if the stage has no time codes (static scenes).
@@ -542,16 +675,21 @@ LoadedScene loadUSD(const std::string& path,
     double endTime   = stage->HasAuthoredTimeCodeRange()
                          ? stage->GetEndTimeCode()   : 1.0;
 
-    // Convert time code range to a normalized [0,1] shutter interval.
-    // timeCodesPerSecond defaults to 24 in USD if not authored.
-    double tcps = stage->GetTimeCodesPerSecond();
-    if (tcps <= 0.0) tcps = 24.0;
-    double durationSec = (endTime - startTime) / tcps;
-    // Normalized: open=0, close=1 spans the full startTime→endTime interval.
+    // Normalized shutter interval: only enable motion blur if the stage has an
+    // authored time range (i.e. it's actually animated). Static scenes get 0/0.
     result.shutterOpen  = 0.f;
-    result.shutterClose = (durationSec > 0.0) ? 1.f : 0.f;
-    spdlog::info("USDLoader: time range [{}, {}] @ {} tcps ({:.4f}s)",
-                 startTime, endTime, tcps, durationSec);
+    result.shutterClose = 0.f;
+    if (stage->HasAuthoredTimeCodeRange()) {
+        double tcps = stage->GetTimeCodesPerSecond();
+        if (tcps <= 0.0) tcps = 24.0;
+        double durationSec = (endTime - startTime) / tcps;
+        if (durationSec > 0.0)
+            result.shutterClose = 1.f;
+        spdlog::info("USDLoader: animated time range [{}, {}] @ {} tcps ({:.4f}s) — motion blur enabled",
+                     startTime, endTime, tcps, durationSec);
+    } else {
+        spdlog::info("USDLoader: static scene (no authored time range) — motion blur disabled");
+    }
 
     UsdTimeCode tcOpen{startTime};
     UsdTimeCode tcClose{endTime};
@@ -593,7 +731,7 @@ LoadedScene loadUSD(const std::string& path,
                              prim.GetPath().GetString(), motionKeys.size());
             }
 
-            uint32_t meshID = loadMesh(usdMesh, xform0, std::move(motionKeys), result.geomPool);
+            uint32_t meshID = loadMesh(usdMesh, xform0, std::move(motionKeys), result.geomPool, zUp);
             if (meshID == ~0u) {
                 spdlog::warn("USDLoader: skipped mesh '{}' (no geometry)",
                              prim.GetPath().GetString());
@@ -611,7 +749,7 @@ LoadedScene loadUSD(const std::string& path,
                     matIdx = it->second;
                 } else {
                     matIdx = static_cast<uint32_t>(result.materials.size());
-                    result.materials.push_back(resolveMaterial(boundMat));
+                    result.materials.push_back(resolveMaterial(boundMat, stageDir));
                     matPathToIdx[matPath] = matIdx;
                 }
             } else {
@@ -654,6 +792,7 @@ LoadedScene loadUSD(const std::string& path,
         // ---- RectLight ----
         else if (prim.IsA<UsdLuxRectLight>()) {
             UsdLuxRectLight rect(prim);
+            UsdLuxLightAPI lightAPI(prim);
             GfMatrix4d xform = xformCache.GetLocalToWorldTransform(prim);
 
             float width = 1.f, height = 1.f;
@@ -664,30 +803,37 @@ LoadedScene loadUSD(const std::string& path,
             rect.GetIntensityAttr().Get(&intensity);
 
             GfVec3f color{1.f, 1.f, 1.f};
-            rect.GetColorAttr().Get(&color);
+            lightAPI.GetColorAttr().Get(&color);
+
+            bool normalize = false;
+            lightAPI.GetNormalizeAttr().Get(&normalize);
 
             // Center of the light in world space
-            Vec3f center = transformPoint(xform, GfVec3d(0, 0, 0));
+            Vec3f center = transformPoint(xform, GfVec3d(0, 0, 0), zUp);
 
             // Half-extents: rect light in USD lies in XY plane, normal = -Z
-            Vec3f uHalf = transformPoint(xform, GfVec3d(width * 0.5, 0, 0)) - center;
-            Vec3f vHalf = transformPoint(xform, GfVec3d(0, height * 0.5, 0)) - center;
+            Vec3f uHalf = transformPoint(xform, GfVec3d(width * 0.5, 0, 0), zUp) - center;
+            Vec3f vHalf = transformPoint(xform, GfVec3d(0, height * 0.5, 0), zUp) - center;
 
-            Spectrum Le = {color[0] * intensity,
-                           color[1] * intensity,
-                           color[2] * intensity};
+            // When normalize=true, USD intensity is irradiance (W/m²).
+            // Our AreaLight Le is radiance (W/m²/sr); for a Lambertian emitter: Le = E/π.
+            float leScale = normalize ? (1.f / 3.14159265f) : 1.f;
+            Spectrum Le = {color[0] * intensity * leScale,
+                           color[1] * intensity * leScale,
+                           color[2] * intensity * leScale};
 
             auto light = std::make_unique<AreaLight>(center, uHalf, vHalf, Le);
             result.sceneView.lights.push_back(light.get());
             result.lights.push_back(std::move(light));
 
-            spdlog::debug("USDLoader: rectLight '{}' Le=({:.1f},{:.1f},{:.1f})",
-                          prim.GetPath().GetString(), Le.x, Le.y, Le.z);
+            spdlog::debug("USDLoader: rectLight '{}' Le=({:.3f},{:.3f},{:.3f}) normalize={}",
+                          prim.GetPath().GetString(), Le.x, Le.y, Le.z, normalize);
         }
 
         // ---- SphereLight — approximate as a small area light ----
         else if (prim.IsA<UsdLuxSphereLight>()) {
             UsdLuxSphereLight sphere(prim);
+            UsdLuxLightAPI lightAPI(prim);
             GfMatrix4d xform = xformCache.GetLocalToWorldTransform(prim);
 
             float radius = 0.5f;
@@ -697,16 +843,20 @@ LoadedScene loadUSD(const std::string& path,
             sphere.GetIntensityAttr().Get(&intensity);
 
             GfVec3f color{1.f, 1.f, 1.f};
-            sphere.GetColorAttr().Get(&color);
+            lightAPI.GetColorAttr().Get(&color);
 
-            Vec3f center = transformPoint(xform, GfVec3d(0, 0, 0));
-            // Represent as an area light facing -Y
+            bool normalize = false;
+            lightAPI.GetNormalizeAttr().Get(&normalize);
+
+            Vec3f center = transformPoint(xform, GfVec3d(0, 0, 0), zUp);
+            // Represent as an area light facing -Y (after up correction)
             Vec3f uHalf = {radius, 0.f, 0.f};
             Vec3f vHalf = {0.f,  0.f, radius};
 
-            Spectrum Le = {color[0] * intensity,
-                           color[1] * intensity,
-                           color[2] * intensity};
+            float leScale = normalize ? (1.f / 3.14159265f) : 1.f;
+            Spectrum Le = {color[0] * intensity * leScale,
+                           color[1] * intensity * leScale,
+                           color[2] * intensity * leScale};
 
             auto light = std::make_unique<AreaLight>(center, uHalf, vHalf, Le);
             result.sceneView.lights.push_back(light.get());
@@ -724,8 +874,8 @@ LoadedScene loadUSD(const std::string& path,
             lightAPI.GetColorAttr().Get(&color);
 
             // DistantLight emits along -Z local; dirToLight = +Z local in world
-            Vec3f lightPos  = transformPoint(xform, GfVec3d(0, 0, 0));
-            Vec3f lightPosZ = transformPoint(xform, GfVec3d(0, 0, 1));
+            Vec3f lightPos  = transformPoint(xform, GfVec3d(0, 0, 0), zUp);
+            Vec3f lightPosZ = transformPoint(xform, GfVec3d(0, 0, 1), zUp);
             Vec3f dirToLight = safeNormalize(lightPosZ - lightPos);
 
             Spectrum Le = { color[0] * intensity,
@@ -764,6 +914,27 @@ LoadedScene loadUSD(const std::string& path,
             // Bounds placeholder — updated after all meshes are loaded
             auto domeLight = std::make_unique<DomeLight>(
                 texturePath, effectiveIntensity, /*sceneRadius=*/1.f, Vec3f{});
+
+            // Apply the DomeLight's world transform rotation to correctly orient the HDRI.
+            // The xform rotates the envmap local space into world space; we store its
+            // transpose (= inverse for orthogonal matrices) so we can rotate world-space
+            // directions into envmap space for lookup.
+            GfMatrix4d domeXform = xformCache.GetLocalToWorldTransform(prim);
+            // Extract upper-left 3x3 (rotation + scale); USD DomeLights are typically
+            // only rotated (no scale), but we normalize each column for safety.
+            auto col0 = GfVec3d(domeXform[0][0], domeXform[0][1], domeXform[0][2]);
+            auto col1 = GfVec3d(domeXform[1][0], domeXform[1][1], domeXform[1][2]);
+            auto col2 = GfVec3d(domeXform[2][0], domeXform[2][1], domeXform[2][2]);
+            col0.Normalize(); col1.Normalize(); col2.Normalize();
+            // Convert from USD Z-up columns to Y-up by applying up-axis correction
+            Vec3f c0 = applyUpCorrection({(float)col0[0], (float)col0[1], (float)col0[2]}, zUp);
+            Vec3f c1 = applyUpCorrection({(float)col1[0], (float)col1[1], (float)col1[2]}, zUp);
+            Vec3f c2 = applyUpCorrection({(float)col2[0], (float)col2[1], (float)col2[2]}, zUp);
+            // setRotation takes the columns of the world-to-envmap matrix.
+            // The local-to-world columns (c0, c1, c2) are the rows of world-to-local,
+            // so pass them directly as the rows of the rotation matrix.
+            domeLight->setRotation(c0, c1, c2);
+
             result.sceneView.envLight = domeLight.get();
             result.sceneView.lights.push_back(domeLight.get());
             result.lights.push_back(std::move(domeLight));
@@ -840,7 +1011,7 @@ LoadedScene loadUSD(const std::string& path,
     }
 
     if (selectedCamPrim) {
-        result.camera = buildCamera(selectedCamPrim, xformCache, filmWidth, filmHeight);
+        result.camera = buildCamera(selectedCamPrim, xformCache, filmWidth, filmHeight, zUp);
 
         // Read shutter:open / shutter:close from the camera prim.
         // Must use UsdTimeCode::Default() for non-time-varying attributes and

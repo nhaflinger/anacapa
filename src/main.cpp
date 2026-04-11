@@ -60,6 +60,20 @@ int main(int argc, char** argv) {
                  "Use GPU (Metal) backend for fast preview renders — "
                  "lower quality, much faster (requires ANACAPA_ENABLE_METAL)");
 
+    app.add_flag("--override-lights", settings.overrideLights,
+                 "Replace all scene lights with a single white directional light "
+                 "(useful for isolating material issues from lighting issues)");
+
+    app.add_flag("--override-materials", settings.overrideMaterials,
+                 "Replace all scene materials with white Lambertian "
+                 "(useful for isolating lighting issues from material issues)");
+
+    app.add_option("--png", settings.pngPath,
+                   "Write an ACES-tonemapped sRGB PNG for easy comparison (e.g. out.png)");
+    app.add_option("--exposure", settings.exposure,
+                   "EV exposure adjustment for --png output (default 0)")
+       ->default_val(0.f);
+
     app.add_flag("--denoise",    settings.denoise.enabled,
                  "Run Intel OIDN denoiser on the beauty buffer after rendering");
     app.add_flag("--write-aovs", settings.denoise.writeAOVs,

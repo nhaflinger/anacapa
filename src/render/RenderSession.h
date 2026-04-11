@@ -43,6 +43,10 @@ struct RenderSettings {
     float          shutterClose  = 0.f;
     IntegratorType integrator      = IntegratorType::BDPT;
     bool           interactive     = false; // Use GPU (Metal) backend when available
+    bool           overrideLights    = false; // Replace scene lights with a simple white directional
+    bool           overrideMaterials = false; // Replace all scene materials with white Lambertian
+    std::string    pngPath;                   // If set, write ACES-tonemapped PNG alongside EXR
+    float          exposure          = 0.f;   // EV adjustment for PNG output
     DenoiseOptions denoise;
 };
 

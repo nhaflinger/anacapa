@@ -68,6 +68,18 @@ void RenderSession::loadScene() {
         m_scene.camera = m_camera;
         m_scene.accel  = nullptr;
 
+        // ---- Override materials: replace all with white Lambertian ----------
+        if (m_settings.overrideMaterials) {
+            spdlog::info("--override-materials: replacing {} material(s) with white Lambertian",
+                         m_materials.size());
+            auto white = std::make_unique<LambertianMaterial>(Spectrum{0.8f, 0.8f, 0.8f});
+            const IMaterial* pWhite = white.get();
+            m_materials.clear();
+            m_materials.push_back(std::move(white));
+            // Point every mesh at the single white material
+            std::fill(m_scene.materials.begin(), m_scene.materials.end(), pWhite);
+        }
+
         // ---- Command-line DoF override --------------------------------------
         // If --fstop and --focus-distance are both provided they take priority
         // over whatever the USD camera specified. Applied after camera is set
@@ -120,6 +132,15 @@ void RenderSession::loadScene() {
             }
         }
 
+        // ---- Override lights: replace all USD lights with a diagnostic light --
+        if (m_settings.overrideLights && !m_scene.lights.empty()) {
+            spdlog::info("--override-lights: discarding {} USD light(s), "
+                         "installing white directional light", m_scene.lights.size());
+            m_scene.lights.clear();
+            m_scene.envLight = nullptr;
+            m_lights.clear();
+        }
+
         // ---- Auto-sun: add a headlamp if the scene has no lights -----------
         // The light is fixed to the camera and points in the camera's forward
         // direction so every surface in the frustum is illuminated.
@@ -141,7 +162,7 @@ void RenderSession::loadScene() {
             }
 
             auto sun = std::make_unique<DirectionalLight>(
-                forward,                        // dirToLight = camera forward
+                -forward,                       // dirToLight: FROM surface TOWARD light (camera is behind forward)
                 Spectrum{8.f, 8.f, 7.5f},
                 radius, center);
             m_scene.lights.push_back(sun.get());
@@ -408,6 +429,13 @@ void RenderSession::render() {
         spdlog::error("Failed to write {}", m_settings.outputPath);
     else
         spdlog::info("Written: {}", m_settings.outputPath);
+
+    if (!m_settings.pngPath.empty()) {
+        if (!m_film->writePNG(m_settings.pngPath, m_settings.exposure))
+            spdlog::error("Failed to write PNG {}", m_settings.pngPath);
+        else
+            spdlog::info("Written (tonemapped): {}", m_settings.pngPath);
+    }
 }
 
 } // namespace anacapa

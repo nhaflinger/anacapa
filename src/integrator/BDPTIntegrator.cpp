@@ -98,7 +98,7 @@ uint32_t BDPTIntegrator::traceCameraSubpath(const SceneView& scene,
             // Record an environment vertex so (s=0, t) strategies capture env light
             if (scene.envLight && !path.full()) {
                 Vec3f rayDir = ray.direction;
-                Spectrum Le  = scene.envLight->Le({}, {}, -rayDir);
+                Spectrum Le  = scene.envLight->Le({}, {}, rayDir);
                 uint32_t ei  = path.count++;
                 path.position[ei] = ray.origin + rayDir * 1e6f;
                 path.normal[ei]   = -rayDir;
@@ -331,7 +331,9 @@ Spectrum BDPTIntegrator::connect(const SceneView& scene,
         if (isBlack(be.f)) return {};
 
         // Light emitted toward cp[ct]
-        Spectrum Le = light->Le(lp.position[0], lp.normal[0], -wi);
+        // wi points from cp[ct] toward the infinite-light position, which is
+        // the outgoing direction toward the sky — correct convention for Le().
+        Spectrum Le = light->Le(lp.position[0], lp.normal[0], wi);
         if (isBlack(Le)) return {};
 
         float cosI = std::abs(dot(wi, cp.normal[ct]));
@@ -468,10 +470,12 @@ void BDPTIntegrator::renderTile(const SceneView& scene,
                                              camPath,   t,
                                              nullptr,
                                              filmWidth, filmHeight, cam);
-                        if (isBlack(C)) continue;
+                        if (isBlack(C) || !C.isFinite()) continue;
 
                         float w = bdptMISWeight(lightPath, camPath, s2, t);
-                        sampleL += C * w;
+                        Spectrum contrib = C * w;
+                        if (!contrib.isFinite()) continue;
+                        sampleL += contrib;
                     }
                 }
 

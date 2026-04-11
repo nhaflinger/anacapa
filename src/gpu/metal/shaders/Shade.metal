@@ -111,6 +111,37 @@ static float3 toLocal(float3 v, float3 n) {
 }
 
 // ---------------------------------------------------------------------------
+// HDRI environment map helpers
+// ---------------------------------------------------------------------------
+
+// Apply world-to-envmap rotation stored as three row vectors in cam params
+static float3 rotateToEnv(float3 wo, constant GpuCameraParams& cam) {
+    float3 r0 = float3(cam.envRot0.x, cam.envRot0.y, cam.envRot0.z);
+    float3 r1 = float3(cam.envRot1.x, cam.envRot1.y, cam.envRot1.z);
+    float3 r2 = float3(cam.envRot2.x, cam.envRot2.y, cam.envRot2.z);
+    return float3(dot(r0, wo), dot(r1, wo), dot(r2, wo));
+}
+
+// Sample the HDRI texture at world direction wo.
+// Convention matches CPU DomeLight: theta=0 at +Y (row 0), u=phi/(2pi), v=theta/pi.
+static float3 evalEnvmap(float3 wo,
+                          constant GpuCameraParams& cam,
+                          texture2d<float, access::sample> envTex) {
+    float3 local = rotateToEnv(wo, cam);
+    float theta  = acos(clamp(local.y, -1.0f, 1.0f));
+    float phi    = atan2(local.x, local.z);
+    if (phi < 0.0f) phi += 2.0f * M_PI_F;
+    float u = phi  / (2.0f * M_PI_F);
+    float v = theta / M_PI_F;
+    constexpr sampler envSampler(s_address::repeat,
+                                  t_address::clamp_to_edge,
+                                  filter::linear,
+                                  coord::normalized);
+    float4 c = envTex.sample(envSampler, float2(u, v));
+    return max(float3(0.0f), c.rgb) * cam.envIntensity;
+}
+
+// ---------------------------------------------------------------------------
 // Direct-light sampling (one light chosen uniformly at random)
 // ---------------------------------------------------------------------------
 static float3 sampleDirect(
@@ -124,7 +155,9 @@ static float3 sampleDirect(
     const device GpuLight*   lights,
     uint                     numLights,
     thread uint&             rng,
-    instance_acceleration_structure accelStruct)
+    instance_acceleration_structure accelStruct,
+    constant GpuCameraParams& cam,
+    texture2d<float, access::sample> envTex)
 {
     if (numLights == 0) return float3(0);
 
@@ -160,8 +193,16 @@ static float3 sampleDirect(
         pdfL = lightPick;  // delta: contribute directly
         Li   = float3(light.Le.x, light.Le.y, light.Le.z);
 
+    } else if (light.type == kLightDome) {
+        // Cosine-weighted hemisphere sampling with directional HDRI lookup
+        wi   = cosineSampleHemisphere(rand2(rng), n);
+        tMax = 1e9f;
+        float cosW = max(1e-7f, dot(n, wi));
+        pdfL = (cosW / M_PI_F) * lightPick;
+        Li   = evalEnvmap(wi, cam, envTex);
+
     } else {
-        return float3(0);  // dome/sphere handled later
+        return float3(0);
     }
 
     float cosI = dot(n, wi);
@@ -221,6 +262,7 @@ kernel void shade(
     const device uint32_t*                  meshIndexOffsets  [[ buffer(10) ]],
     constant  uint&                         sampleIndex   [[ buffer(11) ]],
     instance_acceleration_structure         accelStruct   [[ buffer(12) ]],
+    texture2d<float, access::sample>        envTexture    [[ texture(0) ]],
     uint2                                   gid           [[ thread_position_in_grid ]])
 {
     uint px = cam.tileX0 + gid.x;
@@ -264,10 +306,14 @@ kernel void shade(
             isect.intersect(r, accelStruct, 0xFF);
 
         if (res.type == intersection_type::none) {
-            // Environment: simple white sky
-            float skyT = 0.5f * (r.direction.y + 1.0f);
-            float3 sky = mix(float3(1.0f), float3(0.5f, 0.7f, 1.0f), skyT) * 0.5f;
-            L += throughput * sky;
+            float3 envColor;
+            if (cam.hasEnvLight) {
+                envColor = evalEnvmap(r.direction, cam, envTexture);
+            } else {
+                float skyT = 0.5f * (r.direction.y + 1.0f);
+                envColor = mix(float3(1.0f), float3(0.5f, 0.7f, 1.0f), skyT) * 0.5f;
+            }
+            L += throughput * envColor;
             break;
         }
 
@@ -309,7 +355,8 @@ kernel void shade(
         L += throughput * sampleDirect(hitPos, n, wo,
                                         mat.type, baseColor,
                                         mat.roughness, mat.metalness,
-                                        lights, numLights, rng, accelStruct);
+                                        lights, numLights, rng, accelStruct,
+                                        cam, envTexture);
 
         // Russian roulette after bounce 3
         if (bounce >= 3) {

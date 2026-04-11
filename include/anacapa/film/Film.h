@@ -151,6 +151,10 @@ public:
     bool writeEXR(const std::string& path,
                   const DenoiseOptions& opts = {}) const;
 
+    // Write a display-referred PNG/JPEG with ACES filmic tone mapping +
+    // sRGB gamma. exposure: EV adjustment applied before tone mapping (0 = none).
+    bool writePNG(const std::string& path, float exposure = 0.f) const;
+
     // Raw resolved pixel access (for preview / post-processing)
     Spectrum getPixel(uint32_t x, uint32_t y) const;
 

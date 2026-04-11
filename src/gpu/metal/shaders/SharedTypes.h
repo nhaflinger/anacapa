@@ -118,6 +118,15 @@ struct GpuCameraParams {
     uint32_t  tileY0;
     uint32_t  tileWidth;
     uint32_t  tileHeight;
+    // Environment/dome light
+    GpuFloat3 envLe;          // average Le (fallback when no texture bound)
+    uint32_t  hasEnvLight;    // 1 if scene has a dome/environment light
+    // World-to-envmap rotation: three rows of the 3x3 matrix
+    GpuFloat3 envRot0;
+    GpuFloat3 envRot1;
+    GpuFloat3 envRot2;
+    float     envIntensity;   // multiplier for HDRI pixels (DomeLight intensity)
+    float     _pad4, _pad5, _pad6;
 };
 
 // ---------------------------------------------------------------------------
