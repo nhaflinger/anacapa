@@ -342,20 +342,20 @@ Denoises any linear HDR EXR using Intel OIDN. The input does not need to have be
 ./build/Darwin/denoise \
   -i render.exr \
   -o denoised.exr \
-  --albedo-channel albedo.R \
-  --normal-channel normals.R
+  --albedo-layer albedo \
+  --normal-layer normals
 
-# Denoise a specific layer (e.g. a multi-layer EXR with a non-standard beauty name)
-./build/Darwin/denoise -i render.exr -o denoised.exr --color-channel beauty.R
+# Denoise a non-standard beauty layer (e.g. multi-layer EXR from another renderer)
+./build/Darwin/denoise -i render.exr -o denoised.exr --beauty-layer beauty
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `-i, --input` | required | Input EXR path |
 | `-o, --output` | required | Output EXR path (denoised beauty, R/G/B channels) |
-| `--color-channel` | `R` | R channel name of the noisy beauty layer |
-| `--albedo-channel` | — | R channel name of the albedo AOV (e.g. `albedo.R`); omit to run without albedo guidance |
-| `--normal-channel` | — | R channel name of the normals AOV (e.g. `normals.R`); omit to run without normal guidance |
+| `--beauty-layer` | — | EXR layer name for the noisy beauty (e.g. `beauty`). Omit to use root `R,G,B` channels |
+| `--albedo-layer` | — | EXR layer name for the albedo AOV (e.g. `albedo`); omit to run without albedo guidance |
+| `--normal-layer` | — | EXR layer name for the normals AOV (e.g. `normals`); omit to run without normal guidance |
 
 AOV guidance significantly improves denoising quality, especially at low sample counts. Use `--write-aovs` when rendering to capture them.
 

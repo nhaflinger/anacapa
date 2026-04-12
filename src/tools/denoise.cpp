@@ -110,20 +110,20 @@ int main(int argc, char** argv)
     CLI::App app{"denoise — standalone OIDN denoiser for Anacapa EXR renders"};
 
     std::string inputPath, outputPath;
-    std::string colorChannel  = "R";
-    std::string albedoChannel = "";
-    std::string normalChannel = "";
+    std::string colorLayer  = "";      // empty = use root R,G,B channels
+    std::string albedoLayer = "";      // empty = no albedo guidance
+    std::string normalLayer = "";      // empty = no normal guidance
 
     app.add_option("-i,--input",  inputPath,  "Input EXR (noisy beauty)")->required();
     app.add_option("-o,--output", outputPath, "Output EXR (denoised beauty)")->required();
-    app.add_option("--color-channel", colorChannel,
-                   "R channel name of the noisy beauty layer (default: R)")
-       ->default_val("R");
-    app.add_option("--albedo-channel", albedoChannel,
-                   "R channel name of the albedo AOV (e.g. albedo.R). "
+    app.add_option("--beauty-layer", colorLayer,
+                   "EXR layer name for the noisy beauty (e.g. 'beauty'). "
+                   "Omit to use the root R,G,B channels.");
+    app.add_option("--albedo-layer", albedoLayer,
+                   "EXR layer name for the albedo AOV (e.g. 'albedo'). "
                    "Omit to denoise without albedo guidance.");
-    app.add_option("--normal-channel", normalChannel,
-                   "R channel name of the normals AOV (e.g. normals.R). "
+    app.add_option("--normal-layer", normalLayer,
+                   "EXR layer name for the normals AOV (e.g. 'normals'). "
                    "Omit to denoise without normal guidance.");
 
     CLI11_PARSE(app, argc, argv);
@@ -146,17 +146,22 @@ int main(int argc, char** argv)
 
     std::fprintf(stderr, "denoise: %ux%u — reading '%s'\n", width, height, inputPath.c_str());
 
+    // Convert layer name to R channel name: "albedo" -> "albedo.R", "" -> "R"
+    auto layerToRChannel = [](const std::string& layer) -> std::string {
+        return layer.empty() ? "R" : layer + ".R";
+    };
+
     // Read beauty
     std::vector<float> color;
-    if (!readChannels(inputPath, colorChannel, width, height, color))
+    if (!readChannels(inputPath, layerToRChannel(colorLayer), width, height, color))
         return 1;
 
     // Read optional AOVs
     std::vector<float> albedo, normals;
-    bool hasAlbedo  = !albedoChannel.empty() &&
-                      readChannels(inputPath, albedoChannel, width, height, albedo);
-    bool hasNormals = !normalChannel.empty() &&
-                      readChannels(inputPath, normalChannel, width, height, normals);
+    bool hasAlbedo  = !albedoLayer.empty() &&
+                      readChannels(inputPath, layerToRChannel(albedoLayer), width, height, albedo);
+    bool hasNormals = !normalLayer.empty() &&
+                      readChannels(inputPath, layerToRChannel(normalLayer), width, height, normals);
 
     // OIDN
     const uint32_t N = width * height;
