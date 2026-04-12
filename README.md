@@ -130,6 +130,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
   --denoise                                  \
   --write-aovs                               \
   --override-lights                          \
+  --override-materials                       \
   --interactive
 
 ./build/Darwin/anacapa --help
