@@ -91,26 +91,45 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 ./build/Darwin/anacapa --scene scenes/cornell_box.usda \
   -o images/render.exr --fstop 4 --focus-distance 5
 
+# Write a tone-mapped PNG alongside the EXR (no separate oiiotool step needed)
+./build/Darwin/anacapa --scene scenes/cornell_box.usda \
+  -o images/render.exr --png images/render.png
+
+# PNG with exposure adjustment (+1 stop)
+./build/Darwin/anacapa --scene scenes/cornell_box.usda \
+  -o images/render.exr --png images/render.png --exposure 1.0
+
 # Fast GPU preview on Apple Silicon
 ./build/Darwin/anacapa --scene scenes/cornell_box.usda \
   --interactive --width 800 --height 800 --spp 64 -o preview.exr
 
+# Isolate material issues (replace all lights with a single white directional)
+./build/Darwin/anacapa --scene scenes/cornell_box.usda \
+  -o images/render.exr --override-lights
+
+# Isolate lighting issues (replace all materials with white Lambertian)
+./build/Darwin/anacapa --scene scenes/cornell_box.usda \
+  -o images/render.exr --override-materials
+
 # Full options
 ./build/Darwin/anacapa \
-  --scene          scenes/cornell_box.usda \
-  --camera         /World/RenderCam       \
-  --integrator     bdpt                   \
-  --width          800                    \
-  --height         800                    \
-  --spp            256                    \
-  --depth          8                      \
-  --fstop          2.8                    \
-  --focus-distance 10                     \
-  --shutter-open   0                      \
-  --shutter-close  1                      \
-  --output         images/render.exr      \
-  --denoise                               \
-  --write-aovs                            \
+  --scene            scenes/cornell_box.usda \
+  --camera           /World/RenderCam        \
+  --integrator       bdpt                    \
+  --width            800                     \
+  --height           800                     \
+  --spp              256                     \
+  --depth            8                       \
+  --fstop            2.8                     \
+  --focus-distance   10                      \
+  --shutter-open     0                       \
+  --shutter-close    1                       \
+  --output           images/render.exr       \
+  --png              images/render.png       \
+  --exposure         0.5                     \
+  --denoise                                  \
+  --write-aovs                               \
+  --override-lights                          \
   --interactive
 
 ./build/Darwin/anacapa --help
@@ -307,6 +326,71 @@ Measured on Apple M3 Pro, 400×400 @ 64 spp:
 | Caustics | Yes | No |
 | Motion blur | Yes | No |
 | AOVs / denoising | Supported | Not supported |
+
+## Tools
+
+### `denoise` — standalone denoiser
+
+Denoises any linear HDR EXR using Intel OIDN. The input does not need to have been rendered by Anacapa — any EXR with linear float RGB channels works. Built automatically when `ANACAPA_ENABLE_OIDN` is on.
+
+```bash
+# Denoise a plain beauty EXR (no AOV guidance)
+./build/Darwin/denoise -i render.exr -o denoised.exr
+
+# Denoise with albedo and normals AOVs from an anacapa --write-aovs EXR
+./build/Darwin/denoise \
+  -i render.exr \
+  -o denoised.exr \
+  --albedo-channel albedo.R \
+  --normal-channel normals.R
+
+# Denoise a specific layer (e.g. a multi-layer EXR with a non-standard beauty name)
+./build/Darwin/denoise -i render.exr -o denoised.exr --color-channel beauty.R
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `-i, --input` | required | Input EXR path |
+| `-o, --output` | required | Output EXR path (denoised beauty, R/G/B channels) |
+| `--color-channel` | `R` | R channel name of the noisy beauty layer |
+| `--albedo-channel` | — | R channel name of the albedo AOV (e.g. `albedo.R`); omit to run without albedo guidance |
+| `--normal-channel` | — | R channel name of the normals AOV (e.g. `normals.R`); omit to run without normal guidance |
+
+AOV guidance significantly improves denoising quality, especially at low sample counts. Use `--write-aovs` when rendering to capture them.
+
+---
+
+### `blender_prep_for_usd_export.py` — Blender scene prep
+
+Prepares a Blender scene for clean USD export to Anacapa. Many Blender features do not survive USD export without preprocessing — this script bakes them out before export.
+
+**What it handles:**
+
+| Step | Description |
+|---|---|
+| Realize instances | Converts collection instances (Alt+D linked duplicates) to real objects |
+| Convert to mesh | Converts curves, text, metaballs, and NURBS surfaces to mesh |
+| Apply modifiers | Applies the full modifier stack (boolean, subdivision, mirror, array, solidify, bevel, etc.) |
+| Apply scale | Applies object scale so USD normals are correct |
+| Remove hidden helpers | Removes render-hidden leaf objects (boolean cutters, etc.) |
+
+**Usage:**
+
+```bash
+blender my_scene.blend --background \
+  --python tools/blender_prep_for_usd_export.py \
+  -- output.usda
+```
+
+The original `.blend` is never modified. The script exports directly to USD at the path you specify. Use `.usda` for human-readable ASCII or `.usdc` for binary.
+
+**Known limitations** (printed as warnings, require manual attention):
+
+- Particle hair / point cloud instances
+- Volume / VDB objects
+- Grease Pencil objects
+- Library-linked objects that cannot be made local
+- Objects with shape keys (modifier application is skipped; apply or remove shape keys manually first)
 
 ## Architecture
 
