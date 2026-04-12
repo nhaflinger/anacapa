@@ -292,11 +292,32 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                                     Spectrum{0.5f, 0.5f, 0.5f}, stageDir);
     p.roughness  = resolveFloatTOV(surface.GetInput(TfToken("roughness")),  1.0f, stageDir);
     p.metalness  = resolveFloatTOV(surface.GetInput(TfToken("metallic")),   0.0f, stageDir);
-    p.opacity    = resolveFloatTOV(surface.GetInput(TfToken("opacity")),    1.0f, stageDir);
+    p.opacity       = resolveFloatTOV(surface.GetInput(TfToken("opacity")),      1.0f, stageDir);
+    p.specular_IOR  = resolveFloatTOV(surface.GetInput(TfToken("ior")),          1.5f, stageDir).value;
+
+    // Derive transmission from whichever convention the exporter used:
+    //
+    //   1. inputs:transmission  — the explicit standard_surface / MaterialX
+    //      convention (e.g. Houdini, Arnold, some DCC tools).
+    //
+    //   2. inputs:opacity = 0   — the UsdPreviewSurface convention used by
+    //      Blender: a glass Cycles material is exported as opacity=0 with no
+    //      transmission attribute at all.  We infer transmission = 1 - opacity
+    //      so both conventions work transparently.
+    //
+    // Taking the max means a file that sets both attributes doesn't get double-
+    // counted, and a fully opaque material (opacity=1, transmission=0) stays 0.
+    float explicitTransmission = resolveFloatTOV(surface.GetInput(TfToken("transmission")), 0.0f, stageDir).value;
+    float opacityVal = p.opacity.value;
+    p.transmission = std::max(explicitTransmission, 1.f - opacityVal);
 
     // Specular: USD UsdPreviewSurface has no separate specular weight input;
     // use 0 for metals (they have no dielectric specular) and 0.5 for others.
-    p.specular = FloatTOV(p.metalness.value > 0.01f ? 0.f : 0.5f);
+    // For transmissive materials, set specular weight = 1 so Fresnel is fully evaluated.
+    if (p.transmission > 0.001f && p.metalness.value < 0.001f)
+        p.specular = FloatTOV(1.0f);
+    else
+        p.specular = FloatTOV(p.metalness.value > 0.01f ? 0.f : 0.5f);
 
     // Clearcoat
     p.coat           = resolveFloatTOV(surface.GetInput(TfToken("clearcoat")), 0.f, stageDir).value;
