@@ -87,6 +87,16 @@ add_executable(anacapa src/main.cpp)
 target_link_libraries(anacapa PRIVATE anacapa_lib CLI11::CLI11)
 
 # ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+if(ANACAPA_ENABLE_OIDN)
+    add_executable(denoise src/tools/denoise.cpp)
+    # Link anacapa_lib to inherit its include paths and compile definitions
+    # (spdlog bundled-fmt setup, OIDN flag, etc.) rather than re-specifying them.
+    target_link_libraries(denoise PRIVATE anacapa_lib CLI11::CLI11 OpenImageDenoise)
+endif()
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 enable_testing()

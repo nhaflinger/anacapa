@@ -139,6 +139,10 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 | `--denoise` | off | Run Intel OIDN denoiser after rendering |
 | `--write-aovs` | off | Include albedo and normals layers in the output EXR |
 | `--interactive` | off | Use Metal GPU backend for fast preview (Apple Silicon) |
+| `--png` | — | Write ACES-tonemapped sRGB PNG alongside the EXR |
+| `--exposure` | `0` | EV exposure adjustment for `--png` output (stops; positive = brighter) |
+| `--override-lights` | off | Replace all scene lights with a single white directional light (isolate material issues) |
+| `--override-materials` | off | Replace all scene materials with white Lambertian (isolate lighting issues) |
 
 `--spp`: 16–32 for quick composition checks; 256+ for final renders.
 
@@ -243,12 +247,37 @@ oiiotool out.exr --ch "albedo.R,albedo.G,albedo.B" --chnames "R,G,B" -o albedo.e
 # Extract normals (remap [-1,1] → [0,1] for viewing)
 oiiotool out.exr --ch "normals.R,normals.G,normals.B" --chnames "R,G,B" \
   --addc 1,1,1 --mulc 0.5,0.5,0.5 -o normals.exr
-
-# Apply gamma for display
-oiiotool beauty.exr --powc 0.45,0.45,0.45,1.0 -o beauty.png
 ```
 
-For interactive layer switching:
+## PNG Tone-Mapped Output
+
+Use `--png` to write an ACES-tonemapped sRGB PNG alongside the EXR in a single render pass:
+
+```bash
+# Write both EXR and tone-mapped PNG
+./build/Darwin/anacapa --scene scene.usda -o render.exr --png render.png
+
+# Adjust exposure before tone mapping (stops; positive = brighter)
+./build/Darwin/anacapa --scene scene.usda -o render.exr --png render.png --exposure 1.0
+```
+
+`--exposure` applies an EV stop adjustment (multiply by 2^exposure) before the ACES filmic tone map. This is the fastest way to get a viewable image without launching an EXR viewer.
+
+To produce a PNG manually from an existing EXR using `oiiotool`:
+
+```bash
+# Reinhard tone map → sRGB PNG
+oiiotool beauty.exr --tonemap reinhard -o beauty_tm.png
+
+# Exposure boost + Reinhard
+oiiotool beauty.exr --mulc 2.0,2.0,2.0 --tonemap reinhard -o beauty_tm.png
+
+# Tone map the denoised layer
+oiiotool out.exr --ch "denoised.R,denoised.G,denoised.B" --chnames "R,G,B" \
+  --tonemap reinhard -o denoised_tm.png
+```
+
+For interactive EXR viewing with layer switching:
 
 - **[mrViewer](https://mrviewer.sourceforge.io)** — macOS/Linux/Windows, designed for VFX
 - **[DJV](https://darbyjohnston.github.io/DJV/)** — cross-platform, lightweight
