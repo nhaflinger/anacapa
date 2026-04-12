@@ -76,9 +76,29 @@ inline Spectrum schlickConductor(float cosTheta, Spectrum f0) {
 }
 
 // ---------------------------------------------------------------------------
+// Exact Fresnel equations for a dielectric interface.
+// cosI: cosine of angle of incidence from the incident-medium side (> 0).
+// eta:  n_transmitted / n_incident.
+// Returns reflectance in [0, 1].  1.0 = total internal reflection (TIR).
+// ---------------------------------------------------------------------------
+inline float fresnelDielectric(float cosI, float eta) {
+    float sin2I = std::max(0.f, 1.f - cosI * cosI);
+    float sin2T = sin2I / (eta * eta);
+    if (sin2T >= 1.f) return 1.f;                       // TIR
+    float cosT = std::sqrt(1.f - sin2T);
+    float Rs = (cosI - eta * cosT) / (cosI + eta * cosT);
+    float Rp = (eta * cosI - cosT) / (eta * cosI + cosT);
+    return 0.5f * (Rs * Rs + Rp * Rp);
+}
+
+// ---------------------------------------------------------------------------
 // StandardSurfaceMaterial
 //
 // Approximates the MaterialX standard_surface BSDF:
+//   - Dielectric glass (transmission > 0, roughness < 0.001): exact Fresnel +
+//     Snell's law refraction — perfect specular reflect or transmit
+//   - Rough dielectric glass (transmission > 0, roughness >= 0.001): GGX
+//     reflection + microfacet transmission lobe (Walter et al. 2007)
 //   - Metallic GGX specular (conductor)
 //   - Dielectric GGX specular (Fresnel-weighted)
 //   - Lambertian diffuse (below the specular layer)
@@ -86,9 +106,10 @@ inline Spectrum schlickConductor(float cosTheta, Spectrum f0) {
 //   - Emission
 //
 // Sampling strategy (layered):
-//   1. Evaluate coat Fresnel → sample coat GGX with probability coat*Fc
-//   2. Evaluate specular Fresnel (conductor or dielectric)
-//   3. Randomly choose: metallic GGX / dielectric GGX / diffuse
+//   1. If transmission > 0 and metalness ≈ 0 → dielectric glass path
+//   2. Evaluate coat Fresnel → sample coat GGX with probability coat*Fc
+//   3. Evaluate specular Fresnel (conductor or dielectric)
+//   4. Randomly choose: metallic GGX / dielectric GGX / diffuse
 //      weighted by metalness, Fresnel, and remaining energy
 // ---------------------------------------------------------------------------
 class StandardSurfaceMaterial : public IMaterial {
@@ -116,8 +137,9 @@ public:
         float        normal_scale  = 2.f;
         float        normal_bias   = -1.f;
 
-        // Opacity
+        // Opacity / transmission
         FloatTOV     opacity       = FloatTOV(1.0f);
+        float        transmission  = 0.0f;   // 0 = opaque, 1 = fully transmissive
 
         // Emission
         float        emission       = 0.0f;
@@ -138,6 +160,8 @@ public:
         float r = m_p.roughness.value;
         float m = m_p.metalness.value;
         float s = m_p.specular.value;
+        // Smooth dielectric glass
+        if (r < 0.001f && m_p.transmission > 0.001f && m < 0.001f) return true;
         return r < 0.001f && (m > 0.999f || s > 0.f);
     }
 
@@ -146,6 +170,7 @@ public:
 
     uint32_t flags() const override {
         uint32_t f = BSDFFlag_Reflection;
+        if (m_p.transmission > 0.001f) f |= BSDFFlag_Transmission;
         if (m_p.roughness.value < 0.001f)  f |= BSDFFlag_Specular;
         else if (m_p.roughness.value < 0.3f) f |= BSDFFlag_Glossy;
         else                          f |= BSDFFlag_Diffuse;
@@ -166,6 +191,20 @@ public:
         return base_color * m_p.base * (diff + metal);
     }
 
+    // Shadow-ray transmittance tint.  For glass, this is the base color
+    // weighted by the transmission amount.  Opaque materials return black.
+    // We use the average Fresnel reflectance at normal incidence as a rough
+    // correction so polished glass doesn't pass 100% of shadow light.
+    Spectrum transmittanceColor(const ShadingContext& ctx) const override {
+        if (m_p.transmission < 0.001f) return {};
+        float metal = evalTOV(m_p.metalness, ctx.uv);
+        if (metal > 0.001f) return {};
+        Spectrum base_color = evalTOV(m_p.base_color, ctx.uv);
+        // Fresnel reflectance at normal incidence (cosTheta = 1)
+        float Fr = fresnelDielectric(1.f, m_p.specular_IOR);
+        return base_color * (m_p.transmission * (1.f - Fr));
+    }
+
     // -----------------------------------------------------------------------
     // sample
     // -----------------------------------------------------------------------
@@ -173,12 +212,118 @@ public:
                       Vec3f wo, Vec2f u, float uComponent) const override {
         ShadingContext sctx = applyNormalMap(ctx);
         Vec3f woLocal = sctx.toLocal(wo);
-        if (woLocal.z <= 0.f) return {};   // backface
+        if (woLocal.z <= 0.f) return {};   // backface — n is already flipped by ShadingContext
 
         Spectrum base_color = evalTOV(m_p.base_color, ctx.uv);
         float metal = evalTOV(m_p.metalness, ctx.uv);
         float spec  = evalTOV(m_p.specular,  ctx.uv);
         float rough = evalTOV(m_p.roughness, ctx.uv);
+
+        // -------------------------------------------------------------------
+        // Dielectric glass — smooth (delta) or rough (microfacet transmission)
+        //
+        // ShadingContext always flips n to face the incoming side, so:
+        //   ctx.frontFace == true  → entering the glass  (eta = IOR / 1)
+        //   ctx.frontFace == false → exiting  the glass  (eta = 1 / IOR)
+        // woLocal.z > 0 always holds regardless of front/back face.
+        // -------------------------------------------------------------------
+        if (m_p.transmission > 0.001f && metal < 0.001f) {
+            float eta = ctx.frontFace ? m_p.specular_IOR
+                                      : (1.f / m_p.specular_IOR);
+            float cosI = woLocal.z;  // angle of incidence, always > 0
+
+            if (rough < 0.001f) {
+                // ----- Perfect smooth glass (delta BSDF) -------------------
+                float Fr = fresnelDielectric(cosI, eta);
+
+                BSDFSample s;
+                if (uComponent < Fr) {
+                    // Specular reflection — mirror about shading normal
+                    Vec3f wiLocal = {-woLocal.x, -woLocal.y, woLocal.z};
+                    s.wi     = sctx.toWorld(wiLocal);
+                    // f = BSDF * |cosI|  but BSDF = Fr/|cosI| for a delta →  f = Fr * tint
+                    s.f      = base_color * Fr;
+                    s.pdf    = Fr;
+                    s.pdfRev = Fr;   // Fresnel is the same from both sides
+                    s.eta    = 1.f;
+                    s.flags  = BSDFFlag_Specular | BSDFFlag_Reflection;
+                } else {
+                    // Specular refraction (Snell's law in the local shading frame)
+                    float sin2T = std::max(0.f, 1.f - cosI * cosI) / (eta * eta);
+                    float cosT  = std::sqrt(std::max(0.f, 1.f - sin2T));
+                    // Refracted direction: tangential component scaled by 1/eta,
+                    // normal component becomes -cosT (goes through surface).
+                    Vec3f wiLocal = {-woLocal.x / eta, -woLocal.y / eta, -cosT};
+                    s.wi     = sctx.toWorld(wiLocal);
+                    s.f      = base_color * (1.f - Fr);
+                    s.pdf    = 1.f - Fr;
+                    s.pdfRev = 1.f - Fr;
+                    s.eta    = eta;
+                    s.flags  = BSDFFlag_Specular | BSDFFlag_Transmission;
+                }
+                return s;
+
+            } else {
+                // ----- Rough dielectric glass (microfacet BSDF) ------------
+                // Sample a GGX half-vector, then Fresnel-choose reflect vs refract.
+                float alpha  = std::max(1e-4f, rough * rough);
+                float alpha2 = alpha * alpha;
+                Vec3f wh = sampleGGX_halfvector(u, alpha2);
+                if (wh.z <= 0.f) return {};
+                float cosIH = std::max(0.f, dot(woLocal, wh));
+                if (cosIH <= 0.f) return {};
+
+                float Fr = fresnelDielectric(cosIH, eta);
+
+                BSDFSample s;
+                if (uComponent < Fr) {
+                    // GGX reflection
+                    Vec3f wiLocal = wh * (2.f * cosIH) - woLocal;
+                    if (wiLocal.z <= 0.f) return {};
+                    float D  = D_GGX(wh.z, alpha2);
+                    float G2 = G2_Smith_Separable(woLocal.z, wiLocal.z, alpha2);
+                    float cosO = woLocal.z, cosR = wiLocal.z;
+                    Spectrum f0{Fr, Fr, Fr};
+                    Spectrum bsdf = f0 * (D * G2 / (4.f * cosO));
+                    s.wi     = sctx.toWorld(wiLocal);
+                    s.f      = bsdf * cosR * base_color;
+                    s.pdf    = Fr * pdfGGX_reflection(wh.z, alpha2, cosIH);
+                    s.pdfRev = s.pdf;
+                    s.eta    = 1.f;
+                    s.flags  = BSDFFlag_Glossy | BSDFFlag_Reflection;
+                } else {
+                    // GGX refraction (microfacet transmission, Walter et al. 2007)
+                    float sin2T = std::max(0.f, 1.f - cosIH * cosIH) / (eta * eta);
+                    if (sin2T >= 1.f) return {};  // TIR
+                    float cosT_H = std::sqrt(1.f - sin2T);
+                    // Refracted direction about wh (half-vector frame)
+                    Vec3f wiLocal = woLocal * (-1.f / eta)
+                                 + wh * (cosIH / eta - cosT_H);
+                    if (wiLocal.z >= 0.f) return {};  // must go through surface
+                    float cosO   = woLocal.z;
+                    float cosI_t = std::abs(wiLocal.z);
+                    float D      = D_GGX(wh.z, alpha2);
+                    float G2     = G2_Smith_Separable(cosO, cosI_t, alpha2);
+                    // Microfacet transmission BSDF (importance transport, no eta^2)
+                    float denom  = cosIH + eta * std::abs(dot(wiLocal, wh));
+                    if (denom < 1e-6f) return {};
+                    float bsdf_scalar = (1.f - Fr) * D * G2
+                                      * cosIH / (cosO * denom);
+                    // PDF via half-vector Jacobian for refraction
+                    float absCosT_wh = std::abs(dot(wiLocal, wh));
+                    float pdf_wh     = D * wh.z;
+                    float jacobian   = eta * eta * absCosT_wh / (denom * denom);
+                    s.wi     = sctx.toWorld(wiLocal);
+                    s.f      = base_color * bsdf_scalar * cosI_t;
+                    s.pdf    = (1.f - Fr) * pdf_wh * jacobian;
+                    s.pdfRev = s.pdf;
+                    s.eta    = eta;
+                    s.flags  = BSDFFlag_Glossy | BSDFFlag_Transmission;
+                }
+                return s;
+            }
+        }
+        // -------------------------------------------------------------------
         float alpha  = std::max(1e-4f, rough * rough);
         float alpha2 = alpha * alpha;
 
@@ -242,7 +387,37 @@ public:
                        Vec3f wo, Vec3f wi) const override {
         Vec3f woLocal = ctx.toLocal(wo);
         Vec3f wiLocal = ctx.toLocal(wi);
-        if (!sameHemisphere(woLocal, wiLocal)) return {};
+
+        // Rough dielectric transmission: wi is in the opposite hemisphere.
+        if (!sameHemisphere(woLocal, wiLocal)) {
+            if (m_p.transmission < 0.001f) return {};
+            float rough = evalTOV(m_p.roughness, ctx.uv);
+            if (rough < 0.001f) return {};  // smooth glass is delta, no area PDF
+            float metal = evalTOV(m_p.metalness, ctx.uv);
+            if (metal > 0.001f) return {};
+
+            float eta = ctx.frontFace ? m_p.specular_IOR : (1.f / m_p.specular_IOR);
+            float alpha2 = rough * rough; alpha2 *= alpha2;
+            // Half-vector for refraction (Walter et al. 2007, eq. 16)
+            Vec3f wh = safeNormalize(woLocal + wiLocal * eta);
+            if (wh.z < 0.f) wh = -wh;  // ensure same hemisphere as normal
+            float cosIH = std::max(0.f, dot(woLocal, wh));
+            float cosTH = std::abs(dot(wiLocal, wh));
+            float Fr    = fresnelDielectric(cosIH, eta);
+            float D     = D_GGX(wh.z, alpha2);
+            float G2    = G2_Smith_Separable(woLocal.z, std::abs(wiLocal.z), alpha2);
+            float denom = cosIH + eta * cosTH;
+            if (denom < 1e-6f) return {};
+            float bsdf_scalar = (1.f - Fr) * D * G2 * cosIH
+                              / (woLocal.z * denom);
+            float jacobian = eta * eta * cosTH / (denom * denom);
+            Spectrum base_color = evalTOV(m_p.base_color, ctx.uv);
+            BSDFEval e;
+            e.f      = base_color * bsdf_scalar;
+            e.pdf    = (1.f - Fr) * D * wh.z * jacobian;
+            e.pdfRev = e.pdf;
+            return e;
+        }
 
         Spectrum base_color = evalTOV(m_p.base_color, ctx.uv);
         float metal = evalTOV(m_p.metalness, ctx.uv);

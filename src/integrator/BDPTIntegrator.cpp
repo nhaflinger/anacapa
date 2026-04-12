@@ -1,4 +1,5 @@
 #include "BDPTIntegrator.h"
+#include "ShadowRay.h"
 #include <anacapa/film/Film.h>
 #include <anacapa/shading/ShadingContext.h>
 #include "../shading/Lambertian.h"   // kPi / kInvPi constants
@@ -139,9 +140,15 @@ uint32_t BDPTIntegrator::traceCameraSubpath(const SceneView& scene,
                           | (mat->isDelta() ? kVertexDeltaBit : 0u);
         path.meshID[vi]          = si.meshID;
         path.material[vi]        = mat;
+        // Delta vertices (e.g. smooth glass) must not penalise pathMinRoughness.
+        // Their pdfRev is 0, which already breaks the MIS ratio chain in
+        // bdptMISWeight — so alternative strategies through them are correctly
+        // given weight 0. Tracking their roughness (= 0) here would block
+        // explicit connections at all subsequent non-specular vertices (e.g.
+        // diffuse walls seen through glass), which is wrong.
         path.pathMinRoughness[vi] = std::min(
             vi > 0 ? path.pathMinRoughness[vi - 1] : 1.0f,
-            mat->roughness());
+            mat->isDelta() ? 1.0f : mat->roughness());
 
         // Fill pdfRev on the previous vertex (reverse PDF from this vertex back)
         // We do this now because we have both ctx and wo
@@ -246,7 +253,7 @@ uint32_t BDPTIntegrator::traceLightSubpath(const SceneView& scene,
         path.material[vi]        = mat;
         path.pathMinRoughness[vi] = std::min(
             vi > 0 ? path.pathMinRoughness[vi - 1] : 1.0f,
-            mat->roughness());
+            mat->isDelta() ? 1.0f : mat->roughness());
 
         if (vi > 0) {
             float dummy, revSA;
@@ -318,10 +325,11 @@ Spectrum BDPTIntegrator::connect(const SceneView& scene,
         if (dist < 1e-6f) return {};
         Vec3f wi = toLight * (1.f / dist);
 
-        // Visibility
+        // Visibility — pass through transmissive surfaces
         Ray shadowRay = spawnRayTo(cp.position[ct], cp.normal[ct], lp.position[0]);
         shadowRay.time = cp.sceneTime;
-        if (scene.accel->occluded(shadowRay)) return {};
+        Spectrum Tr1 = shadowTransmittance(shadowRay, scene);
+        if (isBlack(Tr1)) return {};
 
         // Evaluate BSDF at camera vertex
         SurfaceInteraction si;
@@ -340,7 +348,7 @@ Spectrum BDPTIntegrator::connect(const SceneView& scene,
         float cosL = std::abs(dot(-wi, lp.normal[0]));
         float dist2 = dist * dist;
 
-        L = cp.beta[ct] * be.f * cosI * Le * cosL
+        L = cp.beta[ct] * be.f * cosI * Le * cosL * Tr1
           / (dist2 * lp.pdfFwd[0]);
         return L;
     }
@@ -368,10 +376,11 @@ Spectrum BDPTIntegrator::connect(const SceneView& scene,
     if (lp.pathMinRoughness[ls] < kRoughnessConnectionThreshold) return {};
     if (cp.pathMinRoughness[ct] < kRoughnessConnectionThreshold) return {};
 
-    // Visibility
+    // Visibility — pass through transmissive surfaces
     Ray shadowRay = spawnRayTo(lp.position[ls], lp.normal[ls], cp.position[ct]);
     shadowRay.time = cp.sceneTime;  // camera subpath is authoritative for scene time
-    if (scene.accel->occluded(shadowRay)) return {};
+    Spectrum Tr2 = shadowTransmittance(shadowRay, scene);
+    if (isBlack(Tr2)) return {};
 
     Vec3f d    = cp.position[ct] - lp.position[ls];
     float dist = d.length();
@@ -391,7 +400,7 @@ Spectrum BDPTIntegrator::connect(const SceneView& scene,
     float G = geometryTerm(lp.position[ls], lp.normal[ls],
                             cp.position[ct], cp.normal[ct]);
 
-    L = lp.beta[ls] * fL * G * fC * cp.beta[ct];
+    L = lp.beta[ls] * fL * G * fC * cp.beta[ct] * Tr2;
     return L;
 }
 

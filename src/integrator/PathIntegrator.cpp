@@ -1,4 +1,5 @@
 #include "PathIntegrator.h"
+#include "ShadowRay.h"
 #include <anacapa/shading/ShadingContext.h>
 #include <cmath>
 
@@ -152,12 +153,13 @@ Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
             if (!isBlack(be.f)) {
                 Ray shadowRay = spawnRayTo(si.p, si.n, si.p + ls.wi * ls.dist);
                 shadowRay.time = sceneTime;
-                if (!scene.accel->occluded(shadowRay)) {
+                Spectrum Tr = shadowTransmittance(shadowRay, scene);
+                if (!isBlack(Tr)) {
                     float weight = ls.isDelta
                         ? 1.f
                         : powerHeuristic(1, ls.pdf, 1, be.pdf);
                     float cosI   = absDot(ls.wi, si.n);
-                    Ld += be.f * ls.Li * cosI * weight / ls.pdf;
+                    Ld += be.f * ls.Li * Tr * cosI * weight / ls.pdf;
                 }
             }
         }
@@ -173,10 +175,37 @@ Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
                     ? 1.f
                     : powerHeuristic(1, bs.pdf, 1, lightPdf);
 
+                // Trace toward the light, stepping through any transparent surfaces.
+                // We use shadowTransmittance which handles the chain of transparent
+                // hits, then fall through to check if the final hit is an emitter.
                 Ray shadowRay = spawnRay(si.p, si.n, bs.wi);
                 shadowRay.tMax = 1e10f;
                 shadowRay.time = sceneTime;
-                TraceResult hit = scene.accel->trace(shadowRay);
+
+                // Find the first non-transmissive surface (emitter or opaque blocker)
+                Spectrum Tr = {1.f, 1.f, 1.f};
+                TraceResult hit;
+                {
+                    Ray stepRay = shadowRay;
+                    for (int step = 0; step < 8; ++step) {
+                        hit = scene.accel->trace(stepRay);
+                        if (!hit.hit) break;
+                        const IMaterial* m = (hit.si.meshID < scene.materials.size())
+                                             ? scene.materials[hit.si.meshID] : nullptr;
+                        if (!m) { Tr = {}; break; }
+                        ShadingContext hctx(hit.si, stepRay.direction);
+                        Spectrum tint = m->transmittanceColor(hctx);
+                        if (isBlack(tint)) break;   // opaque / emitter — stop here
+                        Tr = Tr * tint;
+                        if (isBlack(Tr)) break;
+                        float remaining = stepRay.tMax - hit.si.t;
+                        if (remaining <= 1e-4f) { hit.hit = false; break; }
+                        float t = stepRay.time;
+                        stepRay = spawnRay(hit.si.p, hit.si.ng, stepRay.direction);
+                        stepRay.tMax = remaining - 1e-4f;
+                        stepRay.time = t;
+                    }
+                }
 
                 Spectrum Li = {};
                 if (!hit.hit) {
@@ -191,9 +220,9 @@ Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
                     }
                 }
 
-                if (!isBlack(Li)) {
+                if (!isBlack(Li) && !isBlack(Tr)) {
                     float cosI = absDot(bs.wi, si.n);
-                    Ld += bs.f * Li * cosI * weight / bs.pdf;
+                    Ld += bs.f * Li * Tr * cosI * weight / bs.pdf;
                 }
             }
         }

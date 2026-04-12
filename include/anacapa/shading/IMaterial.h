@@ -87,6 +87,14 @@ public:
         return {};
     }
 
+    // Transmittance color for shadow rays — the fraction of light that passes
+    // through this surface unscattered.  Returns black for opaque materials
+    // (fully blocks light) and a tint color for transmissive ones.
+    // Used by the integrators to let shadow rays pass through glass.
+    virtual Spectrum transmittanceColor(const ShadingContext& ctx) const {
+        return {};   // opaque by default
+    }
+
     virtual uint32_t flags() const = 0;
 
     // Perceptual roughness in [0, 1].  0 = perfectly smooth, 1 = fully diffuse.
