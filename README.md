@@ -19,6 +19,7 @@ Named after Anacapa Island, part of California's Channel Islands.
 - **Depth of field** — thin-lens model; f-stop and focus distance from the USD camera or CLI override
 - **OSL shading language** — optional (`-DANACAPA_ENABLE_OSL=ON`)
 - **GPU-accelerated interactive rendering** — Metal backend (`--interactive`) for Apple Silicon (hardware ray tracing via `MTLAccelerationStructure`); CUDA+OptiX backend planned for NVIDIA
+- **Progressive render viewer** — SDL2 + Dear ImGui live preview with 8 comparison slots and real-time color controls (exposure, contrast, saturation, temperature)
 - **Zero compiled third-party dependencies** in the core renderer
 
 ## Dependencies
@@ -31,6 +32,8 @@ Named after Anacapa Island, part of California's Channel Islands.
 | Open Shading Language | No (`-DANACAPA_ENABLE_OSL=ON`) | `brew install open-shading-language` |
 
 Header-only dependencies (fetched automatically by CMake): spdlog, CLI11, GoogleTest.
+
+Viewer dependencies (fetched automatically when `ANACAPA_ENABLE_VIEWER=ON`): SDL2, Dear ImGui, glad, stb_image.
 
 ## Building
 
@@ -269,19 +272,19 @@ oiiotool out.exr --ch "normals.R,normals.G,normals.B" --chnames "R,G,B" \
   --addc 1,1,1 --mulc 0.5,0.5,0.5 -o normals.exr
 ```
 
-## PNG Tone-Mapped Output
+## Progressive Preview
 
-Use `--png` to write an ACES-tonemapped sRGB PNG alongside the EXR in a single render pass:
+When `--png` is set, Anacapa writes a tone-mapped preview PNG **during the render** — not just at the end. A background thread flushes whatever tiles have completed every 500 ms so you can watch the image build up in real time. The final write after all tiles are done guarantees the PNG on disk is always the complete render.
 
 ```bash
-# Write both EXR and tone-mapped PNG
+# Write both EXR and a progressively-updated tone-mapped PNG
 ./build/Darwin/anacapa --scene scene.usda -o render.exr --png render.png
 
 # Adjust exposure before tone mapping (stops; positive = brighter)
 ./build/Darwin/anacapa --scene scene.usda -o render.exr --png render.png --exposure 1.0
 ```
 
-`--exposure` applies an EV stop adjustment (multiply by 2^exposure) before the ACES filmic tone map. This is the fastest way to get a viewable image without launching an EXR viewer.
+`--exposure` applies an EV stop adjustment (multiply by 2^exposure) before the ACES filmic tone map. Pair `--png` with the `viewer` tool (see below) for a live render preview without a separate EXR viewer.
 
 To produce a PNG manually from an existing EXR using `oiiotool`:
 
@@ -392,6 +395,56 @@ The original `.blend` is never modified. The script exports directly to USD at t
 - Grease Pencil objects
 - Library-linked objects that cannot be made local
 - Objects with shape keys (modifier application is skipped; apply or remove shape keys manually first)
+
+---
+
+### `viewer` — progressive render viewer
+
+An SDL2 + Dear ImGui viewer that watches a PNG file on disk and updates live as Anacapa writes progressive previews. Pairs directly with `--png`. Built when `ANACAPA_ENABLE_VIEWER=ON`.
+
+```bash
+# Configure and build with the viewer (macOS Apple Silicon + USD)
+cmake --preset macos-arm64-usd-viewer -DUSD_ROOT=~/usd -DCMAKE_PREFIX_PATH=~/usd
+cmake --build build/Darwin --target viewer --parallel
+
+# Open a PNG to watch
+./build/Darwin/viewer render.png
+
+# Poll more frequently (default is 500 ms)
+./build/Darwin/viewer render.png --interval 250
+```
+
+Start a render in another terminal with `--png render.png` and the viewer refreshes automatically as each batch of tiles is written.
+
+#### Slots
+
+The viewer keeps 8 independent **slots**. Each slot holds one render and has its own color-adjustment state. Use slots to keep multiple renders in memory and flip between them without re-rendering.
+
+1. **Select the target slot** in the viewer's sidebar (or press `1`–`8`) before starting a render. The active slot is highlighted in blue.
+2. **Run Anacapa** with the same `--png` path as always — no extra flags needed.
+3. When the file changes on disk the viewer loads it into whichever slot is currently active.
+4. Switch between slots at any time to compare results.
+
+Empty slots are shown in grey; selecting one turns it blue immediately, making it the target for the next render.
+
+#### Real-time color controls
+
+Each slot has independent adjustments applied via a GLSL shader — the source PNG on disk is never modified.
+
+| Control | Range | Effect |
+|---|---|---|
+| Exposure | −4 to +4 EV | Overall brightness (linear scale) |
+| Contrast | −1 to +1 | Pivot-at-0.5 contrast curve |
+| Saturation | 0 to 2 | 0 = greyscale, 1 = original, 2 = vivid |
+| Temperature | −1 to +1 | −1 = cool (blue shift), +1 = warm (red shift) |
+
+#### Keyboard shortcuts
+
+| Key | Action |
+|---|---|
+| `1` – `8` | Switch active slot |
+| `R` | Reset active slot's color to defaults |
+| `Q` | Quit |
 
 ## Architecture
 

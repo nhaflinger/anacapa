@@ -3,7 +3,9 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
+#include <cstdio>   // std::rename
 
 #ifdef ANACAPA_ENABLE_OIDN
 #  include <OpenImageDenoise/oidn.h>
@@ -30,6 +32,8 @@ void Film::splatPixel(float x, float y, Spectrum value) {
 }
 
 void Film::mergeTile(const TileBuffer& tile) {
+    m_dirty.store(true, std::memory_order_relaxed);
+
     for (uint32_t ty = 0; ty < tile.height; ++ty) {
         for (uint32_t tx = 0; tx < tile.width; ++tx) {
             uint32_t fx = tile.x0 + tx;
@@ -242,12 +246,18 @@ bool Film::writePNG(const std::string& path, float exposure) const {
     ImageSpec spec(static_cast<int>(m_width), static_cast<int>(m_height), 3, TypeDesc::UINT8);
     spec.attribute("oiio:ColorSpace", "sRGB");
 
-    auto out = ImageOutput::create(path);
+    // Write to a temp file then atomically rename into place so viewers
+    // never read a partially-written file.
+    const std::string tmp = path + ".writing.png";
+
+    auto out = ImageOutput::create(tmp);
     if (!out) return false;
-    if (!out->open(path, spec)) return false;
+    if (!out->open(tmp, spec)) return false;
     bool ok = out->write_image(TypeDesc::UINT8, pixels.data());
     out->close();
-    return ok;
+    if (!ok) return false;
+
+    return std::rename(tmp.c_str(), path.c_str()) == 0;
 }
 
 } // namespace anacapa

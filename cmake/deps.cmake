@@ -91,6 +91,54 @@ if(ANACAPA_ENABLE_OIDN)
 endif()
 
 # ---------------------------------------------------------------------------
+# SDL2 + Dear ImGui (optional — render viewer)
+# Both fetched via FetchContent; no system install needed.
+# ---------------------------------------------------------------------------
+if(ANACAPA_ENABLE_VIEWER)
+    # stb_image — single-header image loader
+    FetchContent_Declare(
+        stb
+        GIT_REPOSITORY https://github.com/nothings/stb.git
+        GIT_TAG        master
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(stb)
+
+    # glad — OpenGL function loader (GL 3.3 core, no extensions)
+    FetchContent_Declare(
+        glad
+        GIT_REPOSITORY https://github.com/Dav1dde/glad.git
+        GIT_TAG        v0.1.36
+        GIT_SHALLOW    TRUE
+    )
+    set(GLAD_PROFILE  "core"  CACHE STRING "" FORCE)
+    set(GLAD_API      "gl=3.3" CACHE STRING "" FORCE)
+    set(GLAD_GENERATOR "c"    CACHE STRING "" FORCE)
+    FetchContent_MakeAvailable(glad)
+
+    # SDL2
+    FetchContent_Declare(
+        SDL2
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+        GIT_TAG        release-2.30.3
+        GIT_SHALLOW    TRUE
+    )
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON  CACHE BOOL "" FORCE)
+    set(SDL_TEST   OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(SDL2)
+
+    # Dear ImGui — no CMakeLists; we compile its sources directly in the viewer target
+    FetchContent_Declare(
+        imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG        v1.91.1
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(imgui)
+endif()
+
+# ---------------------------------------------------------------------------
 # Metal (optional — Phase 5, macOS only)
 # ---------------------------------------------------------------------------
 if(ANACAPA_ENABLE_METAL)

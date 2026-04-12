@@ -15,6 +15,7 @@ option(ANACAPA_ENABLE_METAL  "Build Metal GPU backend (Phase 5, macOS)"         
 option(ANACAPA_ENABLE_CUDA   "Build CUDA/OptiX GPU backend (Phase 5)"              OFF)
 option(ANACAPA_ENABLE_ASAN   "Build with AddressSanitizer"                         OFF)
 option(ANACAPA_ENABLE_OIDN   "Build with Intel OpenImageDenoise support"           OFF)
+option(ANACAPA_ENABLE_VIEWER "Build SDL2+ImGui progressive render viewer"          OFF)
 
 # ---------------------------------------------------------------------------
 # Dependencies (all header-only except OpenImageIO)
@@ -91,9 +92,42 @@ target_link_libraries(anacapa PRIVATE anacapa_lib CLI11::CLI11)
 # ---------------------------------------------------------------------------
 if(ANACAPA_ENABLE_OIDN)
     add_executable(denoise src/tools/denoise.cpp)
-    # Link anacapa_lib to inherit its include paths and compile definitions
-    # (spdlog bundled-fmt setup, OIDN flag, etc.) rather than re-specifying them.
     target_link_libraries(denoise PRIVATE anacapa_lib CLI11::CLI11 OpenImageDenoise)
+endif()
+
+if(ANACAPA_ENABLE_VIEWER)
+    # Compile Dear ImGui sources directly (it has no CMake build system)
+    FetchContent_GetProperties(imgui SOURCE_DIR IMGUI_SOURCE_DIR)
+    set(IMGUI_SOURCES
+        ${IMGUI_SOURCE_DIR}/imgui.cpp
+        ${IMGUI_SOURCE_DIR}/imgui_draw.cpp
+        ${IMGUI_SOURCE_DIR}/imgui_tables.cpp
+        ${IMGUI_SOURCE_DIR}/imgui_widgets.cpp
+        ${IMGUI_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp
+        ${IMGUI_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+    )
+    add_executable(viewer src/tools/viewer.cpp ${IMGUI_SOURCES})
+    FetchContent_GetProperties(stb  SOURCE_DIR STB_SOURCE_DIR)
+    target_include_directories(viewer PRIVATE
+        ${IMGUI_SOURCE_DIR}
+        ${IMGUI_SOURCE_DIR}/backends
+        ${STB_SOURCE_DIR}
+    )
+    target_link_libraries(viewer PRIVATE
+        SDL2::SDL2-static
+        glad
+        CLI11::CLI11
+    )
+    # OpenGL
+    if(APPLE)
+        target_link_libraries(viewer PRIVATE "-framework OpenGL")
+    else()
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(viewer PRIVATE OpenGL::GL)
+    endif()
+    # Silence warnings in ImGui's own sources
+    set_source_files_properties(${IMGUI_SOURCES}
+        PROPERTIES COMPILE_FLAGS "-w")
 endif()
 
 # ---------------------------------------------------------------------------

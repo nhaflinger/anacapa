@@ -40,6 +40,17 @@
       }
     },
     {
+      "name": "macos-arm64-usd-viewer",
+      "displayName": "macOS arm64 + USD + viewer (Release)",
+      "inherits": "macos-base",
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "ANACAPA_ENABLE_USD": "ON",
+        "ANACAPA_ENABLE_METAL": "ON",
+        "ANACAPA_ENABLE_VIEWER": "ON"
+      }
+    },
+    {
       "name": "macos-x86_64",
       "displayName": "macOS x86_64 (Release)",
       "inherits": "macos-base",
