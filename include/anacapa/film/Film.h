@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <chrono>
 
 namespace anacapa {
 
@@ -138,8 +139,14 @@ public:
     // Coordinates are in continuous film space [0, width) x [0, height).
     void splatPixel(float x, float y, Spectrum value);
 
-    // Merge a completed TileBuffer into the film (called by tile worker)
+    // Merge a completed TileBuffer into the film (called by tile worker).
+    // Sets the dirty flag so the progressive preview watcher knows to refresh.
     void mergeTile(const TileBuffer& tile);
+
+    // Dirty flag — set by mergeTile(), cleared by the preview watcher after
+    // each PNG write.  Render threads never block on this.
+    bool isDirty() const { return m_dirty.load(std::memory_order_relaxed); }
+    void clearDirty()    { m_dirty.store(false, std::memory_order_relaxed); }
 
     // Run OIDN denoiser on the beauty buffer, storing result in m_denoised.
     // No-op (returns false with a log warning) if OIDN is not compiled in.
@@ -166,6 +173,9 @@ private:
 
     // Denoised beauty buffer (populated by denoise())
     std::vector<float> m_denoised;   // RGB interleaved, size = width*height*3
+
+    // Set whenever mergeTile() completes; cleared by the preview watcher
+    std::atomic<bool> m_dirty{false};
 
     bool inBounds(int x, int y) const {
         return x >= 0 && x < static_cast<int>(m_width)

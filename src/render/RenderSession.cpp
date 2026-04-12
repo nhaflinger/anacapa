@@ -19,6 +19,9 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 namespace anacapa {
 
@@ -399,6 +402,33 @@ void RenderSession::render() {
 
     auto t0 = std::chrono::steady_clock::now();
 
+    // Progressive preview watcher — writes a tone-mapped PNG every 500 ms
+    // whenever new tiles have been merged.  Runs on a dedicated thread so
+    // render workers are never stalled by disk I/O.
+    std::atomic<bool>    previewStop{false};
+    std::mutex           previewMtx;
+    std::condition_variable previewCV;
+    std::thread          previewThread;
+
+    const bool doPreview = !m_settings.pngPath.empty();
+    if (doPreview) {
+        previewThread = std::thread([&] {
+            constexpr int kIntervalMs = 500;
+            while (true) {
+                std::unique_lock<std::mutex> lk(previewMtx);
+                previewCV.wait_for(lk, std::chrono::milliseconds(kIntervalMs),
+                                   [&] { return previewStop.load(); });
+                if (m_film->isDirty()) {
+                    m_film->clearDirty();
+                    m_film->writePNG(m_settings.pngPath, m_settings.exposure);
+                }
+                if (previewStop.load()) break;
+            }
+        });
+        spdlog::info("Progressive preview: writing PNG every 500 ms to '{}'",
+                     m_settings.pngPath);
+    }
+
     std::atomic<uint32_t> tilesCompleted{0};
 
     m_threadPool->parallelFor(totalTiles, [&](uint32_t tileIdx) {
@@ -417,6 +447,16 @@ void RenderSession::render() {
         if (done % 16 == 0 || done == totalTiles)
             spdlog::info("  {}/{} tiles", done, totalTiles);
     });
+
+    // Stop the preview watcher and wait for it to exit
+    if (doPreview) {
+        {
+            std::lock_guard<std::mutex> lk(previewMtx);
+            previewStop.store(true);
+        }
+        previewCV.notify_all();
+        previewThread.join();
+    }
 
     auto t1  = std::chrono::steady_clock::now();
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
