@@ -376,6 +376,7 @@ Prepares a Blender scene for clean USD export to Anacapa. Many Blender features 
 | Convert to mesh | Converts curves, text, metaballs, and NURBS surfaces to mesh |
 | Apply modifiers | Applies the full modifier stack (boolean, subdivision, mirror, array, solidify, bevel, etc.) |
 | Apply scale | Applies object scale so USD normals are correct |
+| Bake shader nodes | Detects shader nodes that don't survive USD export (Invert Color, Hue/Saturation, Bright/Contrast) and bakes their effect into a new texture file, rewiring the material to use it directly |
 | Remove hidden helpers | Removes render-hidden leaf objects (boolean cutters, etc.) |
 
 **Usage:**
@@ -395,6 +396,7 @@ The original `.blend` is never modified. The script exports directly to USD at t
 - Grease Pencil objects
 - Library-linked objects that cannot be made local
 - Objects with shape keys (modifier application is skipped; apply or remove shape keys manually first)
+- Complex shader graphs (RGB Curves, Color Ramp, procedural textures with no image source) — require a manual Cycles bake
 
 ---
 

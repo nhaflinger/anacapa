@@ -139,12 +139,15 @@ public:
 
         // Opacity / transmission
         FloatTOV     opacity       = FloatTOV(1.0f);
-        float        transmission  = 0.0f;   // 0 = opaque, 1 = fully transmissive
+        float        transmission  = 0.0f;   // 0 = opaque, 1 = fully transmissive (glass)
+        bool         alphaMask     = false;  // true = opacity driven by texture alpha channel
 
         // Emission
         float        emission       = 0.0f;
-        Spectrum     emission_color = {0.f, 0.f, 0.f};
+        SpectrumTOV  emission_color = SpectrumTOV({0.f, 0.f, 0.f});
     };
+
+    const Params& params() const { return m_p; }
 
     explicit StandardSurfaceMaterial(const Params& p) : m_p(p) {
         float r  = std::max(1e-4f, m_p.roughness.value);
@@ -177,9 +180,9 @@ public:
         return f;
     }
 
-    Spectrum Le(const ShadingContext&, Vec3f) const override {
+    Spectrum Le(const ShadingContext& ctx, Vec3f) const override {
         if (m_p.emission > 0.f)
-            return m_p.emission_color * m_p.emission;
+            return evalTOV(m_p.emission_color, ctx.uv) * m_p.emission;
         return {};
     }
 
@@ -191,11 +194,24 @@ public:
         return base_color * m_p.base * (diff + metal);
     }
 
+    float evalOpacity(const ShadingContext& ctx) const override {
+        if (m_p.alphaMask)
+            return evalTOV(m_p.opacity, ctx.uv);
+        return 1.f;
+    }
+
     // Shadow-ray transmittance tint.  For glass, this is the base color
     // weighted by the transmission amount.  Opaque materials return black.
     // We use the average Fresnel reflectance at normal incidence as a rough
     // correction so polished glass doesn't pass 100% of shadow light.
     Spectrum transmittanceColor(const ShadingContext& ctx) const override {
+        // Alpha-masked surfaces: opacity texture tells us how much light passes.
+        // opacity≈1 (opaque region) → blocks light; opacity≈0 (cutout) → passes light.
+        if (m_p.alphaMask) {
+            float alpha = evalTOV(m_p.opacity, ctx.uv);
+            if (alpha > 0.5f) return {};                    // opaque region blocks light
+            return {1.f, 1.f, 1.f};                        // cutout region: pass light through
+        }
         if (m_p.transmission < 0.001f) return {};
         float metal = evalTOV(m_p.metalness, ctx.uv);
         if (metal > 0.001f) return {};

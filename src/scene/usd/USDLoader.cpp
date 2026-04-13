@@ -192,33 +192,41 @@ static bool resolveUVTexture(const UsdShadeShader& texShader,
 
 // resolveColorTOV — read a color input, returning a SpectrumTOV that carries
 // either a constant value or a file texture path + UV transform.
+//
+// Connections are checked before the authored constant value — see the comment
+// in resolveFloatTOV for the rationale.
 static SpectrumTOV resolveColorTOV(const UsdShadeInput& input,
                                     const Spectrum& defaultVal,
                                     const std::string& stageDir) {
     if (!input) return SpectrumTOV(defaultVal);
 
-    GfVec3f col;
-    if (input.Get(&col)) return SpectrumTOV(Spectrum{col[0], col[1], col[2]});
-
+    // Check for a connected texture source first.
     UsdShadeSourceInfoVector sources = input.GetConnectedSources();
-    if (sources.empty()) return SpectrumTOV(defaultVal);
-
-    UsdShadeShader texShader(sources[0].source.GetPrim());
-    if (!texShader) return SpectrumTOV(defaultVal);
-
-    UVTextureInfo info;
-    info.fallback       = {defaultVal.x, defaultVal.y, defaultVal.z, 1.f};
-    info.outputChannel  = sources[0].sourceName.GetString(); // e.g. "rgb", "r", "g"
-    if (resolveUVTexture(texShader, stageDir, info)) {
-        SpectrumTOV tov(Spectrum{info.fallback[0], info.fallback[1], info.fallback[2]});
-        tov.path          = info.path;
-        tov.uvScale       = info.uvScale;
-        tov.uvTranslation = info.uvTranslation;
-        tov.uvRotation    = info.uvRotation;
-        tov.linearize     = info.isSRGB;
-        return tov;
+    if (!sources.empty()) {
+        UsdShadeShader texShader(sources[0].source.GetPrim());
+        if (texShader) {
+            // Use the authored constant as the fallback value.
+            GfVec3f authCol{defaultVal.x, defaultVal.y, defaultVal.z};
+            input.Get(&authCol);
+            UVTextureInfo info;
+            info.fallback      = {authCol[0], authCol[1], authCol[2], 1.f};
+            info.outputChannel = sources[0].sourceName.GetString(); // e.g. "rgb", "r", "g"
+            if (resolveUVTexture(texShader, stageDir, info)) {
+                SpectrumTOV tov(Spectrum{info.fallback[0], info.fallback[1], info.fallback[2]});
+                tov.path          = info.path;
+                tov.uvScale       = info.uvScale;
+                tov.uvTranslation = info.uvTranslation;
+                tov.uvRotation    = info.uvRotation;
+                tov.linearize     = info.isSRGB;
+                return tov;
+            }
+        }
     }
-    return SpectrumTOV(Spectrum{info.fallback[0], info.fallback[1], info.fallback[2]});
+
+    // No connection (or connection failed to resolve) — use the constant value.
+    GfVec3f col{defaultVal.x, defaultVal.y, defaultVal.z};
+    input.Get(&col);
+    return SpectrumTOV(Spectrum{col[0], col[1], col[2]});
 }
 
 // resolveIntensity — apply USD exposure attribute: finalIntensity = intensity * 2^exposure
@@ -240,35 +248,48 @@ static BBox3f computePoolBounds(const GeometryPool& pool) {
 
 // resolveFloatTOV — read a scalar input, returning a FloatTOV that carries
 // either a constant value or a file texture path + UV transform.
+//
+// IMPORTANT: connections are checked BEFORE the authored constant value.
+// USD shader inputs can legally have both a connection and an authored fallback
+// value (the fallback is used when the connection is unresolvable at runtime).
+// If we checked Get() first we would return the constant and silently ignore
+// the connection — e.g. opacity=1.0 with a texture alpha connection would
+// never resolve the texture, leaving alpha-masked surfaces always opaque.
 static FloatTOV resolveFloatTOV(const UsdShadeInput& input, float defaultVal,
                                   const std::string& stageDir) {
     if (!input) return FloatTOV(defaultVal);
 
-    float val = defaultVal;
-    if (input.Get(&val)) return FloatTOV(val);
-
+    // Check for a connected texture source first.
     UsdShadeSourceInfoVector sources = input.GetConnectedSources();
-    if (sources.empty()) return FloatTOV(defaultVal);
-
-    UsdShadeShader texShader(sources[0].source.GetPrim());
-    if (!texShader) return FloatTOV(defaultVal);
-
-    UVTextureInfo info;
-    info.fallback       = {defaultVal, defaultVal, defaultVal, 1.f};
-    info.outputChannel  = sources[0].sourceName.GetString();
-    if (resolveUVTexture(texShader, stageDir, info)) {
-        FloatTOV tov(info.fallback[0]);
-        tov.path          = info.path;
-        tov.uvScale       = info.uvScale;
-        tov.uvTranslation = info.uvTranslation;
-        tov.uvRotation    = info.uvRotation;
-        // Store channel in path suffix so evalTOV can select correctly.
-        // Encode as a null-terminated tag after a pipe: "path|g" means G channel.
-        if (!info.outputChannel.empty() && info.outputChannel != "r" && info.outputChannel != "rgb")
-            tov.path += "|" + info.outputChannel;
-        return tov;
+    if (!sources.empty()) {
+        UsdShadeShader texShader(sources[0].source.GetPrim());
+        if (texShader) {
+            // Use the authored constant as the fallback value for when the
+            // texture file is unavailable; fall back to defaultVal otherwise.
+            float authVal = defaultVal;
+            input.Get(&authVal);
+            UVTextureInfo info;
+            info.fallback      = {authVal, authVal, authVal, 1.f};
+            info.outputChannel = sources[0].sourceName.GetString();
+            if (resolveUVTexture(texShader, stageDir, info)) {
+                FloatTOV tov(info.fallback[0]);
+                tov.path          = info.path;
+                tov.uvScale       = info.uvScale;
+                tov.uvTranslation = info.uvTranslation;
+                tov.uvRotation    = info.uvRotation;
+                // Store channel in path suffix so evalTOV can select correctly.
+                // Encode as a null-terminated tag after a pipe: "path|g" means G channel.
+                if (!info.outputChannel.empty() && info.outputChannel != "r" && info.outputChannel != "rgb")
+                    tov.path += "|" + info.outputChannel;
+                return tov;
+            }
+        }
     }
-    return FloatTOV(info.fallback[0]);
+
+    // No connection (or connection failed to resolve) — use the constant value.
+    float val = defaultVal;
+    input.Get(&val);
+    return FloatTOV(val);
 }
 
 // resolveMaterial — walk a UsdShadeMaterial's surface output to find
@@ -309,7 +330,17 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
     // counted, and a fully opaque material (opacity=1, transmission=0) stays 0.
     float explicitTransmission = resolveFloatTOV(surface.GetInput(TfToken("transmission")), 0.0f, stageDir).value;
     float opacityVal = p.opacity.value;
-    p.transmission = std::max(explicitTransmission, 1.f - opacityVal);
+
+    // If opacity is driven by a texture (e.g. alpha channel of the diffuse map),
+    // treat it as an alpha mask rather than glass transmission.  The opacity
+    // constant fallback is 1.0 in this case so 1-opacity would (incorrectly)
+    // yield 0 — instead mark it as alphaMask and leave transmission alone.
+    if (!p.opacity.path.empty()) {
+        p.alphaMask   = true;
+        p.transmission = explicitTransmission;   // texture-driven opacity ≠ glass
+    } else {
+        p.transmission = std::max(explicitTransmission, 1.f - opacityVal);
+    }
 
     // Specular: USD UsdPreviewSurface has no separate specular weight input;
     // use 0 for metals (they have no dielectric specular) and 0.5 for others.
@@ -323,11 +354,17 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
     p.coat           = resolveFloatTOV(surface.GetInput(TfToken("clearcoat")), 0.f, stageDir).value;
     p.coat_roughness = resolveFloatTOV(surface.GetInput(TfToken("clearcoatRoughness")), 0.1f, stageDir).value;
 
-    // Emission
-    Spectrum emission = resolveColorTOV(
-        surface.GetInput(TfToken("emissiveColor")), Spectrum{}, stageDir).value;
-    p.emission_color = emission;
-    p.emission       = emission.x + emission.y + emission.z > 0.f ? 1.f : 0.f;
+    // Emission — emissiveColor may be a constant or a texture.
+    // When it is texture-driven the constant fallback is (0,0,0) even though
+    // the surface does emit — check the texture path too.
+    {
+        SpectrumTOV emissiveTOV = resolveColorTOV(
+            surface.GetInput(TfToken("emissiveColor")), Spectrum{}, stageDir);
+        p.emission_color = emissiveTOV;   // SpectrumTOV carries path + value
+        bool hasEmission = !isBlack(emissiveTOV.value)
+                        || !emissiveTOV.path.empty();
+        p.emission = hasEmission ? 1.f : 0.f;
+    }
 
     // Normal map (tangent-space): bias/scale come from UsdUVTexture inputs
     UsdShadeInput normalIn = surface.GetInput(TfToken("normal"));
@@ -1083,6 +1120,81 @@ LoadedScene loadUSD(const std::string& path,
             spdlog::info("USDLoader: scene bounds center=({:.1f},{:.1f},{:.1f}) radius={:.1f}",
                          center.x, center.y, center.z, radius);
         }
+    }
+
+    // Auto-register emissive meshes as AreaLights so they contribute to direct
+    // lighting (NEE) and illuminate surrounding geometry.
+    //
+    // We approximate each emissive mesh as a single quad AreaLight aligned to
+    // the mesh AABB.  The dominant axis (longest diagonal component) determines
+    // the quad normal; u/v half-extents come from the remaining two axes.
+    // Le is the emission_color constant value scaled by emission weight — texture-
+    // driven emission uses the constant fallback, which may be (0,0,0); in that
+    // case we skip registration (the mesh still self-illuminates via Le() but
+    // won't drive NEE).
+    {
+        uint32_t autoLightCount = 0;
+        for (uint32_t mid = 0; mid < result.geomPool.numMeshes(); ++mid) {
+            const IMaterial* imat = result.sceneView.materials[mid];
+            if (!imat) continue;
+
+            const auto* smat = dynamic_cast<const StandardSurfaceMaterial*>(imat);
+            if (!smat) continue;
+
+            const StandardSurfaceMaterial::Params& sp = smat->params();
+            if (sp.emission <= 0.f) continue;
+
+            // Use the constant emission color.  For texture-driven emission the
+            // constant fallback is (0,0,0); fall back to a warm white so the mesh
+            // still contributes to direct illumination (NEE).  The intensity is
+            // approximate — texture-driven emitters self-illuminate via Le() at
+            // full accuracy, but NEE needs a finite Le to sample toward them.
+            Spectrum Le = sp.emission_color.value * sp.emission;
+            if (isBlack(Le)) {
+                if (!sp.emission_color.path.empty())
+                    Le = {sp.emission * 1.f, sp.emission * 0.7f, sp.emission * 0.3f}; // warm orange approximation
+                else
+                    continue;  // truly black emitter, skip
+            }
+
+            // Compute tight AABB of this mesh in world space
+            const MeshDesc& mesh = result.geomPool.mesh(mid);
+            BBox3f mb;
+            for (const Vec3f& p : mesh.positions)
+                mb.expand(p);
+            if (!mb.valid()) continue;
+
+            Vec3f diag = mb.diagonal();
+            Vec3f center = mb.centroid();
+
+            // Choose the dominant axis as the normal direction, u/v from the other two.
+            Vec3f uHalf, vHalf;
+            if (diag.x <= diag.y && diag.x <= diag.z) {
+                // X is smallest — normal points along X
+                uHalf = {0.f, diag.y * 0.5f, 0.f};
+                vHalf = {0.f, 0.f, diag.z * 0.5f};
+            } else if (diag.y <= diag.x && diag.y <= diag.z) {
+                // Y is smallest — normal points along Y
+                uHalf = {diag.x * 0.5f, 0.f, 0.f};
+                vHalf = {0.f, 0.f, diag.z * 0.5f};
+            } else {
+                // Z is smallest — normal points along Z
+                uHalf = {diag.x * 0.5f, 0.f, 0.f};
+                vHalf = {0.f, diag.y * 0.5f, 0.f};
+            }
+
+            auto light = std::make_unique<AreaLight>(center, uHalf, vHalf, Le);
+            result.sceneView.lights.push_back(light.get());
+            result.lights.push_back(std::move(light));
+            ++autoLightCount;
+
+            spdlog::info("USDLoader: emissive mesh {} → AreaLight center=({:.2f},{:.2f},{:.2f}) "
+                         "Le=({:.3f},{:.3f},{:.3f})",
+                         mid, center.x, center.y, center.z, Le.x, Le.y, Le.z);
+        }
+        if (autoLightCount > 0)
+            spdlog::info("USDLoader: auto-registered {} emissive mesh(es) as AreaLight(s)",
+                         autoLightCount);
     }
 
     spdlog::info("USDLoader: {} meshes, {} lights, camera={}",

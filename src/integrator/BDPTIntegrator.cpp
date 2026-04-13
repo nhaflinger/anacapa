@@ -124,6 +124,14 @@ uint32_t BDPTIntegrator::traceCameraSubpath(const SceneView& scene,
         Vec3f wo = -ray.direction;
         ShadingContext ctx(si, ray.direction);
 
+        // Alpha test — skip cutout regions, continue ray through the surface
+        if (mat->evalOpacity(ctx) < 0.5f) {
+            ray = spawnRay(si.p, si.ng, ray.direction);
+            ray.time = path.sceneTime;
+            --depth;   // don't count this as a bounce
+            continue;
+        }
+
         // Convert solid-angle PDF of previous direction to area PDF at this vertex
         float pdfFwdArea = convertToArea(pdfFwd,
             path.position[path.count - 1], si.p, si.n);
