@@ -205,12 +205,16 @@ public:
     // We use the average Fresnel reflectance at normal incidence as a rough
     // correction so polished glass doesn't pass 100% of shadow light.
     Spectrum transmittanceColor(const ShadingContext& ctx) const override {
-        // Alpha-masked surfaces: opacity texture tells us how much light passes.
-        // opacity≈1 (opaque region) → blocks light; opacity≈0 (cutout) → passes light.
+        // Alpha-masked surfaces: use opacity as a deterministic tint so shadow
+        // rays get the correct expected transmittance at semi-transparent edges.
+        // opacity=1 → fully blocks (returns black); opacity=0 → fully passes (returns white).
+        // This is the expected-value equivalent of the stochastic test used in
+        // the camera/bounce path loops, and avoids needing a sampler here.
         if (m_p.alphaMask) {
             float alpha = evalTOV(m_p.opacity, ctx.uv);
-            if (alpha > 0.5f) return {};                    // opaque region blocks light
-            return {1.f, 1.f, 1.f};                        // cutout region: pass light through
+            float t = 1.f - alpha;
+            if (t <= 0.f) return {};           // fully opaque
+            return {t, t, t};                  // partial transmittance at edges
         }
         if (m_p.transmission < 0.001f) return {};
         float metal = evalTOV(m_p.metalness, ctx.uv);

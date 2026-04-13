@@ -338,6 +338,8 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
     if (!p.opacity.path.empty()) {
         p.alphaMask   = true;
         p.transmission = explicitTransmission;   // texture-driven opacity ≠ glass
+        spdlog::info("USDLoader: material '{}' alphaMask=true opacity path='{}'",
+                     mat.GetPath().GetString(), p.opacity.path);
     } else {
         p.transmission = std::max(explicitTransmission, 1.f - opacityVal);
     }
