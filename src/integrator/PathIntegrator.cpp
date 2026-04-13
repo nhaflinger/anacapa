@@ -92,6 +92,14 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
         Vec3f wo = -r.direction;
         ShadingContext ctx(si, r.direction);
 
+        // Alpha test — if the surface is alpha-masked and this point is in the
+        // cutout region, continue the ray past the surface without shading it.
+        if (mat->evalOpacity(ctx) < 0.5f) {
+            r = spawnRay(si.p, si.ng, r.direction);
+            r.time = ray.time;
+            continue;
+        }
+
         // Capture first-hit AOVs for denoising
         if (firstHit) {
             outAlbedo = mat->reflectance(ctx);

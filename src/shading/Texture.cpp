@@ -85,16 +85,32 @@ float TextureSampler::sampleFloat(const std::string& path, Vec2f uv,
     if (pipe != std::string::npos) {
         std::string ch = path.substr(pipe + 1);
         cleanPath = path.substr(0, pipe);
-        if (ch == "g") channel = 1;
+        if      (ch == "g") channel = 1;
         else if (ch == "b") channel = 2;
         else if (ch == "a") channel = 3;
     }
+
+    // For the alpha channel we must request 4 channels from OIIO; otherwise
+    // the texture system only fills 3 (RGB) and alpha is never fetched.
+    if (channel == 3) {
+        OIIO::TextureOpt opt;
+        opt.swrap = OIIO::TextureOpt::WrapPeriodic;
+        opt.twrap = OIIO::TextureOpt::WrapPeriodic;
+        float result[4] = {defaultVal, defaultVal, defaultVal, defaultVal};
+        bool ok = m_impl->tsys->texture(
+            OIIO::ustring(cleanPath),
+            opt,
+            uv.x, 1.f - uv.y,
+            0.f, 0.f, 0.f, 0.f,
+            4, result
+        );
+        return ok ? result[3] : defaultVal;
+    }
+
     Spectrum s = sample(cleanPath, uv, {defaultVal, defaultVal, defaultVal});
     if (channel == 0) return s.x;
     if (channel == 1) return s.y;
-    if (channel == 2) return s.z;
-    // channel 3 (alpha) — OIIO only returns 3 channels above; fall back to R
-    return s.x;
+    return s.z;
 }
 
 // ---------------------------------------------------------------------------

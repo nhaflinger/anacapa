@@ -95,6 +95,14 @@ public:
         return {};   // opaque by default
     }
 
+    // Opacity at the given surface point in [0, 1].
+    // 1 = fully opaque (default), 0 = fully transparent (cutout).
+    // Used by the path integrators to continue rays through alpha-masked
+    // surfaces without shading them (alpha testing).
+    virtual float evalOpacity(const ShadingContext& ctx) const {
+        return 1.f;
+    }
+
     virtual uint32_t flags() const = 0;
 
     // Perceptual roughness in [0, 1].  0 = perfectly smooth, 1 = fully diffuse.
