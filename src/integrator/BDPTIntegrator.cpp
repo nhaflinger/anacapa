@@ -124,8 +124,8 @@ uint32_t BDPTIntegrator::traceCameraSubpath(const SceneView& scene,
         Vec3f wo = -ray.direction;
         ShadingContext ctx(si, ray.direction);
 
-        // Alpha test — skip cutout regions, continue ray through the surface
-        if (mat->evalOpacity(ctx) < 0.5f) {
+        // Stochastic opacity — compare against a random sample for soft edges
+        if (sampler.get1D() >= mat->evalOpacity(ctx)) {
             ray = spawnRay(si.p, si.ng, ray.direction);
             ray.time = path.sceneTime;
             --depth;   // don't count this as a bounce

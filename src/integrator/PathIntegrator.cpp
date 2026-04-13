@@ -94,7 +94,10 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
 
         // Alpha test — if the surface is alpha-masked and this point is in the
         // cutout region, continue the ray past the surface without shading it.
-        if (mat->evalOpacity(ctx) < 0.5f) {
+        // Stochastic opacity: compare opacity against a random sample so
+        // semi-transparent alpha-masked surfaces (fire, foliage) get a
+        // properly anti-aliased soft edge rather than a hard cutout at 0.5.
+        if (sampler.get1D() >= mat->evalOpacity(ctx)) {
             r = spawnRay(si.p, si.ng, r.direction);
             r.time = ray.time;
             continue;
