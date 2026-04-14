@@ -189,6 +189,21 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 
 `--shutter-open`/`--shutter-close` override the motion blur shutter. When omitted, the shutter is derived from the stage's `startTimeCode`, `endTimeCode`, and `timeCodesPerSecond` automatically. Set both to 0 to disable motion blur on an animated scene.
 
+## Choosing an Integrator
+
+| Lighting scenario | Best integrator | Notes |
+|---|---|---|
+| Diffuse indirect lighting (rooms, interiors) | `bdpt` | Light and camera subpaths connect efficiently; much lower variance than path |
+| Small / distant light sources | `bdpt` | Difficult for path tracer's random scatter to hit; BDPT connects directly |
+| Glass and specular caustics | `bdpt` | BDPT can connect a light subpath through glass to the camera; path tracer cannot |
+| Emissive surfaces (large area lights) | `path` | Large lights are easy for NEE to hit; BDPT connection overhead not worth it |
+| Outdoor / HDRI dome lighting | `path` | Sky covers a wide solid angle; random scatter hits it reliably |
+| Heavily occluded scenes (corners, crevices) | `bdpt` + `--adaptive` | BDPT handles indirect light better; adaptive concentrates samples where variance is highest |
+| Fast preview / interactive | `path` + `--interactive` | Metal GPU backend only supports path tracing |
+| Unknown / general | `bdpt` | Default; handles more scenarios well at the cost of slightly higher per-sample overhead |
+
+Both integrators support `--adaptive` sampling. As a rule of thumb: if your scene has difficult light transport (small lights, glass, deep indirection), prefer `bdpt`. If your scene is large and open with broad lighting, `path` is faster per sample and converges equally well.
+
 ## Motion Blur
 
 Transformation motion blur is driven by time-sampled `xformOp` attributes on USD prims. A minimal animated scene:
