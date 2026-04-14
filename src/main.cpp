@@ -31,6 +31,12 @@ int main(int argc, char** argv) {
                    "BDPT: max luminance per strategy contribution (0=off, default=10)")
        ->default_val(10.f);
 
+    app.add_flag("--adaptive", settings.adaptive,
+                 "Enable adaptive per-tile sample allocation: base pass + high-variance refinement");
+    app.add_option("--adaptive-base-spp", settings.adaptiveBaseSpp,
+                   "Adaptive: base-pass SPP (0=auto: spp/4, min 16)")
+       ->default_val(0);
+
     app.add_option("--scene", settings.scenePath,
                    "USD/USDA/USDC scene file to load (requires ANACAPA_ENABLE_USD)");
     app.add_option("--camera", settings.cameraPath,

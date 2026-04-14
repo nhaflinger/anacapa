@@ -27,9 +27,12 @@ struct PixelAccumulator {
     std::atomic<float> b{0.f};
     std::atomic<float> weight{0.f};
 
-    // Welford online variance — updated per-sample for adaptive sampling
-    std::atomic<float> m2{0.f};    // Sum of squared deviations (luminance)
-    std::atomic<uint32_t> count{0};
+    // Per-pixel variance tracking for adaptive sampling.
+    // sumLumSq accumulates sum(luminance(sample)^2) across all merged tiles.
+    // Combined with weight (= total sample count) and resolved luminance,
+    // varianceAt() computes: E[L^2] - E[L]^2.
+    std::atomic<float> sumLumSq{0.f};
+    std::atomic<uint32_t> count{0};  // reserved / unused
 
     void add(float fr, float fg, float fb, float w = 1.f) {
         r.fetch_add(fr * w, std::memory_order_relaxed);
@@ -79,10 +82,11 @@ struct TileBuffer {
     std::vector<Sample>    pixels;       // [y * width + x]
     std::vector<AOVSample> albedo;       // first-hit diffuse reflectance
     std::vector<AOVSample> normals;      // first-hit world-space normal
+    std::vector<float>     sumLumSq;     // sum(luminance(sample)^2) per pixel
 
     TileBuffer(uint32_t x0, uint32_t y0, uint32_t w, uint32_t h)
         : x0(x0), y0(y0), width(w), height(h)
-        , pixels(w * h), albedo(w * h), normals(w * h)
+        , pixels(w * h), albedo(w * h), normals(w * h), sumLumSq(w * h, 0.f)
     {}
 
     void add(uint32_t localX, uint32_t localY,
@@ -109,10 +113,15 @@ struct TileBuffer {
         a.r += n.x; a.g += n.y; a.b += n.z; ++a.count;
     }
 
+    void addLumSq(uint32_t localX, uint32_t localY, float v) {
+        sumLumSq[localY * width + localX] += v;
+    }
+
     void clear() {
-        for (auto& p : pixels)  p = {};
-        for (auto& a : albedo)  a = {};
-        for (auto& n : normals) n = {};
+        for (auto& p : pixels)   p = {};
+        for (auto& a : albedo)   a = {};
+        for (auto& n : normals)  n = {};
+        for (auto& v : sumLumSq) v = 0.f;
     }
 };
 
@@ -164,6 +173,11 @@ public:
 
     // Raw resolved pixel access (for preview / post-processing)
     Spectrum getPixel(uint32_t x, uint32_t y) const;
+
+    // Per-pixel luminance variance: E[L^2] - E[L]^2.
+    // Valid after at least one tile merge with adaptive-weight adds.
+    // Returns 0 if the pixel has no samples yet.
+    float varianceAt(uint32_t x, uint32_t y) const;
 
 private:
     uint32_t m_width, m_height;

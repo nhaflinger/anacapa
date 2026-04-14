@@ -43,10 +43,17 @@ void Film::mergeTile(const TileBuffer& tile) {
             uint32_t fi = fy * m_width + fx;
             uint32_t ti = ty * tile.width + tx;
 
-            // Beauty
+            // Beauty — tile stores pre-weighted values (color * weight), so add
+            // directly to film atomics rather than re-multiplying via add().
             const auto& s = tile.pixels[ti];
-            if (s.weight > 0.f)
-                m_pixels[fi].add(s.r, s.g, s.b, s.weight);
+            if (s.weight > 0.f) {
+                m_pixels[fi].r.fetch_add(s.r, std::memory_order_relaxed);
+                m_pixels[fi].g.fetch_add(s.g, std::memory_order_relaxed);
+                m_pixels[fi].b.fetch_add(s.b, std::memory_order_relaxed);
+                m_pixels[fi].weight.fetch_add(s.weight, std::memory_order_relaxed);
+                m_pixels[fi].sumLumSq.fetch_add(tile.sumLumSq[ti],
+                                                 std::memory_order_relaxed);
+            }
 
             // Albedo AOV
             const auto& a = tile.albedo[ti];
@@ -68,6 +75,18 @@ void Film::mergeTile(const TileBuffer& tile) {
 Spectrum Film::getPixel(uint32_t x, uint32_t y) const {
     assert(inBounds(static_cast<int>(x), static_cast<int>(y)));
     return m_pixels[y * m_width + x].resolve();
+}
+
+float Film::varianceAt(uint32_t x, uint32_t y) const {
+    const auto& p = m_pixels[y * m_width + x];
+    float w = p.weight.load(std::memory_order_relaxed);
+    if (w <= 0.f) return 0.f;
+    float invW   = 1.f / w;
+    float meanL  = (p.r.load(std::memory_order_relaxed) * 0.2126f
+                  + p.g.load(std::memory_order_relaxed) * 0.7152f
+                  + p.b.load(std::memory_order_relaxed) * 0.0722f) * invW;
+    float eLsq   = p.sumLumSq.load(std::memory_order_relaxed) * invW;
+    return std::max(0.f, eLsq - meanL * meanL);
 }
 
 // ---------------------------------------------------------------------------

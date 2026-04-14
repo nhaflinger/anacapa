@@ -114,6 +114,16 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 ./build/Darwin/anacapa --scene scenes/cornell_box.usda \
   -o images/render.exr --override-materials
 
+# Adaptive sampling: 256 spp total, base pass at 64 spp, remaining 192 concentrated on high-variance tiles
+./build/Darwin/anacapa --scene scenes/cornell_box.usda \
+  -o images/render.exr --png images/render.png \
+  --spp 256 --adaptive --adaptive-base-spp 64
+
+# Adaptive + firefly clamping (recommended for BDPT with complex lighting)
+./build/Darwin/anacapa --scene scenes/cornell_box.usda \
+  -o images/render.exr --png images/render.png \
+  --integrator bdpt --spp 512 --adaptive --firefly-clamp 10
+
 # Full options
 ./build/Darwin/anacapa \
   --scene            scenes/cornell_box.usda \
@@ -134,7 +144,10 @@ DYLD_LIBRARY_PATH=~/usd/lib \
   --write-aovs                               \
   --override-lights                          \
   --override-materials                       \
-  --interactive
+  --interactive                              \
+  --firefly-clamp    10                      \
+  --adaptive                                 \
+  --adaptive-base-spp 0
 
 ./build/Darwin/anacapa --help
 ```
@@ -147,10 +160,13 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 | `-W, --width` | `800` | Image width in pixels |
 | `-H, --height` | `800` | Image height in pixels |
 | `-s, --spp` | `64` | Samples per pixel |
-| `-d, --depth` | `8` | Maximum path depth |
+| `-d, --depth` | `8` | Maximum number of light bounces (path depth). Lower values are faster but will miss indirect lighting and caustics through glass |
 | `-t, --threads` | `0` (auto) | Thread count; 0 = hardware concurrency |
 | `--tile-size` | `64` | Tile size in pixels |
 | `--integrator` | `bdpt` | `bdpt` or `path` |
+| `--firefly-clamp` | `10` | BDPT: max luminance per strategy contribution; suppresses bright outliers. `0` = off |
+| `--adaptive` | off | Enable adaptive sampling: base pass + extra samples concentrated on high-variance tiles |
+| `--adaptive-base-spp` | `0` | Adaptive base-pass SPP (`0` = auto: `spp/4`, minimum 16) |
 | `--scene` | — | USD/USDA/USDC scene file |
 | `--camera` | — | USD prim path of camera (e.g. `/World/RenderCam`) |
 | `--env` | — | Equirectangular HDRI environment map (EXR or HDR) |
