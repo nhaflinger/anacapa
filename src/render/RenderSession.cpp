@@ -382,7 +382,8 @@ void RenderSession::render() {
 
     if (!m_integrator) {
         if (m_settings.integrator == IntegratorType::BDPT)
-            m_integrator = std::make_unique<BDPTIntegrator>(m_settings.maxDepth);
+            m_integrator = std::make_unique<BDPTIntegrator>(m_settings.maxDepth,
+                                                               m_settings.fireflyClamp);
         else
             m_integrator = std::make_unique<PathIntegrator>(m_settings.maxDepth);
     }

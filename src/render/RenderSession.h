@@ -42,6 +42,7 @@ struct RenderSettings {
     float          shutterOpen   = 0.f;
     float          shutterClose  = 0.f;
     IntegratorType integrator      = IntegratorType::BDPT;
+    float          fireflyClamp   = 10.f;  // BDPT: max luminance per (s,t) contribution; 0=off
     bool           interactive     = false; // Use GPU (Metal) backend when available
     bool           overrideLights    = false; // Replace scene lights with a simple white directional
     bool           overrideMaterials = false; // Replace all scene materials with white Lambertian

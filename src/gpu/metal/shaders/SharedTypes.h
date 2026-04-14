@@ -61,6 +61,7 @@ enum GpuMaterialType : uint32_t {
     kMatLambertian  = 0,
     kMatGGX         = 1,
     kMatEmissive    = 2,
+    kMatGlass       = 3,   // smooth dielectric — delta Fresnel + Snell refraction
 };
 
 struct GpuMaterial {
@@ -69,8 +70,9 @@ struct GpuMaterial {
     GpuFloat3       emissive;
     float           metalness;
     uint32_t        type;         // GpuMaterialType
-    float           specularIOR;
-    float           _pad0, _pad1;
+    float           specularIOR;  // IOR for glass; unused for other types
+    float           transmission; // 0 = opaque, 1 = fully transmissive
+    float           _pad0;
 };
 
 // ---------------------------------------------------------------------------

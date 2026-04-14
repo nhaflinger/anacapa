@@ -29,8 +29,11 @@ namespace anacapa {
 // ---------------------------------------------------------------------------
 class BDPTIntegrator : public IIntegrator {
 public:
-    explicit BDPTIntegrator(uint32_t maxDepth = 8)
-        : m_maxDepth(maxDepth) {}
+    // fireflyClamp: maximum luminance of any single (s,t) contribution before
+    // MIS weighting.  Values above this are scaled down to clamp luminance.
+    // 0 = disabled.  Typical production values: 5–20.
+    explicit BDPTIntegrator(uint32_t maxDepth = 8, float fireflyClamp = 10.f)
+        : m_maxDepth(maxDepth), m_fireflyClamp(fireflyClamp) {}
 
     void prepare(const SceneView& scene) override;
 
@@ -79,6 +82,7 @@ private:
     static float geometryTerm(Vec3f posA, Vec3f nA, Vec3f posB, Vec3f nB);
 
     uint32_t    m_maxDepth = 8;
+    float       m_fireflyClamp = 10.f;
     LightSampler m_lightSampler;
 
     // Camera stored at prepare() time — needed for (s,1) pixel projection

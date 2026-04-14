@@ -10,12 +10,14 @@
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usdGeom/mesh.h>
+#include <pxr/usd/usdGeom/subset.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/xformCache.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdLux/rectLight.h>
 #include <pxr/usd/usdLux/sphereLight.h>
+#include <pxr/usd/usdLux/diskLight.h>
 #include <pxr/usd/usdLux/distantLight.h>
 #include <pxr/usd/usdLux/domeLight.h>
 #include <pxr/usd/usdShade/material.h>
@@ -292,6 +294,30 @@ static FloatTOV resolveFloatTOV(const UsdShadeInput& input, float defaultVal,
     return FloatTOV(val);
 }
 
+// makeGlassMaterial — create a standard glass material with the given IOR.
+// Used as a fallback when a USD material has no surface shader but its name
+// indicates it is glass (e.g. Blender's Glass BSDF doesn't export to USD).
+static std::unique_ptr<IMaterial> makeGlassMaterial(float ior = 1.5f) {
+    StandardSurfaceMaterial::Params p;
+    p.base_color    = SpectrumTOV(Spectrum{1.f, 1.f, 1.f});
+    p.roughness     = FloatTOV(0.f);
+    p.metalness     = FloatTOV(0.f);
+    p.transmission  = 1.f;
+    p.specular_IOR  = ior;
+    p.specular      = FloatTOV(1.f);
+    p.emission      = 0.f;
+    return std::make_unique<StandardSurfaceMaterial>(p);
+}
+
+// isGlassName — heuristic: does this material/prim name suggest a glass material?
+static bool isGlassName(const std::string& name) {
+    std::string lower = name;
+    for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return lower.find("glass") != std::string::npos
+        || lower.find("window") != std::string::npos
+        || lower.find("glazing") != std::string::npos;
+}
+
 // resolveMaterial — walk a UsdShadeMaterial's surface output to find
 // a UsdPreviewSurface shader and extract all material parameters including
 // file textures, UV transforms, normal maps, opacity, and clearcoat.
@@ -299,8 +325,25 @@ static FloatTOV resolveFloatTOV(const UsdShadeInput& input, float defaultVal,
 static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                                                     const std::string& stageDir) {
     UsdShadeShader surface = mat.ComputeSurfaceSource();
-    if (!surface)
+    if (!surface) {
+        // No surface shader exported — check if the material name implies glass.
+        // Blender's Glass BSDF nodes are not translated by the USD exporter and
+        // result in an empty material shell. Detect by name and substitute glass.
+        std::string matName = mat.GetPrim().GetName().GetString();
+        // Also check blender:data_name attribute which carries the original name
+        std::string blenderName;
+        UsdAttribute nameAttr = mat.GetPrim().GetAttribute(
+            TfToken("userProperties:blender:data_name"));
+        if (nameAttr) nameAttr.Get(&blenderName);
+
+        if (isGlassName(matName) || isGlassName(blenderName)) {
+            spdlog::info("USDLoader: material '{}' has no surface shader — "
+                         "name suggests glass, substituting glass material",
+                         mat.GetPath().GetString());
+            return makeGlassMaterial(1.5f);
+        }
         return std::make_unique<LambertianMaterial>(Spectrum{0.5f, 0.5f, 0.5f});
+    }
 
     TfToken shaderId;
     surface.GetShaderId(&shaderId);
@@ -338,8 +381,6 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
     if (!p.opacity.path.empty()) {
         p.alphaMask   = true;
         p.transmission = explicitTransmission;   // texture-driven opacity ≠ glass
-        spdlog::info("USDLoader: material '{}' alphaMask=true opacity path='{}'",
-                     mat.GetPath().GetString(), p.opacity.path);
     } else {
         p.transmission = std::max(explicitTransmission, 1.f - opacityVal);
     }
@@ -507,7 +548,9 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
                          const GfMatrix4d& xform0,
                          std::vector<MotionKey> motionKeys,
                          GeometryPool& pool,
-                         bool zUp = false) {
+                         bool zUp = false,
+                         std::vector<uint32_t>* outFaceTriStart = nullptr,
+                         std::vector<uint32_t>* outFaceTriCount = nullptr) {
     const bool hasMotion = !motionKeys.empty();
     VtArray<GfVec3f> points;
     usdMesh.GetPointsAttr().Get(&points);
@@ -545,9 +588,16 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
     MeshDesc desc;
     desc.name = usdMesh.GetPrim().GetName().GetString();
 
+    // Track which triangles each original face maps to (for GeomSubset splitting)
+    std::vector<uint32_t> faceTriStart;
+    std::vector<uint32_t> faceTriCount;
+    if (outFaceTriStart) faceTriStart.reserve(fvcCounts.size());
+    if (outFaceTriCount) faceTriCount.reserve(fvcCounts.size());
+
     int faceStart = 0;
     for (int fi = 0; fi < (int)fvcCounts.size(); ++fi) {
         int nv = fvcCounts[fi];
+        uint32_t trisBefore = static_cast<uint32_t>(desc.indices.size() / 3);
         // Fan from vertex 0
         for (int tri = 0; tri < nv - 2; ++tri) {
             int i0 = fvcIndices[faceStart];
@@ -616,6 +666,9 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
             desc.indices.push_back(base + 1);
             desc.indices.push_back(base + 2);
         }
+        uint32_t trisAfter = static_cast<uint32_t>(desc.indices.size() / 3);
+        if (outFaceTriStart) faceTriStart.push_back(trisBefore);
+        if (outFaceTriCount) faceTriCount.push_back(trisAfter - trisBefore);
         faceStart += nv;
     }
 
@@ -626,7 +679,61 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
     }
     // Static meshes: positions already in world space; motionKeys stays empty.
 
+    if (outFaceTriStart) *outFaceTriStart = std::move(faceTriStart);
+    if (outFaceTriCount) *outFaceTriCount = std::move(faceTriCount);
+
     return pool.addMesh(std::move(desc));
+}
+
+// ---------------------------------------------------------------------------
+// extractSubsetMesh — build a MeshDesc containing only the triangles whose
+// original face index appears in faceIndices.
+//
+// The full triangulated MeshDesc (already expanded to flat vertex arrays) is
+// passed in.  We need the original face→triangle mapping, so we also pass the
+// per-face triangle counts built during loadMesh triangulation.
+// ---------------------------------------------------------------------------
+static uint32_t extractSubsetMesh(
+    const MeshDesc&                 fullMesh,
+    const std::vector<uint32_t>&    faceTriStart,  // first triangle index for each orig face
+    const std::vector<uint32_t>&    faceTriCount,  // triangle count for each orig face
+    const VtArray<int>&             faceIndices,   // face indices belonging to this subset
+    GeometryPool&                   pool)
+{
+    MeshDesc sub;
+    sub.name       = fullMesh.name;
+    sub.motionKeys = fullMesh.motionKeys;
+
+    for (int fi : faceIndices) {
+        if (fi < 0 || fi >= (int)faceTriStart.size()) continue;
+        uint32_t triStart = faceTriStart[fi];
+        uint32_t triCount = faceTriCount[fi];
+        for (uint32_t ti = 0; ti < triCount; ++ti) {
+            uint32_t srcBase = (triStart + ti) * 3;  // index into full flat arrays
+            if (srcBase + 2 >= fullMesh.positions.size()) continue;
+
+            uint32_t dstBase = static_cast<uint32_t>(sub.positions.size());
+            sub.positions.push_back(fullMesh.positions[srcBase]);
+            sub.positions.push_back(fullMesh.positions[srcBase + 1]);
+            sub.positions.push_back(fullMesh.positions[srcBase + 2]);
+            if (!fullMesh.normals.empty()) {
+                sub.normals.push_back(fullMesh.normals[srcBase]);
+                sub.normals.push_back(fullMesh.normals[srcBase + 1]);
+                sub.normals.push_back(fullMesh.normals[srcBase + 2]);
+            }
+            if (!fullMesh.uvs.empty()) {
+                sub.uvs.push_back(fullMesh.uvs[srcBase]);
+                sub.uvs.push_back(fullMesh.uvs[srcBase + 1]);
+                sub.uvs.push_back(fullMesh.uvs[srcBase + 2]);
+            }
+            sub.indices.push_back(dstBase);
+            sub.indices.push_back(dstBase + 1);
+            sub.indices.push_back(dstBase + 2);
+        }
+    }
+
+    if (sub.positions.empty()) return ~0u;
+    return pool.addMesh(std::move(sub));
 }
 
 // ---------------------------------------------------------------------------
@@ -791,30 +898,75 @@ LoadedScene loadUSD(const std::string& path,
                              prim.GetPath().GetString(), motionKeys.size());
             }
 
-            uint32_t meshID = loadMesh(usdMesh, xform0, std::move(motionKeys), result.geomPool, zUp);
+            std::vector<uint32_t> faceTriStart, faceTriCount;
+            uint32_t meshID = loadMesh(usdMesh, xform0, std::move(motionKeys),
+                                       result.geomPool, zUp,
+                                       &faceTriStart, &faceTriCount);
             if (meshID == ~0u) {
                 spdlog::warn("USDLoader: skipped mesh '{}' (no geometry)",
                              prim.GetPath().GetString());
                 continue;
             }
 
-            // Resolve material binding
+            // Helper: resolve a UsdShadeMaterial to a material index
+            auto resolveMaterialIdx = [&](const UsdShadeMaterial& mat) -> uint32_t {
+                if (!mat) return kDefaultMatIdx;
+                std::string matPath = mat.GetPath().GetString();
+                auto it = matPathToIdx.find(matPath);
+                if (it != matPathToIdx.end()) return it->second;
+                uint32_t idx = static_cast<uint32_t>(result.materials.size());
+                result.materials.push_back(resolveMaterial(mat, stageDir));
+                matPathToIdx[matPath] = idx;
+                return idx;
+            };
+
+            // --- GeomSubset per-face material assignment ---
+            // When a mesh has GeomSubset children with face-set type, each subset
+            // carries its own material binding. We split those faces into separate
+            // meshes so each can have the correct material (e.g. glass panes within
+            // a larger window frame mesh).
+            std::vector<int> faceCoveredBySubset(faceTriStart.size(), 0);
+            for (const UsdGeomSubset& subset :
+                     UsdGeomSubset::GetGeomSubsets(usdMesh,
+                         UsdGeomTokens->face, TfToken()))
+            {
+                VtArray<int> subFaceIndices;
+                subset.GetIndicesAttr().Get(&subFaceIndices);
+                if (subFaceIndices.empty()) continue;
+
+                UsdShadeMaterialBindingAPI subBindAPI(subset.GetPrim());
+                UsdShadeMaterial subMat = subBindAPI.ComputeBoundMaterial();
+                if (!subMat) continue;
+
+                uint32_t subMatIdx = resolveMaterialIdx(subMat);
+
+                // Extract the subset triangles into a new mesh
+                const MeshDesc& fullMesh = result.geomPool.mesh(meshID);
+                uint32_t subMeshID = extractSubsetMesh(fullMesh, faceTriStart, faceTriCount,
+                                                        subFaceIndices, result.geomPool);
+                if (subMeshID == ~0u) continue;
+
+                if (subMeshID >= result.sceneView.materials.size())
+                    result.sceneView.materials.resize(subMeshID + 1, nullptr);
+                result.sceneView.materials[subMeshID] = result.materials[subMatIdx].get();
+
+                for (int fi : subFaceIndices)
+                    if (fi >= 0 && fi < (int)faceCoveredBySubset.size())
+                        faceCoveredBySubset[fi] = 1;
+
+                spdlog::info("USDLoader: GeomSubset '{}' → meshID={} matIdx={} ({} faces)",
+                             subset.GetPrim().GetPath().GetString(),
+                             subMeshID, subMatIdx, subFaceIndices.size());
+            }
+
+            // Resolve material binding for the whole mesh (faces not in any subset)
             uint32_t matIdx = kDefaultMatIdx;
             UsdShadeMaterialBindingAPI bindAPI(prim);
             UsdShadeMaterial boundMat = bindAPI.ComputeBoundMaterial();
             if (boundMat) {
-                std::string matPath = boundMat.GetPath().GetString();
-                auto it = matPathToIdx.find(matPath);
-                if (it != matPathToIdx.end()) {
-                    matIdx = it->second;
-                } else {
-                    matIdx = static_cast<uint32_t>(result.materials.size());
-                    result.materials.push_back(resolveMaterial(boundMat, stageDir));
-                    matPathToIdx[matPath] = matIdx;
-                }
+                matIdx = resolveMaterialIdx(boundMat);
             } else {
                 // No material binding — fall back to primvars:displayColor.
-                // This is the common Blender USD export pattern.
                 UsdGeomPrimvarsAPI pvAPI2(prim);
                 UsdGeomPrimvar dcPrimvar = pvAPI2.GetPrimvar(TfToken("displayColor"));
                 if (dcPrimvar) {
@@ -822,7 +974,6 @@ LoadedScene loadUSD(const std::string& path,
                     dcPrimvar.Get(&colors);
                     if (!colors.empty()) {
                         GfVec3f c = colors[0];
-                        // Quantize to 8-bit per channel for cache key
                         uint32_t key = (static_cast<uint32_t>(c[0] * 255.f + 0.5f) << 16)
                                      | (static_cast<uint32_t>(c[1] * 255.f + 0.5f) << 8)
                                      |  static_cast<uint32_t>(c[2] * 255.f + 0.5f);
@@ -840,10 +991,57 @@ LoadedScene loadUSD(const std::string& path,
                 }
             }
 
-            // Grow scene.materials to cover this meshID
+            // Assign the mesh-level material to the full mesh
             if (meshID >= result.sceneView.materials.size())
                 result.sceneView.materials.resize(meshID + 1, nullptr);
             result.sceneView.materials[meshID] = result.materials[matIdx].get();
+
+            // If any subsets were extracted, rebuild the original mesh with only
+            // the faces NOT covered by any subset.  Without this the original mesh
+            // still contains the subset triangles (e.g. glass panes) assigned to
+            // the mesh-level material (e.g. opaque frame), which would block light.
+            {
+                bool anySubsets = false;
+                for (int v : faceCoveredBySubset) if (v) { anySubsets = true; break; }
+                if (anySubsets) {
+                    const MeshDesc& fullMesh = result.geomPool.mesh(meshID);
+                    MeshDesc residual;
+                    residual.name       = fullMesh.name;
+                    residual.motionKeys = fullMesh.motionKeys;
+
+                    for (int fi = 0; fi < (int)faceCoveredBySubset.size(); ++fi) {
+                        if (faceCoveredBySubset[fi]) continue;  // skip — already in a subset mesh
+                        uint32_t triStart = faceTriStart[fi];
+                        uint32_t triCount = faceTriCount[fi];
+                        for (uint32_t ti = 0; ti < triCount; ++ti) {
+                            uint32_t srcBase = (triStart + ti) * 3;
+                            if (srcBase + 2 >= fullMesh.positions.size()) continue;
+                            uint32_t dstBase = static_cast<uint32_t>(residual.positions.size());
+                            residual.positions.push_back(fullMesh.positions[srcBase]);
+                            residual.positions.push_back(fullMesh.positions[srcBase + 1]);
+                            residual.positions.push_back(fullMesh.positions[srcBase + 2]);
+                            if (!fullMesh.normals.empty()) {
+                                residual.normals.push_back(fullMesh.normals[srcBase]);
+                                residual.normals.push_back(fullMesh.normals[srcBase + 1]);
+                                residual.normals.push_back(fullMesh.normals[srcBase + 2]);
+                            }
+                            if (!fullMesh.uvs.empty()) {
+                                residual.uvs.push_back(fullMesh.uvs[srcBase]);
+                                residual.uvs.push_back(fullMesh.uvs[srcBase + 1]);
+                                residual.uvs.push_back(fullMesh.uvs[srcBase + 2]);
+                            }
+                            residual.indices.push_back(dstBase);
+                            residual.indices.push_back(dstBase + 1);
+                            residual.indices.push_back(dstBase + 2);
+                        }
+                    }
+
+                    spdlog::info("USDLoader: mesh '{}' subset residual: {} → {} tris",
+                                 fullMesh.name, fullMesh.numTriangles(),
+                                 residual.numTriangles());
+                    result.geomPool.replaceMesh(meshID, std::move(residual));
+                }
+            }
 
             spdlog::debug("USDLoader: mesh '{}' → meshID={} matIdx={}",
                           prim.GetPath().GetString(), meshID, matIdx);
@@ -921,6 +1119,48 @@ LoadedScene loadUSD(const std::string& path,
             auto light = std::make_unique<AreaLight>(center, uHalf, vHalf, Le);
             result.sceneView.lights.push_back(light.get());
             result.lights.push_back(std::move(light));
+        }
+
+        // ---- DiskLight — approximate as a square area light with matching area ----
+        else if (prim.IsA<UsdLuxDiskLight>()) {
+            UsdLuxDiskLight disk(prim);
+            UsdLuxLightAPI lightAPI(prim);
+            GfMatrix4d xform = xformCache.GetLocalToWorldTransform(prim);
+
+            float radius = 0.5f;
+            disk.GetRadiusAttr().Get(&radius);
+
+            float intensity = resolveIntensity(lightAPI);
+            GfVec3f color{1.f, 1.f, 1.f};
+            lightAPI.GetColorAttr().Get(&color);
+
+            bool normalize = false;
+            lightAPI.GetNormalizeAttr().Get(&normalize);
+
+            // Disk center and orientation in world space.
+            // USD DiskLight lies in the XY plane, emitting along -Z local.
+            Vec3f center = transformPoint(xform, GfVec3d(0, 0, 0), zUp);
+            // Two orthogonal radii vectors on the disk plane (X and Y local axes).
+            Vec3f xEdge = transformPoint(xform, GfVec3d(radius, 0, 0), zUp) - center;
+            Vec3f yEdge = transformPoint(xform, GfVec3d(0, radius, 0), zUp) - center;
+
+            float leScale = normalize ? (1.f / 3.14159265f) : 1.f;
+            Spectrum Le = {color[0] * intensity * leScale,
+                           color[1] * intensity * leScale,
+                           color[2] * intensity * leScale};
+
+            // Approximate disk as an axis-aligned square with matching area (pi*r²).
+            // Side length s so s²=pi*r² → s = r*sqrt(pi). Use half-extents = r*sqrt(pi)/2.
+            float halfSide = radius * 0.8862f;  // sqrt(pi)/2 ≈ 0.8862
+            Vec3f uDir = xEdge.lengthSq() > 1e-12f ? xEdge * (halfSide / xEdge.length()) : Vec3f{halfSide, 0, 0};
+            Vec3f vDir = yEdge.lengthSq() > 1e-12f ? yEdge * (halfSide / yEdge.length()) : Vec3f{0, 0, halfSide};
+
+            auto light = std::make_unique<AreaLight>(center, uDir, vDir, Le);
+            result.sceneView.lights.push_back(light.get());
+            result.lights.push_back(std::move(light));
+
+            spdlog::info("USDLoader: diskLight '{}' r={:.3f} Le=({:.3f},{:.3f},{:.3f})",
+                          prim.GetPath().GetString(), radius, Le.x, Le.y, Le.z);
         }
 
         // ---- DistantLight (sun/directional) ----

@@ -93,6 +93,13 @@ public:
     const MeshDesc& mesh(uint32_t id) const { return m_meshes[id]; }
     size_t          numMeshes()        const { return m_meshes.size(); }
 
+    // Replace the geometry of an existing mesh in-place.
+    // Used by the USD loader to remove GeomSubset faces from the parent mesh
+    // after extracting them into separate per-material submeshes.
+    void replaceMesh(uint32_t id, MeshDesc replacement) {
+        m_meshes[id] = std::move(replacement);
+    }
+
     const std::vector<MeshDesc>& meshes() const { return m_meshes; }
 
 private:

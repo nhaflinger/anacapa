@@ -325,7 +325,8 @@ int main(int argc, char** argv)
     };
     SlotState slots[kNumSlots];
 
-    int activeSlot = 0;  // which slot is displayed and receives new renders
+    int activeSlot = 0;  // which slot is displayed
+    int recordSlot = 0;  // which slot receives new file updates (render target)
 
     // Load existing file into slot 0 on startup if it's already there
     {
@@ -359,9 +360,14 @@ int main(int argc, char** argv)
                     s.exposure = 0.f; s.saturation = 1.f;
                     s.contrast = 0.f; s.temperature = 0.f;
                 }
-                // Number keys 1-8 switch slots
-                if (event.key.keysym.sym >= SDLK_1 && event.key.keysym.sym <= SDLK_8)
-                    activeSlot = event.key.keysym.sym - SDLK_1;
+                // Number keys 1-8 switch view slot; Shift+number sets record slot
+                if (event.key.keysym.sym >= SDLK_1 && event.key.keysym.sym <= SDLK_8) {
+                    int idx = event.key.keysym.sym - SDLK_1;
+                    if (event.key.keysym.mod & KMOD_SHIFT)
+                        recordSlot = idx;
+                    else
+                        activeSlot = idx;
+                }
             }
         }
 
@@ -375,7 +381,7 @@ int main(int argc, char** argv)
             uint64_t mod = fileModTime(imagePath);
             if (mod != 0 && mod != watchedMod) {
                 watchedMod = mod;
-                SlotState& s = slots[activeSlot];
+                SlotState& s = slots[recordSlot];
                 if (s.srcTex) glDeleteTextures(1, &s.srcTex);
                 g_srcTexture = 0; g_texWidth = 0; g_texHeight = 0;
                 uploadTexture(imagePath.c_str());
@@ -409,14 +415,18 @@ int main(int argc, char** argv)
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
             ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-        // Slot selector
+        // Slot selector — left button switches view, right "●" button sets record target
         ImGui::SeparatorText("Slots");
         for (int i = 0; i < kNumSlots; ++i) {
             bool exists = slots[i].srcTex != 0;
+            bool isView = (i == activeSlot);
+            bool isRec  = (i == recordSlot);
+
             char label[32];
             std::snprintf(label, sizeof(label), "Slot %d", i + 1);
 
-            if (i == activeSlot) {
+            // View button
+            if (isView) {
                 ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.2f,0.5f,0.9f,1));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f,0.6f,1.0f,1));
                 ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1,1,1,1));
@@ -429,10 +439,30 @@ int main(int argc, char** argv)
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.4f,0.4f,0.45f,1));
                 ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.9f,0.9f,0.9f,1));
             }
-            if (ImGui::Button(label, {-1, 0}))
+            float btnW = kPanelW - 16.f - 28.f;  // leave room for rec button
+            if (ImGui::Button(label, {btnW, 0}))
                 activeSlot = i;
             ImGui::PopStyleColor(3);
+
+            // Record target button ("●" = active rec, "○" = inactive)
+            ImGui::SameLine();
+            ImGui::PushID(i);
+            if (isRec) {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.8f,0.2f,0.2f,1));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f,0.3f,0.3f,1));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1,1,1,1));
+                ImGui::Button("\xe2\x97\x8f", {24, 0});  // filled circle — already recording here
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.2f,0.2f,0.2f,1));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.4f,0.2f,0.2f,1));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.5f,0.5f,0.5f,1));
+                if (ImGui::Button("\xe2\x97\x8b", {24, 0}))  // open circle — click to set
+                    recordSlot = i;
+            }
+            ImGui::PopStyleColor(3);
+            ImGui::PopID();
         }
+        ImGui::TextDisabled("  view slot    rec");
 
         // Color controls for active slot
         ImGui::Spacing();
@@ -465,7 +495,8 @@ int main(int argc, char** argv)
         ImGui::SeparatorText("Info");
         if (as.texW)
             ImGui::TextDisabled("%d x %d", as.texW, as.texH);
-        ImGui::TextDisabled("Keys 1-8: switch slot");
+        ImGui::TextDisabled("1-8: switch view");
+        ImGui::TextDisabled("Shift+1-8: set rec slot");
         ImGui::TextDisabled("R: reset color  Q: quit");
 
         ImGui::End();
