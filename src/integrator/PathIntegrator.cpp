@@ -28,6 +28,7 @@ void PathIntegrator::renderTile(const SceneView& scene,
             Spectrum accumAlbedo = {};
             Vec3f    accumNormal = {};
             uint32_t aovCount    = 0;
+            float    sumLumSq    = 0.f;
 
             for (uint32_t s = 0; s < tile.sampleCount; ++s) {
                 sampler.startPixelSample(px, py, tile.sampleStart + s);
@@ -39,14 +40,21 @@ void PathIntegrator::renderTile(const SceneView& scene,
                 Spectrum albedo = {};
                 Vec3f    normal = {};
                 Spectrum sample = Li(ray, scene, sampler, 0, albedo, normal);
-                if (sample.isFinite()) accum += sample;
+                if (sample.isFinite()) {
+                    accum += sample;
+                    float lum = luminance(sample);
+                    sumLumSq += lum * lum;
+                }
                 accumAlbedo += albedo;
                 accumNormal = accumNormal + normal;
                 ++aovCount;
             }
 
+            // Weight by sampleCount so adaptive passes merge correctly:
+            // Film computes weighted average across all passes per pixel.
             float invSPP = 1.f / static_cast<float>(tile.sampleCount);
-            localTile.add(tx, ty, accum * invSPP);
+            localTile.add(tx, ty, accum * invSPP, static_cast<float>(tile.sampleCount));
+            localTile.addLumSq(tx, ty, sumLumSq);
 
             if (aovCount > 0) {
                 float invN = 1.f / static_cast<float>(aovCount);

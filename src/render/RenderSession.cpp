@@ -17,10 +17,12 @@
 
 #include <spdlog/spdlog.h>
 #include <cassert>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <mutex>
+#include <numeric>
 #include <thread>
 
 namespace anacapa {
@@ -430,24 +432,114 @@ void RenderSession::render() {
                      m_settings.pngPath);
     }
 
+    // Helper: render a list of tiles and merge into Film.
+    // tilesOffset shifts the progress counter so adaptive pass numbers continue
+    // from where the base pass left off.
+    auto runTiles = [&](const std::vector<TileRequest>& tileList,
+                        uint32_t totalExpected,
+                        std::atomic<uint32_t>& completed) {
+        uint32_t n = static_cast<uint32_t>(tileList.size());
+        m_threadPool->parallelFor(n, [&](uint32_t tileIdx) {
+            const TileRequest& tile = tileList[tileIdx];
+            auto sampler = m_baseSampler->clone();
+            TileBuffer localTile(tile.x0, tile.y0, tile.width, tile.height);
+            m_integrator->renderTile(m_scene, tile,
+                                      m_settings.imageWidth, m_settings.imageHeight,
+                                      *sampler, localTile);
+            m_film->mergeTile(localTile);
+            uint32_t done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (done % 16 == 0 || done == totalExpected)
+                spdlog::info("  {}/{} tiles", done, totalExpected);
+        });
+    };
+
     std::atomic<uint32_t> tilesCompleted{0};
 
-    m_threadPool->parallelFor(totalTiles, [&](uint32_t tileIdx) {
-        const TileRequest& tile = tiles[tileIdx];
+    if (!m_settings.adaptive) {
+        // --- Single-pass (non-adaptive) ---
+        runTiles(tiles, totalTiles, tilesCompleted);
+    } else {
+        // --- Adaptive two-pass ---
+        uint32_t totalSPP = m_settings.samplesPerPixel;
+        uint32_t baseSPP  = m_settings.adaptiveBaseSpp > 0
+                            ? m_settings.adaptiveBaseSpp
+                            : std::max(16u, totalSPP / 4);
+        baseSPP = std::min(baseSPP, totalSPP);
+        uint32_t extraSPP = totalSPP - baseSPP;
 
-        // Each worker gets its own sampler clone (independent state)
-        auto sampler = m_baseSampler->clone();
+        // Base pass
+        for (auto& t : tiles) { t.sampleStart = 0; t.sampleCount = baseSPP; }
+        uint32_t totalAdaptive = totalTiles; // will grow after variance is known
+        spdlog::info("  Adaptive base pass: {} spp", baseSPP);
+        runTiles(tiles, totalTiles, tilesCompleted);
 
-        TileBuffer localTile(tile.x0, tile.y0, tile.width, tile.height);
-        m_integrator->renderTile(m_scene, tile,
-                                  m_settings.imageWidth, m_settings.imageHeight,
-                                  *sampler, localTile);
-        m_film->mergeTile(localTile);
+        if (extraSPP > 0) {
+            // Compute per-tile variance score = average pixel variance in tile
+            uint32_t W  = m_settings.imageWidth;
+            std::vector<float> tileVar(totalTiles, 0.f);
+            for (uint32_t i = 0; i < totalTiles; ++i) {
+                const TileRequest& t = tiles[i];
+                float sum = 0.f;
+                for (uint32_t ty = 0; ty < t.height; ++ty)
+                    for (uint32_t tx = 0; tx < t.width; ++tx)
+                        sum += m_film->varianceAt(t.x0 + tx, t.y0 + ty);
+                tileVar[i] = sum / static_cast<float>(t.width * t.height);
+            }
 
-        uint32_t done = tilesCompleted.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (done % 16 == 0 || done == totalTiles)
-            spdlog::info("  {}/{} tiles", done, totalTiles);
-    });
+            // Allocate extra samples proportional to stddev (sqrt of variance).
+            // Tiles below the mean variance get no extra samples.
+            std::vector<float> stddev(totalTiles);
+            for (uint32_t i = 0; i < totalTiles; ++i)
+                stddev[i] = std::sqrt(std::max(0.f, tileVar[i]));
+            float totalSd = std::accumulate(stddev.begin(), stddev.end(), 0.f);
+
+            std::vector<TileRequest> adaptiveTiles;
+            if (totalSd > 0.f) {
+                // Distribute extraSPP * totalTiles sample-slots across tiles
+                uint32_t budget = extraSPP * totalTiles;
+                std::vector<uint32_t> extraPerTile(totalTiles, 0u);
+                uint32_t assigned = 0;
+                for (uint32_t i = 0; i < totalTiles; ++i) {
+                    uint32_t s = static_cast<uint32_t>(
+                        std::round(stddev[i] / totalSd * static_cast<float>(budget)));
+                    extraPerTile[i] = s;
+                    assigned += s;
+                }
+                // Round-off correction: give remainder to highest-variance tile
+                if (assigned < budget) {
+                    uint32_t top = static_cast<uint32_t>(
+                        std::max_element(stddev.begin(), stddev.end()) - stddev.begin());
+                    extraPerTile[top] += budget - assigned;
+                } else if (assigned > budget) {
+                    uint32_t top = static_cast<uint32_t>(
+                        std::max_element(stddev.begin(), stddev.end()) - stddev.begin());
+                    extraPerTile[top] -= assigned - budget;
+                }
+
+                for (uint32_t i = 0; i < totalTiles; ++i) {
+                    if (extraPerTile[i] == 0) continue;
+                    TileRequest t = tiles[i];
+                    t.sampleStart = baseSPP;
+                    t.sampleCount = extraPerTile[i];
+                    adaptiveTiles.push_back(t);
+                }
+            }
+
+            uint32_t nAdaptive = static_cast<uint32_t>(adaptiveTiles.size());
+            float meanExtra = nAdaptive > 0
+                ? static_cast<float>(extraSPP * totalTiles) / static_cast<float>(nAdaptive)
+                : 0.f;
+            spdlog::info("  Adaptive pass: {} active tiles, ~{:.0f} spp avg "
+                         "(range: {} total extra spp budget)",
+                         nAdaptive, meanExtra, extraSPP);
+
+            std::atomic<uint32_t> adaptiveCompleted{0};
+            uint32_t grandTotal = totalTiles + nAdaptive;
+            // shift progress so adaptive logs continue from base-pass count
+            adaptiveCompleted.store(totalTiles);
+            runTiles(adaptiveTiles, grandTotal, adaptiveCompleted);
+        }
+    }
 
     // Stop the preview watcher and wait for it to exit
     if (doPreview) {

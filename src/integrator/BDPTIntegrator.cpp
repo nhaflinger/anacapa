@@ -463,6 +463,7 @@ void BDPTIntegrator::renderTile(const SceneView& scene,
             Spectrum accumAlbedo  = {};
             Vec3f    accumNormal  = {};
             uint32_t aovCount     = 0;
+            float    sumLumSq     = 0.f;
 
             for (uint32_t s = 0; s < tile.sampleCount; ++s) {
                 sampler.startPixelSample(px, py, tile.sampleStart + s);
@@ -535,10 +536,13 @@ void BDPTIntegrator::renderTile(const SceneView& scene,
                 }
 
                 pixelL += sampleL;
+                float lum = luminance(sampleL);
+                sumLumSq += lum * lum;
             }
 
             float invSPP = 1.f / static_cast<float>(tile.sampleCount);
-            localTile.add(tx, ty, pixelL * invSPP);
+            localTile.add(tx, ty, pixelL * invSPP, static_cast<float>(tile.sampleCount));
+            localTile.addLumSq(tx, ty, sumLumSq);
 
             if (aovCount > 0) {
                 float invN = 1.f / static_cast<float>(aovCount);
