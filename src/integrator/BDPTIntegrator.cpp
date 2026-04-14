@@ -124,12 +124,20 @@ uint32_t BDPTIntegrator::traceCameraSubpath(const SceneView& scene,
         Vec3f wo = -ray.direction;
         ShadingContext ctx(si, ray.direction);
 
-        // Stochastic opacity — compare against a random sample for soft edges
-        if (sampler.get1D() >= mat->evalOpacity(ctx)) {
-            ray = spawnRay(si.p, si.ng, ray.direction);
-            ray.time = path.sceneTime;
-            --depth;   // don't count this as a bounce
-            continue;
+        // Stochastic opacity — only consume a sampler dimension for partial alpha.
+        // Fully opaque (1.0) never passes through; fully transparent (0.0) always does.
+        // Calling get1D() unconditionally would shift all subsequent sampler
+        // dimensions at every hit, destroying the low-discrepancy structure.
+        {
+            float opacity = mat->evalOpacity(ctx);
+            bool passThrough = opacity <= 0.f
+                || (opacity < 1.f && sampler.get1D() >= opacity);
+            if (passThrough) {
+                ray = spawnRay(si.p, si.ng, ray.direction);
+                ray.time = path.sceneTime;
+                --depth;   // don't count this as a bounce
+                continue;
+            }
         }
 
         // Convert solid-angle PDF of previous direction to area PDF at this vertex
@@ -219,6 +227,9 @@ uint32_t BDPTIntegrator::traceLightSubpath(const SceneView& scene,
     path.wo[vi]       = ls.dir;   // direction light ray travels
     path.beta[vi]     = ls.Le / (lightPdf * ls.pdfPos);
     path.Le[vi]       = ls.Le;
+    // For infinite lights (dome/env), store the directional solid-angle PDF so
+    // the s=1 connect() formula can use it directly without the cosL/dist² correction
+    // that only applies to finite area lights.
     path.pdfFwd[vi]   = lightPdf * ls.pdfPos;  // area PDF on the light surface
     path.pdfRev[vi]   = 0.f;
     path.flags[vi]    = static_cast<uint32_t>(PathVertexType::Light)
@@ -307,12 +318,23 @@ Spectrum BDPTIntegrator::connect(const SceneView& scene,
 
     if (s == 0) {
         // Strategy (0, t): pure camera path — emitted radiance at the last vertex.
-        // Handles both emissive surfaces and environment (infinite) vertices.
+        // Only handles surface emitters here. Infinite (environment) light vertices
+        // are excluded because their area PDF is undefined, so the MIS weight cannot
+        // properly compete with (s=1) NEE strategies — both would get weight ≈1 and
+        // the contribution would be double-counted. The env is fully captured by the
+        // (s=1) direct-sampling strategy at every surface bounce.
+        // Exception: primary rays that escape directly to the env (t==2, camera+env)
+        // have no competing (s=1) strategy (the camera vertex has no BSDF), so they
+        // are safe to include here.
         if (t < 2) return {};
         const uint32_t last = t - 1;
         PathVertexType ty = cp.type(last);
-        if (ty == PathVertexType::Surface || ty == PathVertexType::Light)
+        if (ty == PathVertexType::Surface)
             L = cp.beta[last] * cp.Le[last];
+        else if (ty == PathVertexType::Light && cp.isInfinite(last) && t == 2)
+            L = cp.beta[last] * cp.Le[last];  // primary ray to sky — no NEE possible
+        else if (ty == PathVertexType::Light && !cp.isInfinite(last))
+            L = cp.beta[last] * cp.Le[last];  // finite area emitter
         return L;
     }
 
@@ -405,10 +427,12 @@ Spectrum BDPTIntegrator::connect(const SceneView& scene,
     Spectrum fC = evalVertex(cp, ct, -wi, fwdC, revC);
     if (isBlack(fC)) return {};
 
-    float G = geometryTerm(lp.position[ls], lp.normal[ls],
-                            cp.position[ct], cp.normal[ct]);
+    // evalVertex already includes |cosTheta| at each endpoint via "be.f * cosI".
+    // geometryTerm = cosA * cosB / dist^2 would double-count those cosines.
+    // Use 1/dist^2 only — the cosines are already in fL and fC.
+    float invDist2 = 1.f / (dist * dist);
 
-    L = lp.beta[ls] * fL * G * fC * cp.beta[ct] * Tr2;
+    L = lp.beta[ls] * fL * invDist2 * fC * cp.beta[ct] * Tr2;
     return L;
 }
 
@@ -492,6 +516,20 @@ void BDPTIntegrator::renderTile(const SceneView& scene,
                         float w = bdptMISWeight(lightPath, camPath, s2, t);
                         Spectrum contrib = C * w;
                         if (!contrib.isFinite()) continue;
+
+                        // Firefly clamping — only for connected strategies (s>=2, t>=2).
+                        // s=0 (pure camera path) and s=1 (NEE) are well-behaved and
+                        // must not be clamped — their contributions can legitimately
+                        // be large (bright sky, strong area lights) and clamping them
+                        // just makes the whole scene darker without reducing noise.
+                        // Fireflies in BDPT come from s>=2 connections where an
+                        // arbitrary connection direction lands near a specular peak.
+                        if (m_fireflyClamp > 0.f && s2 >= 2 && t >= 2) {
+                            float lum = luminance(contrib);
+                            if (lum > m_fireflyClamp)
+                                contrib = contrib * (m_fireflyClamp / lum);
+                        }
+
                         sampleL += contrib;
                     }
                 }

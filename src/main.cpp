@@ -27,6 +27,10 @@ int main(int argc, char** argv) {
                    "Integrator: bdpt (default) or path")
        ->default_val("bdpt");
 
+    app.add_option("--firefly-clamp", settings.fireflyClamp,
+                   "BDPT: max luminance per strategy contribution (0=off, default=10)")
+       ->default_val(10.f);
+
     app.add_option("--scene", settings.scenePath,
                    "USD/USDA/USDC scene file to load (requires ANACAPA_ENABLE_USD)");
     app.add_option("--camera", settings.cameraPath,

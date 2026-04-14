@@ -105,7 +105,21 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
         return gm;
     }
 
-    // StandardSurfaceMaterial — check for GGX by flags
+    // StandardSurfaceMaterial — check for glass first (transmission > 0)
+    const StandardSurfaceMaterial* ssm = dynamic_cast<const StandardSurfaceMaterial*>(mat);
+    if (ssm && ssm->params().transmission > 0.001f && ssm->params().metalness.value < 0.001f) {
+        gm.type        = kMatGlass;
+        gm.specularIOR = ssm->params().specular_IOR;
+        gm.transmission = ssm->params().transmission;
+        SurfaceInteraction si; si.n = si.ng = {0,0,1};
+        ShadingContext ctx(si, {0,0,1});
+        Spectrum alb = mat->reflectance(ctx);
+        gm.baseColor = {alb.x, alb.y, alb.z};
+        gm.roughness = ssm->params().roughness.value;
+        return gm;
+    }
+
+    // StandardSurfaceMaterial — GGX by flags
     if (mat->flags() & BSDFFlag_Glossy) {
         gm.type = kMatGGX;
         SurfaceInteraction si; si.n = si.ng = {0,0,1};

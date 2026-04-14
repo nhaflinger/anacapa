@@ -22,6 +22,9 @@ What this script handles
       - Hue/Saturation → HSV adjustment baked into texture
       - Bright/Contrast → baked into texture
       - RGB Curves, Color Ramp → Blender bake (requires UV + mesh)
+  ✓ Convert Glass BSDF materials to Principled BSDF with opacity=0 so the
+    USD exporter produces a valid UsdPreviewSurface (Glass BSDF has no direct
+    USD equivalent and exports as an empty material shell otherwise)
   ✓ Report objects that could not be processed with an explanation
 
 What requires manual attention (printed as warnings)
@@ -565,7 +568,113 @@ def bake_unsupported_nodes(out_dir: str) -> Tuple[int, List[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Step 6: Strip custom properties that the USD exporter cannot serialize
+# Step 6: Convert Glass BSDF materials to Principled BSDF with opacity=0
+#
+# Blender's Glass BSDF node has no equivalent in UsdPreviewSurface. When the
+# USD exporter encounters a material whose output is connected to a Glass BSDF
+# (or a Mix Shader combining Glass with anything), it produces an empty material
+# shell with outputs:surface = None. Anacapa then gets a grey Lambertian fallback
+# and the windows/glass objects are opaque, blocking all light.
+#
+# The UsdPreviewSurface convention for glass is: opacity=0, IOR from the glass
+# node. Blender's USD exporter translates that correctly to a dielectric shader.
+#
+# This step:
+#   1. Finds any material whose surface output connects (directly or via Mix
+#      Shader) to a Glass BSDF node.
+#   2. Replaces the material node tree with a minimal Principled BSDF wired as:
+#        opacity = 0, IOR = (Glass BSDF IOR), roughness = (Glass BSDF roughness),
+#        base color = (Glass BSDF color), transmission = 1.
+#   3. Logs the conversion so the artist can verify the result.
+# ---------------------------------------------------------------------------
+
+def convert_glass_materials() -> Tuple[int, List[str]]:
+    """
+    Detect materials driven by a Glass BSDF and replace them with a
+    Principled BSDF configured as glass (opacity=0, IOR, transmission=1).
+    Returns (converted_count, warnings).
+    """
+    converted = 0
+    warnings: List[str] = []
+
+    for mat in bpy.data.materials:
+        if not mat.use_nodes or not mat.node_tree:
+            continue
+
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+
+        # Find the Material Output node
+        output = next((n for n in nodes if n.type == 'OUTPUT_MATERIAL'), None)
+        if not output:
+            continue
+
+        # Walk the Surface input to find a Glass BSDF, possibly through Mix Shaders
+        surface_links = output.inputs['Surface'].links
+        if not surface_links:
+            continue
+
+        def find_glass_bsdf(node, depth=0):
+            """Recursively find a BSDF_GLASS node reachable from this node."""
+            if depth > 5:
+                return None
+            if node.type == 'BSDF_GLASS':
+                return node
+            # Mix Shader: check both shader inputs
+            if node.type == 'MIX_SHADER':
+                for inp in node.inputs:
+                    if inp.name in ('Shader', 'Shader_001') or inp.name.startswith('Shader'):
+                        for lnk in inp.links:
+                            result = find_glass_bsdf(lnk.from_node, depth + 1)
+                            if result:
+                                return result
+            return None
+
+        src_node = surface_links[0].from_node
+        glass_node = find_glass_bsdf(src_node)
+        if glass_node is None:
+            continue
+
+        # Read glass parameters
+        ior = glass_node.inputs['IOR'].default_value if 'IOR' in glass_node.inputs else 1.5
+        roughness = glass_node.inputs['Roughness'].default_value if 'Roughness' in glass_node.inputs else 0.0
+        color = tuple(glass_node.inputs['Color'].default_value[:3]) if 'Color' in glass_node.inputs else (1.0, 1.0, 1.0)
+
+        # Clear existing nodes and build a minimal Principled BSDF glass setup
+        nodes.clear()
+
+        out_node = nodes.new('ShaderNodeOutputMaterial')
+        out_node.location = (300, 0)
+
+        pbsdf = nodes.new('ShaderNodeBsdfPrincipled')
+        pbsdf.location = (0, 0)
+
+        # Glass via UsdPreviewSurface convention: opacity=0, IOR, Transmission=1
+        pbsdf.inputs['Base Color'].default_value    = (*color, 1.0)
+        pbsdf.inputs['Roughness'].default_value     = roughness
+        pbsdf.inputs['IOR'].default_value           = ior
+        pbsdf.inputs['Alpha'].default_value         = 0.0   # opacity=0 → glass in USD
+
+        # Blender 4.x uses 'Transmission Weight'; older versions use 'Transmission'
+        for trans_name in ('Transmission Weight', 'Transmission'):
+            if trans_name in pbsdf.inputs:
+                pbsdf.inputs[trans_name].default_value = 1.0
+                break
+
+        links.new(pbsdf.outputs['BSDF'], out_node.inputs['Surface'])
+
+        # Set blend mode so Blender's viewport also shows it as transparent
+        mat.blend_method = 'BLEND'
+
+        log(f"  Converted glass material '{mat.name}': "
+            f"IOR={ior:.2f} roughness={roughness:.3f} color={color}")
+        converted += 1
+
+    return converted, warnings
+
+
+# ---------------------------------------------------------------------------
+# Step 8: Strip custom properties that the USD exporter cannot serialize
 #
 # Blender stores various addon metadata, node editor state, and other
 # per-object/per-material data as custom properties (RNA ID properties).
@@ -643,10 +752,10 @@ def strip_unsupported_custom_props() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Step 7: Remove render-hidden cutter helpers
+# Step 9: Remove render-hidden cutter helpers
 # ---------------------------------------------------------------------------
 
-def remove_render_hidden() -> Tuple[int, List[str]]:  # step 6
+def remove_render_hidden() -> Tuple[int, List[str]]:
     """Remove objects hidden from render that have no children."""
     removed = 0
     kept: List[str] = []
@@ -711,13 +820,17 @@ def main():
     _bake_dir = os.path.dirname(os.path.abspath(_parsed.output)) if _parsed.output else "."
     n_baked, bake_warnings = bake_unsupported_nodes(_bake_dir)
 
-    # --- Step 6: Strip unsupported custom properties ---
-    log("Step 6: Stripping unsupported custom properties...")
+    # --- Step 6: Convert Glass BSDF materials ---
+    log("Step 6: Converting Glass BSDF materials to Principled BSDF (opacity=0)...")
+    n_glass, glass_warnings = convert_glass_materials()
+
+    # --- Step 7: Strip unsupported custom properties ---
+    log("Step 7: Stripping unsupported custom properties...")
     n_props_removed = strip_unsupported_custom_props()
 
-    # --- Step 7: Remove hidden cutters ---
+    # --- Step 8: Remove hidden cutters ---
     if REMOVE_RENDER_HIDDEN:
-        log("Step 7: Removing render-hidden helper objects...")
+        log("Step 8: Removing render-hidden helper objects...")
         n_removed, hidden_kept = remove_render_hidden()
     else:
         n_removed = 0
@@ -733,6 +846,7 @@ def main():
     print(f"  Modifiers applied             : {n_mods}")
     print(f"  Objects with transforms fixed : {n_transforms}")
     print(f"  Materials with baked nodes    : {n_baked}")
+    print(f"  Glass materials converted     : {n_glass}")
     print(f"  Unsupported custom props strip: {n_props_removed}")
     print(f"  Render-hidden objects removed : {n_removed}")
 
@@ -742,7 +856,7 @@ def main():
         for name in hidden_kept:
             print(f"    - {name}")
 
-    all_warnings = convert_skipped + mod_warnings + bake_warnings
+    all_warnings = convert_skipped + mod_warnings + bake_warnings + glass_warnings
     if all_warnings:
         print()
         print("  Warnings — manual attention required:")

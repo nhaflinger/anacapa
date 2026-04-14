@@ -9,6 +9,7 @@
 //   kMatLambertian — diffuse only
 //   kMatEmissive   — emits Le, no scattering
 //   kMatGGX        — GGX microfacet (roughness/metalness), no transmission
+//   kMatGlass      — smooth dielectric: exact Fresnel + Snell refraction
 //
 // This is a "megakernel" path tracer suitable for interactive preview.
 
@@ -94,6 +95,18 @@ static float3 schlick(float cosI, float3 F0) {
     float p = pow(1.0f - cosI, 5.0f);
     return F0 + (1.0f - F0) * p;
 }
+// Exact dielectric Fresnel reflectance (scalar, unpolarised).
+// cosI: cosine of angle with surface normal (must be >= 0).
+// eta:  relative IOR = n_inside / n_outside (eta > 1 = entering denser medium).
+static float fresnelDielectric(float cosI, float eta) {
+    float sinT2 = eta * eta * (1.0f - cosI * cosI);
+    if (sinT2 >= 1.0f) return 1.0f;  // total internal reflection
+    float cosT  = sqrt(1.0f - sinT2);
+    float rs = (cosI - eta * cosT) / (cosI + eta * cosT);
+    float rp = (eta * cosI - cosT) / (eta * cosI + cosT);
+    return 0.5f * (rs * rs + rp * rp);
+}
+
 // Build local ONB around n, transform v from tangent to world
 static float3 toWorld(float3 v, float3 n) {
     float3 t, bt;
@@ -144,19 +157,78 @@ static float3 evalEnvmap(float3 wo,
 // ---------------------------------------------------------------------------
 // Direct-light sampling (one light chosen uniformly at random)
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Shadow transmittance — steps through glass surfaces between hitPos and the
+// light, accumulating tint. Returns (0,0,0) if an opaque surface blocks the
+// path, or a tint <= (1,1,1) attenuated by any glass surfaces in between.
+// ---------------------------------------------------------------------------
+static float3 shadowTransmittance(
+    float3                          origin,
+    float3                          dir,
+    float                           tMax,
+    const device GpuMaterial*       materials,
+    uint                            numMaterials,
+    const device PackedFloat3*      normals,
+    const device uint32_t*          indices,
+    const device uint32_t*          meshIndexOffsets,
+    instance_acceleration_structure accelStruct)
+{
+    float3 T = float3(1.0f);
+    ray    stepRay;
+    stepRay.direction   = dir;
+    stepRay.min_distance = 1e-4f;
+    stepRay.max_distance = tMax;
+    stepRay.origin      = origin;
+
+    intersector<triangle_data, instancing> isect;
+    isect.accept_any_intersection(false);  // need closest hit to step correctly
+
+    for (int step = 0; step < 8; ++step) {
+        intersection_result<triangle_data, instancing> res =
+            isect.intersect(stepRay, accelStruct, 0xFF);
+
+        if (res.type == intersection_type::none) break;  // clear path
+
+        uint meshID = res.instance_id;
+        uint matIdx = (meshID < numMaterials) ? meshID : 0;
+        GpuMaterial mat = materials[matIdx];
+
+        if (mat.type == kMatGlass) {
+            // Glass transmits with base color tint
+            T *= float3(mat.baseColor.x, mat.baseColor.y, mat.baseColor.z);
+            if (max(T.x, max(T.y, T.z)) < 1e-4f) return float3(0);
+
+            // Advance past this surface
+            float remaining = stepRay.max_distance - res.distance;
+            if (remaining <= 1e-4f) break;
+            stepRay.origin      = stepRay.origin + dir * (res.distance + 1e-4f);
+            stepRay.max_distance = remaining - 1e-4f;
+        } else {
+            // Opaque surface blocks the light
+            return float3(0);
+        }
+    }
+    return T;
+}
+
 static float3 sampleDirect(
-    float3                   hitPos,
-    float3                   n,
-    float3                   wo,
-    uint                     matType,
-    float3                   baseColor,
-    float                    roughness,
-    float                    metalness,
-    const device GpuLight*   lights,
-    uint                     numLights,
-    thread uint&             rng,
+    float3                          hitPos,
+    float3                          n,
+    float3                          wo,
+    uint                            matType,
+    float3                          baseColor,
+    float                           roughness,
+    float                           metalness,
+    const device GpuLight*          lights,
+    uint                            numLights,
+    const device GpuMaterial*       materials,
+    uint                            numMaterials,
+    const device PackedFloat3*      normals,
+    const device uint32_t*          indices,
+    const device uint32_t*          meshIndexOffsets,
+    thread uint&                    rng,
     instance_acceleration_structure accelStruct,
-    constant GpuCameraParams& cam,
+    constant GpuCameraParams&       cam,
     texture2d<float, access::sample> envTex)
 {
     if (numLights == 0) return float3(0);
@@ -188,13 +260,12 @@ static float3 sampleDirect(
         Li   = float3(light.Le.x, light.Le.y, light.Le.z);
 
     } else if (light.type == kLightDirectional) {
-        wi   = float3(light.normal.x, light.normal.y, light.normal.z); // dirToLight
+        wi   = float3(light.normal.x, light.normal.y, light.normal.z);
         tMax = 1e9f;
-        pdfL = lightPick;  // delta: contribute directly
+        pdfL = lightPick;
         Li   = float3(light.Le.x, light.Le.y, light.Le.z);
 
     } else if (light.type == kLightDome) {
-        // Cosine-weighted hemisphere sampling with directional HDRI lookup
         wi   = cosineSampleHemisphere(rand2(rng), n);
         tMax = 1e9f;
         float cosW = max(1e-7f, dot(n, wi));
@@ -208,26 +279,20 @@ static float3 sampleDirect(
     float cosI = dot(n, wi);
     if (cosI <= 0.0f || pdfL <= 0.0f) return float3(0);
 
-    // Shadow ray
-    ray shadowRay;
-    shadowRay.origin        = hitPos + n * 1e-4f;
-    shadowRay.direction     = wi;
-    shadowRay.min_distance  = 1e-4f;
-    shadowRay.max_distance  = tMax;
-
-    intersector<triangle_data, instancing> isect;
-    isect.accept_any_intersection(true);
-    intersection_result<triangle_data, instancing> res =
-        isect.intersect(shadowRay, accelStruct, 0xFF);
-
-    if (res.type != intersection_type::none) return float3(0);
+    // Transmittance along shadow ray — steps through glass surfaces
+    float3 shadowOrigin = hitPos + n * 1e-4f;
+    float3 Tr = shadowTransmittance(shadowOrigin, wi, tMax,
+                                    materials, numMaterials,
+                                    normals, indices, meshIndexOffsets,
+                                    accelStruct);
+    if (max(Tr.x, max(Tr.y, Tr.z)) <= 0.0f) return float3(0);
 
     // BSDF eval
     float3 f = float3(0);
     if (matType == kMatLambertian) {
-        f = float3(baseColor.x, baseColor.y, baseColor.z) * (1.0f / M_PI_F);
+        f = baseColor * (1.0f / M_PI_F);
     } else if (matType == kMatGGX) {
-        float3 wh = normalize(wo + wi);
+        float3 wh  = normalize(wo + wi);
         float  cosH = max(0.0f, dot(n, wh));
         float  cosO = max(0.0f, dot(n, wo));
         float  cosII = max(0.0f, dot(n, wi));
@@ -235,14 +300,15 @@ static float3 sampleDirect(
         float  alpha2 = alpha * alpha;
         float  D  = ggxD(cosH, alpha2);
         float  G  = ggxG1(cosO, alpha2) * ggxG1(cosII, alpha2);
-        float3 F0 = mix(float3(0.04f), float3(baseColor.x, baseColor.y, baseColor.z), metalness);
+        float3 F0 = mix(float3(0.04f), baseColor, metalness);
         float3 F  = schlick(dot(wi, wh), F0);
         float3 specular = D * G * F / max(1e-7f, 4.0f * cosO * cosII);
-        float3 diffuse  = (1.0f - metalness) * float3(baseColor.x, baseColor.y, baseColor.z) * (1.0f / M_PI_F);
+        float3 diffuse  = (1.0f - metalness) * baseColor * (1.0f / M_PI_F);
         f = diffuse + specular;
     }
+    // Glass is delta — no area PDF can be evaluated, skip direct lighting
 
-    return f * Li * cosI / pdfL;
+    return f * Li * Tr * cosI / pdfL;
 }
 
 // ---------------------------------------------------------------------------
@@ -350,13 +416,17 @@ kernel void shade(
             break;
         }
 
-        // Direct lighting
+        // Direct lighting (skip for delta glass — no area-light PDF)
         float3 wo = -r.direction;
-        L += throughput * sampleDirect(hitPos, n, wo,
-                                        mat.type, baseColor,
-                                        mat.roughness, mat.metalness,
-                                        lights, numLights, rng, accelStruct,
-                                        cam, envTexture);
+        if (mat.type != kMatGlass) {
+            L += throughput * sampleDirect(hitPos, n, wo,
+                                           mat.type, baseColor,
+                                           mat.roughness, mat.metalness,
+                                           lights, numLights,
+                                           materials, numMaterials,
+                                           normals, indices, meshIndexOffsets,
+                                           rng, accelStruct, cam, envTexture);
+        }
 
         // Russian roulette after bounce 3
         if (bounce >= 3) {
@@ -370,7 +440,42 @@ kernel void shade(
         float  bsdfPdf;
         float3 bsdfF;
 
-        if (mat.type == kMatGGX && mat.roughness < 0.95f) {
+        if (mat.type == kMatGlass) {
+            // Smooth dielectric: exact Fresnel split between reflect and refract.
+            // Determine if we are entering or exiting by checking ray vs normal.
+            bool entering = dot(-r.direction, n) > 0.0f;
+            float3 faceN  = entering ? n : -n;         // normal pointing toward ray origin
+            float  eta    = entering ? (1.0f / mat.specularIOR) : mat.specularIOR;
+
+            float cosI = dot(-r.direction, faceN);
+            float Fr   = fresnelDielectric(cosI, 1.0f / eta);  // eta = n2/n1, invert for function convention
+
+            if (rand01(rng) < Fr) {
+                // Reflect
+                wi = reflect(r.direction, faceN);
+                r.origin = hitPos + faceN * 1e-4f;
+            } else {
+                // Refract (Snell's law) — Metal's built-in refract(I, N, eta) where eta = n1/n2
+                wi = refract(r.direction, faceN, eta);
+                if (length_squared(wi) < 0.5f) {
+                    // Total internal reflection fallback
+                    wi = reflect(r.direction, faceN);
+                    r.origin = hitPos + faceN * 1e-4f;
+                } else {
+                    r.origin = hitPos - faceN * 1e-4f;  // offset to inside surface
+                }
+            }
+            // Delta BSDF: f/pdf = 1 (throughput unchanged, tinted by base_color for colored glass)
+            bsdfF   = baseColor;
+            bsdfPdf = 1.0f;
+            r.direction    = normalize(wi);
+            r.min_distance = 1e-4f;
+            r.max_distance = 1e10f;
+            // throughput already updated below; skip the cosI check for delta
+            throughput *= bsdfF;
+            continue;
+
+        } else if (mat.type == kMatGGX && mat.roughness < 0.95f) {
             float alpha2 = pow(mat.roughness * mat.roughness, 2.0f);
             float3 wmLocal = sampleGGX(rand2(rng), alpha2);
             float3 wh = toWorld(wmLocal, n);

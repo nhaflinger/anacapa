@@ -304,9 +304,11 @@ public:
                     float G2 = G2_Smith_Separable(woLocal.z, wiLocal.z, alpha2);
                     float cosO = woLocal.z, cosR = wiLocal.z;
                     Spectrum f0{Fr, Fr, Fr};
+                    // BSDFSample.f = f_bsdf * |cosI|.
+                    // f_bsdf = Fr * D * G2 / (4 * cosO * cosR), so f_bsdf * cosR = Fr * D * G2 / (4 * cosO).
                     Spectrum bsdf = f0 * (D * G2 / (4.f * cosO));
                     s.wi     = sctx.toWorld(wiLocal);
-                    s.f      = bsdf * cosR * base_color;
+                    s.f      = bsdf * base_color;
                     s.pdf    = Fr * pdfGGX_reflection(wh.z, alpha2, cosIH);
                     s.pdfRev = s.pdf;
                     s.eta    = 1.f;
@@ -327,14 +329,16 @@ public:
                     // Microfacet transmission BSDF (importance transport, no eta^2)
                     float denom  = cosIH + eta * std::abs(dot(wiLocal, wh));
                     if (denom < 1e-6f) return {};
-                    float bsdf_scalar = (1.f - Fr) * D * G2
-                                      * cosIH / (cosO * denom);
-                    // PDF via half-vector Jacobian for refraction
+                    // Walter et al. 2007 microfacet transmission BSDF (importance transport, no eta²):
+                    //   f_t = (1-Fr) * D * G2 * |dot(wo,wh)| * |dot(wi,wh)| / (|cosO| * |cosI| * denom²)
+                    // BSDFSample.f = f_bsdf * |cosI|, so cosI_t cancels:
+                    //   s.f = (1-Fr) * D * G2 * cosIH * absCosT_wh / (cosO * denom²)
                     float absCosT_wh = std::abs(dot(wiLocal, wh));
                     float pdf_wh     = D * wh.z;
                     float jacobian   = eta * eta * absCosT_wh / (denom * denom);
                     s.wi     = sctx.toWorld(wiLocal);
-                    s.f      = base_color * bsdf_scalar * cosI_t;
+                    s.f      = base_color * ((1.f - Fr) * D * G2 * cosIH * absCosT_wh
+                                            / (cosO * denom * denom));
                     s.pdf    = (1.f - Fr) * pdf_wh * jacobian;
                     s.pdfRev = s.pdf;
                     s.eta    = eta;
@@ -428,8 +432,10 @@ public:
             float G2    = G2_Smith_Separable(woLocal.z, std::abs(wiLocal.z), alpha2);
             float denom = cosIH + eta * cosTH;
             if (denom < 1e-6f) return {};
-            float bsdf_scalar = (1.f - Fr) * D * G2 * cosIH
-                              / (woLocal.z * denom);
+            // Walter et al. 2007 microfacet transmission BSDF (importance transport, no eta²):
+            //   f_t = (1-Fr) * D * G2 * |dot(wo,wh)| * |dot(wi,wh)| / (|cosO| * |cosI| * denom²)
+            float bsdf_scalar = (1.f - Fr) * D * G2 * cosIH * cosTH
+                              / (woLocal.z * std::abs(wiLocal.z) * denom * denom);
             float jacobian = eta * eta * cosTH / (denom * denom);
             Spectrum base_color = evalTOV(m_p.base_color, ctx.uv);
             BSDFEval e;
@@ -445,6 +451,30 @@ public:
         float rough = evalTOV(m_p.roughness, ctx.uv);
         float alpha  = std::max(1e-4f, rough * rough);
         float alpha2 = alpha * alpha;
+
+        // Glass (transmission > 0, non-metallic) in same hemisphere = Fresnel reflection only.
+        // Without this guard, the function falls through to the opaque diffuse+specular BSDF,
+        // which gives a full diffuse + specular response for a transmissive material — making
+        // glass objects appear incandescent under direct lighting (NEE).
+        if (m_p.transmission > 0.001f && metal < 0.001f) {
+            if (rough < 0.001f) return {};   // smooth delta glass: no area PDF for reflection
+            float eta    = ctx.frontFace ? m_p.specular_IOR : (1.f / m_p.specular_IOR);
+            Vec3f wh     = safeNormalize(woLocal + wiLocal);
+            if (wh.z < 0.f) return {};       // degenerate half-vector
+            float cosIH  = std::max(0.f, dot(woLocal, wh));
+            float Fr     = fresnelDielectric(cosIH, eta);
+            float D      = D_GGX(wh.z, alpha2);
+            float G2     = G2_Smith_Separable(woLocal.z, wiLocal.z, alpha2);
+            float cosR   = wiLocal.z;
+            float pdf    = Fr > 0.f ? Fr * pdfGGX_reflection(wh.z, alpha2, cosIH) : 0.f;
+            BSDFEval e;
+            // evaluate() returns pure BSDF (no cosine factor — integrator applies it externally).
+            // Standard microfacet reflection BSDF: Fr * D * G2 / (4 * |cosO| * |cosI|)
+            e.f      = base_color * (Fr * D * G2 / (4.f * woLocal.z * cosR));
+            e.pdf    = pdf;
+            e.pdfRev = pdf;   // symmetric Fresnel
+            return e;
+        }
 
         float coatF = schlickDielectric(woLocal.z, m_coatF0);
         float specF = schlickDielectric(woLocal.z, m_f0Dielectric);

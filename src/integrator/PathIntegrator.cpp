@@ -97,10 +97,17 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
         // Stochastic opacity: compare opacity against a random sample so
         // semi-transparent alpha-masked surfaces (fire, foliage) get a
         // properly anti-aliased soft edge rather than a hard cutout at 0.5.
-        if (sampler.get1D() >= mat->evalOpacity(ctx)) {
-            r = spawnRay(si.p, si.ng, r.direction);
-            r.time = ray.time;
-            continue;
+        // Only consume a sampler dimension for partial alpha to preserve
+        // low-discrepancy structure for subsequent bounce decisions.
+        {
+            float opacity = mat->evalOpacity(ctx);
+            bool passThrough = opacity <= 0.f
+                || (opacity < 1.f && sampler.get1D() >= opacity);
+            if (passThrough) {
+                r = spawnRay(si.p, si.ng, r.direction);
+                r.time = ray.time;
+                continue;
+            }
         }
 
         // Capture first-hit AOVs for denoising
