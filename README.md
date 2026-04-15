@@ -114,6 +114,11 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 ./build/Darwin/anacapa --scene scenes/cornell_box.usda \
   -o images/render.exr --override-materials
 
+# Soft shadows from directional lights (2° angular radius, ~4× the sun)
+./build/Darwin/anacapa --scene scenes/cornell_box.usda \
+  -o images/render.exr --png images/render.png \
+  --light-angle 2.0 --spp 256
+
 # Adaptive sampling: 256 spp total, base pass at 64 spp, remaining 192 concentrated on high-variance tiles
 ./build/Darwin/anacapa --scene scenes/cornell_box.usda \
   -o images/render.exr --png images/render.png \
@@ -146,6 +151,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
   --override-materials                       \
   --interactive                              \
   --firefly-clamp    10                      \
+  --light-angle      2.0                     \
   --adaptive                                 \
   --adaptive-base-spp 0
 
@@ -165,6 +171,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 | `--tile-size` | `64` | Tile size in pixels |
 | `--integrator` | `bdpt` | `bdpt` or `path` |
 | `--firefly-clamp` | `10` | BDPT: max luminance per strategy contribution; suppresses bright outliers. `0` = off |
+| `--light-angle` | `0` | Angular radius for directional lights in degrees. Turns hard point sources into soft area lights with penumbras. `0` = hard shadows, `0.27` = sun, `2–5` = soft |
 | `--adaptive` | off | Enable adaptive sampling: base pass + extra samples concentrated on high-variance tiles |
 | `--adaptive-base-spp` | `0` | Adaptive base-pass SPP (`0` = auto: `spp/4`, minimum 16) |
 | `--scene` | — | USD/USDA/USDC scene file |

@@ -137,6 +137,16 @@ void RenderSession::loadScene() {
             }
         }
 
+        // ---- Light angle: give directional lights an angular extent for soft shadows --
+        if (m_settings.lightAngle > 0.f) {
+            for (auto& l : m_lights) {
+                if (auto* dl = dynamic_cast<DirectionalLight*>(l.get()))
+                    dl->setHalfAngleDeg(m_settings.lightAngle);
+            }
+            spdlog::info("--light-angle {:.2f}°: applied to directional lights",
+                         m_settings.lightAngle);
+        }
+
         // ---- Override lights: replace all USD lights with a diagnostic light --
         if (m_settings.overrideLights && !m_scene.lights.empty()) {
             spdlog::info("--override-lights: discarding {} USD light(s), "
@@ -486,34 +496,36 @@ void RenderSession::render() {
                 tileVar[i] = sum / static_cast<float>(t.width * t.height);
             }
 
-            // Allocate extra samples proportional to stddev (sqrt of variance).
-            // Tiles below the mean variance get no extra samples.
-            std::vector<float> stddev(totalTiles);
+            // Blend uniform + proportional allocation.
+            //
+            // Pure proportional allocation (even with log-scaling) can leave
+            // low-variance tiles with 0 extra samples, making them look worse
+            // than a flat render.  Blending with a uniform floor ensures every
+            // tile receives at least half the average budget while still
+            // concentrating the other half on high-variance regions.
+            //
+            // Each tile gets: uniformShare + varianceBonus, capped at extraSPP.
+            //   uniformShare  = extraSPP / 2  (same for every tile)
+            //   varianceBonus = proportional share of the remaining extraSPP/2
+            //                   budget, weighted by log(1+variance)
+            std::vector<float> logWeight(totalTiles);
             for (uint32_t i = 0; i < totalTiles; ++i)
-                stddev[i] = std::sqrt(std::max(0.f, tileVar[i]));
-            float totalSd = std::accumulate(stddev.begin(), stddev.end(), 0.f);
+                logWeight[i] = std::log(1.f + tileVar[i]);
+            float totalW = std::accumulate(logWeight.begin(), logWeight.end(), 0.f);
 
             std::vector<TileRequest> adaptiveTiles;
-            if (totalSd > 0.f) {
-                // Distribute extraSPP * totalTiles sample-slots across tiles
-                uint32_t budget = extraSPP * totalTiles;
+            {
+                uint32_t uniformHalf = extraSPP / 2;
+                uint32_t bonusHalf   = extraSPP - uniformHalf;  // remaining half
                 std::vector<uint32_t> extraPerTile(totalTiles, 0u);
-                uint32_t assigned = 0;
                 for (uint32_t i = 0; i < totalTiles; ++i) {
-                    uint32_t s = static_cast<uint32_t>(
-                        std::round(stddev[i] / totalSd * static_cast<float>(budget)));
-                    extraPerTile[i] = s;
-                    assigned += s;
-                }
-                // Round-off correction: give remainder to highest-variance tile
-                if (assigned < budget) {
-                    uint32_t top = static_cast<uint32_t>(
-                        std::max_element(stddev.begin(), stddev.end()) - stddev.begin());
-                    extraPerTile[top] += budget - assigned;
-                } else if (assigned > budget) {
-                    uint32_t top = static_cast<uint32_t>(
-                        std::max_element(stddev.begin(), stddev.end()) - stddev.begin());
-                    extraPerTile[top] -= assigned - budget;
+                    uint32_t bonus = 0;
+                    if (totalW > 1e-6f) {
+                        float frac = logWeight[i] / totalW;
+                        bonus = static_cast<uint32_t>(
+                            std::round(frac * static_cast<float>(bonusHalf * totalTiles)));
+                    }
+                    extraPerTile[i] = std::min(uniformHalf + bonus, extraSPP);
                 }
 
                 for (uint32_t i = 0; i < totalTiles; ++i) {
@@ -526,12 +538,8 @@ void RenderSession::render() {
             }
 
             uint32_t nAdaptive = static_cast<uint32_t>(adaptiveTiles.size());
-            float meanExtra = nAdaptive > 0
-                ? static_cast<float>(extraSPP * totalTiles) / static_cast<float>(nAdaptive)
-                : 0.f;
-            spdlog::info("  Adaptive pass: {} active tiles, ~{:.0f} spp avg "
-                         "(range: {} total extra spp budget)",
-                         nAdaptive, meanExtra, extraSPP);
+            spdlog::info("  Adaptive pass: {} active tiles (max {} extra spp per tile)",
+                         nAdaptive, extraSPP);
 
             std::atomic<uint32_t> adaptiveCompleted{0};
             uint32_t grandTotal = totalTiles + nAdaptive;

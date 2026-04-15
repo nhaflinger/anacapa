@@ -31,6 +31,11 @@ int main(int argc, char** argv) {
                    "BDPT: max luminance per strategy contribution (0=off, default=10)")
        ->default_val(10.f);
 
+    app.add_option("--light-angle", settings.lightAngle,
+                   "Angular radius for directional lights in degrees (0=hard shadows, "
+                   "0.27=sun, 1-5=soft). Turns hard point sources into soft area lights.")
+       ->default_val(0.f);
+
     app.add_flag("--adaptive", settings.adaptive,
                  "Enable adaptive per-tile sample allocation: base pass + high-variance refinement");
     app.add_option("--adaptive-base-spp", settings.adaptiveBaseSpp,

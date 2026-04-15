@@ -184,7 +184,7 @@ Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
                     float weight = ls.isDelta
                         ? 1.f
                         : powerHeuristic(1, ls.pdf, 1, be.pdf);
-                    float cosI   = absDot(ls.wi, si.n);
+                    float cosI = absDot(ls.wi, si.n);
                     Ld += be.f * ls.Li * Tr * cosI * weight / ls.pdf;
                 }
             }
@@ -204,7 +204,8 @@ Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
                 // Trace toward the light, stepping through any transparent surfaces.
                 // We use shadowTransmittance which handles the chain of transparent
                 // hits, then fall through to check if the final hit is an emitter.
-                Ray shadowRay = spawnRay(si.p, si.n, bs.wi);
+                // Use geometric normal for offset to clear the actual surface.
+                Ray shadowRay = spawnRay(si.p, si.ng, bs.wi);
                 shadowRay.tMax = 1e10f;
                 shadowRay.time = sceneTime;
 
