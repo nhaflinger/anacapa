@@ -12,6 +12,8 @@ or .usdc for binary. The original .blend file is never modified.
 What this script handles
 ────────────────────────
   ✓ Realize collection instances (linked duplicates / Alt+D collections)
+  ✓ Realize particle system instances (Object / Collection render type) — converts
+    each instanced particle to a standalone mesh object and removes the emitter
   ✓ Convert non-mesh types to mesh (curves, text, NURBS, metaballs)
   ✓ Apply all mesh modifiers in stack order (boolean, subdivision, mirror,
     array, solidify, bevel, screw, weld, decimate, etc.)
@@ -29,7 +31,7 @@ What this script handles
 
 What requires manual attention (printed as warnings)
 ─────────────────────────────────────────────────────
-  ✗ Particle hair / point cloud instances — complex; export separately
+  ✗ Particle hair (strand rendering) — complex; export separately
   ✗ Volume / VDB objects — fundamentally different USD prim type
   ✗ Grease Pencil objects — no mesh equivalent
   ✗ Library-linked objects that cannot be made local
@@ -100,7 +102,88 @@ def realize_instances() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Convert non-mesh types to mesh
+# Step 2: Realize particle system instances
+# ---------------------------------------------------------------------------
+
+def realize_particle_instances() -> Tuple[int, List[str]]:
+    """
+    Convert particle system instances (Object/Collection render_type) to real
+    mesh objects.
+
+    For every emitter that has a particle system whose render_type is 'OBJECT'
+    or 'COLLECTION', this function evaluates the dependency graph to collect
+    every individual instance transform, creates a standalone mesh object for
+    each one (with the instance's world transform applied), then removes the
+    original emitter object from the scene.
+
+    Particle hair (strand rendering) is NOT handled and is left as-is.
+
+    Returns (instances_created, emitter_names_removed).
+    """
+    # Find emitter objects that carry relevant particle systems
+    emitters = []
+    for obj in list(bpy.context.scene.objects):
+        for ps in obj.particle_systems:
+            if ps.settings.render_type in ('OBJECT', 'COLLECTION'):
+                emitters.append(obj)
+                break
+
+    if not emitters:
+        return 0, []
+
+    log(f"  Found {len(emitters)} particle emitter(s): {[e.name for e in emitters]}")
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    emitter_names = {obj.name for obj in emitters}
+
+    # DepsgraphObjectInstance references are transient — they become invalid
+    # as soon as the iterator advances or any scene change happens.
+    # Extract mesh data and matrix immediately inside the loop.
+    instance_data_by_emitter: dict = {name: [] for name in emitter_names}
+    for inst in depsgraph.object_instances:
+        if not inst.is_instance:
+            continue
+        if inst.parent is None:
+            continue
+        parent_name = inst.parent.name
+        if parent_name not in instance_data_by_emitter:
+            continue
+        # Capture everything we need now, while inst is still valid
+        eval_obj = inst.object.evaluated_get(depsgraph)
+        new_mesh = bpy.data.meshes.new_from_object(eval_obj, depsgraph=depsgraph)
+        matrix   = inst.matrix_world.copy()
+        src_name = inst.object.name
+        instance_data_by_emitter[parent_name].append((src_name, new_mesh, matrix))
+
+    scene_collection = bpy.context.scene.collection
+    created = 0
+    emitters_removed: List[str] = []
+
+    for emitter in emitters:
+        data_list = instance_data_by_emitter.get(emitter.name, [])
+        if not data_list:
+            log(f"  No instances found for emitter '{emitter.name}' — skipping.")
+            continue
+
+        log(f"  Creating {len(data_list)} mesh object(s) from '{emitter.name}' particle system...")
+
+        for i, (src_name, new_mesh, matrix) in enumerate(data_list):
+            new_obj = bpy.data.objects.new(f"{src_name}_inst_{i:04d}", new_mesh)
+            new_obj.matrix_world = matrix
+            scene_collection.objects.link(new_obj)
+            created += 1
+
+        # The emitter itself is just the scatter surface — remove it
+        emitter_name = emitter.name  # capture before remove() invalidates the ref
+        log(f"  Removing emitter '{emitter_name}' from scene.")
+        bpy.data.objects.remove(emitter, do_unlink=True)
+        emitters_removed.append(emitter_name)
+
+    return created, emitters_removed
+
+
+# ---------------------------------------------------------------------------
+# Step 3: Convert non-mesh types to mesh
 # ---------------------------------------------------------------------------
 
 NON_MESH_CONVERTIBLE = {'CURVE', 'SURFACE', 'META', 'FONT'}
@@ -791,24 +874,28 @@ def main():
     if bpy.context.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
 
-    # --- Step 1: Instances ---
+    # --- Step 1: Collection instances ---
     log("Step 1: Realizing collection instances...")
     n_instances = realize_instances()
 
-    # --- Step 2: Convert non-mesh ---
-    log("Step 2: Converting non-mesh objects to mesh...")
+    # --- Step 2: Particle system instances ---
+    log("Step 2: Realizing particle system instances (Object/Collection render type)...")
+    n_particle_instances, particle_emitters_removed = realize_particle_instances()
+
+    # --- Step 3: Convert non-mesh ---
+    log("Step 3: Converting non-mesh objects to mesh...")
     n_converted, convert_skipped = convert_to_mesh()
 
-    # --- Step 3: Apply modifiers ---
-    log("Step 3: Applying modifiers...")
+    # --- Step 4: Apply modifiers ---
+    log("Step 4: Applying modifiers...")
     n_mods, mod_warnings = apply_modifiers()
 
-    # --- Step 4: Apply transforms ---
-    log("Step 4: Applying transforms...")
+    # --- Step 5: Apply transforms ---
+    log("Step 5: Applying transforms...")
     n_transforms = apply_transforms()
 
-    # --- Step 5: Bake unsupported shader nodes ---
-    log("Step 5: Baking unsupported shader nodes into textures...")
+    # --- Step 6: Bake unsupported shader nodes ---
+    log("Step 6: Baking unsupported shader nodes into textures...")
     # We need the output dir to save baked textures alongside the USD.
     # Parse it early here just to get the directory.
     import sys, argparse as _ap
@@ -820,17 +907,17 @@ def main():
     _bake_dir = os.path.dirname(os.path.abspath(_parsed.output)) if _parsed.output else "."
     n_baked, bake_warnings = bake_unsupported_nodes(_bake_dir)
 
-    # --- Step 6: Convert Glass BSDF materials ---
-    log("Step 6: Converting Glass BSDF materials to Principled BSDF (opacity=0)...")
+    # --- Step 7: Convert Glass BSDF materials ---
+    log("Step 7: Converting Glass BSDF materials to Principled BSDF (opacity=0)...")
     n_glass, glass_warnings = convert_glass_materials()
 
-    # --- Step 7: Strip unsupported custom properties ---
-    log("Step 7: Stripping unsupported custom properties...")
+    # --- Step 8: Strip unsupported custom properties ---
+    log("Step 8: Stripping unsupported custom properties...")
     n_props_removed = strip_unsupported_custom_props()
 
-    # --- Step 8: Remove hidden cutters ---
+    # --- Step 9: Remove hidden cutters ---
     if REMOVE_RENDER_HIDDEN:
-        log("Step 8: Removing render-hidden helper objects...")
+        log("Step 9: Removing render-hidden helper objects...")
         n_removed, hidden_kept = remove_render_hidden()
     else:
         n_removed = 0
@@ -842,6 +929,9 @@ def main():
     print("  Summary")
     print("=" * 60)
     print(f"  Collection instances realized : {n_instances}")
+    print(f"  Particle instances created    : {n_particle_instances}"
+          + (f" (removed emitters: {', '.join(particle_emitters_removed)})"
+             if particle_emitters_removed else ""))
     print(f"  Objects converted to mesh     : {n_converted}")
     print(f"  Modifiers applied             : {n_mods}")
     print(f"  Objects with transforms fixed : {n_transforms}")
@@ -865,7 +955,7 @@ def main():
 
     print()
     print("  Known limitations (not handled by this script):")
-    print("    - Particle hair / point cloud instances")
+    print("    - Particle hair (strand rendering) — must be baked/exported separately")
     print("    - Volume / VDB objects")
     print("    - Grease Pencil objects")
     print("    - Library-linked objects that cannot be made local")

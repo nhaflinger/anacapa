@@ -143,8 +143,7 @@ void RenderSession::loadScene() {
                 if (auto* dl = dynamic_cast<DirectionalLight*>(l.get()))
                     dl->setHalfAngleDeg(m_settings.lightAngle);
             }
-            spdlog::info("--light-angle {:.2f}°: applied to directional lights",
-                         m_settings.lightAngle);
+
         }
 
         // ---- Override lights: replace all USD lights with a diagnostic light --
