@@ -13,7 +13,14 @@ struct TextureSampler::Impl {
     std::shared_ptr<OIIO::TextureSystem> tsys;
 
     Impl() {
+#if OIIO_VERSION >= OIIO_MAKE_VERSION(2,4,0)
+        // OIIO 2.4+: create() returns shared_ptr<TextureSystem> (Homebrew)
         tsys = OIIO::TextureSystem::create(/*shared=*/true);
+#else
+        // OIIO < 2.4: create() returns TextureSystem* (Ubuntu system packages)
+        tsys.reset(OIIO::TextureSystem::create(/*shared=*/true),
+                   [](OIIO::TextureSystem* ts) { OIIO::TextureSystem::destroy(ts); });
+#endif
     }
 };
 
