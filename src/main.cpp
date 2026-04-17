@@ -36,8 +36,8 @@ int main(int argc, char** argv) {
                    "0.27=sun, 1-5=soft). Turns hard point sources into soft area lights.")
        ->default_val(0.f);
 
-    app.add_flag("--adaptive", settings.adaptive,
-                 "Enable adaptive per-tile sample allocation: base pass + high-variance refinement");
+    app.add_flag("--no-adaptive{false}", settings.adaptive,
+                 "Disable adaptive per-tile sample allocation (on by default)");
     app.add_option("--adaptive-base-spp", settings.adaptiveBaseSpp,
                    "Adaptive: base-pass SPP (0=auto: spp/4, min 16)")
        ->default_val(0);

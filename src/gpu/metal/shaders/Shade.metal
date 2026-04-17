@@ -515,9 +515,11 @@ kernel void shade(
     }
 
     // Accumulate (per-sample; host averages after all samples)
+    float lum = 0.2126f * L.x + 0.7152f * L.y + 0.0722f * L.z;
     device GpuAccumPixel& px_out = accum[pixelIdx];
-    px_out.r      += L.x;
-    px_out.g      += L.y;
-    px_out.b      += L.z;
-    px_out.weight += 1.0f;
+    px_out.r        += L.x;
+    px_out.g        += L.y;
+    px_out.b        += L.z;
+    px_out.weight   += 1.0f;
+    px_out.sumLumSq += lum * lum;
 }

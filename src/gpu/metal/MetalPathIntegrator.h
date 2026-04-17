@@ -32,6 +32,13 @@ public:
 
     void prepare(const SceneView& scene) override;
 
+    bool renderFrame(const SceneView& scene,
+                     uint32_t filmWidth,
+                     uint32_t filmHeight,
+                     uint32_t sampleStart,
+                     uint32_t sampleCount,
+                     Film& film) override;
+
     void renderTile(const SceneView& scene,
                     const TileRequest& tile,
                     uint32_t filmWidth,

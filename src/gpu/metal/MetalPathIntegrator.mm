@@ -342,6 +342,136 @@ void MetalPathIntegrator::prepare(const SceneView& scene) {
 }
 
 // ---------------------------------------------------------------------------
+// renderFrame() — whole-image dispatch; used as the adaptive base pass.
+// ---------------------------------------------------------------------------
+bool MetalPathIntegrator::renderFrame(const SceneView& scene,
+                                       uint32_t filmWidth,
+                                       uint32_t filmHeight,
+                                       uint32_t sampleStart,
+                                       uint32_t sampleCount,
+                                       Film& film)
+{
+    if (!isValid() || !m_impl->preparedOnce) return false;
+
+    TileRequest tile;
+    tile.x0          = 0;
+    tile.y0          = 0;
+    tile.width       = filmWidth;
+    tile.height      = filmHeight;
+    tile.sampleStart = sampleStart;
+    tile.sampleCount = sampleCount;
+
+    id<MTLDevice>       dev = (__bridge id<MTLDevice>)      m_impl->ctx->device();
+    id<MTLCommandQueue> cq  = (__bridge id<MTLCommandQueue>)m_impl->ctx->commandQueue();
+
+    Camera cam = scene.camera.value_or(Camera::makePinhole(
+        {0.f, 0.f, -2.5f}, {0.f, 0.f, 1.f}, {0.f, 1.f, 0.f},
+        50.f, filmWidth, filmHeight));
+
+    GpuCameraParams camParams{};
+    camParams.origin      = {cam.origin.x,         cam.origin.y,         cam.origin.z};
+    camParams.horizontal  = {cam.horizontal.x,      cam.horizontal.y,     cam.horizontal.z};
+    camParams.vertical    = {cam.vertical.x,        cam.vertical.y,       cam.vertical.z};
+    camParams.lowerLeft   = {cam.lowerLeftCorner.x, cam.lowerLeftCorner.y,cam.lowerLeftCorner.z};
+    camParams.imageWidth  = filmWidth;
+    camParams.imageHeight = filmHeight;
+    camParams.samplesPerPixel = sampleCount;
+    camParams.maxDepth        = m_impl->maxDepth;
+    camParams.tileX0     = 0;
+    camParams.tileY0     = 0;
+    camParams.tileWidth  = filmWidth;
+    camParams.tileHeight = filmHeight;
+
+    camParams.hasEnvLight  = 0;
+    camParams.envLe        = {0.f, 0.f, 0.f};
+    camParams.envIntensity = 1.0f;
+    camParams.envRot0 = {1.f, 0.f, 0.f};
+    camParams.envRot1 = {0.f, 1.f, 0.f};
+    camParams.envRot2 = {0.f, 0.f, 1.f};
+    if (scene.envLight) {
+        camParams.hasEnvLight  = 1;
+        camParams.envIntensity = m_impl->envIntensity;
+        camParams.envRot0 = {m_impl->envRot[0].x, m_impl->envRot[0].y, m_impl->envRot[0].z};
+        camParams.envRot1 = {m_impl->envRot[1].x, m_impl->envRot[1].y, m_impl->envRot[1].z};
+        camParams.envRot2 = {m_impl->envRot[2].x, m_impl->envRot[2].y, m_impl->envRot[2].z};
+        static const Vec3f kDirs[] = {
+            {0,1,0},{0.577f,0.577f,0.577f},{-0.577f,0.577f,0.577f},
+                    {0.577f,0.577f,-0.577f},{-0.577f,0.577f,-0.577f},
+        };
+        Spectrum avg{};
+        for (const Vec3f& d : kDirs) avg += scene.envLight->Le({}, {}, d);
+        avg = avg * (1.f / 5.f);
+        camParams.envLe = {avg.x, avg.y, avg.z};
+    }
+
+    size_t accumBytes = filmWidth * filmHeight * sizeof(GpuAccumPixel);
+    id<MTLBuffer> accumMTL = [dev newBufferWithLength:accumBytes
+                                              options:MTLResourceStorageModeShared];
+    id<MTLBuffer> camMTL   = [dev newBufferWithBytes:&camParams
+                                              length:sizeof(GpuCameraParams)
+                                             options:MTLResourceStorageModeShared];
+    uint32_t numLightsVal = m_impl->numLights;
+    uint32_t numMatsVal   = m_impl->numMaterials;
+    id<MTLBuffer> numLightsMTL = [dev newBufferWithBytes:&numLightsVal length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> numMatsMTL   = [dev newBufferWithBytes:&numMatsVal   length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> sampleIdxMTL = [dev newBufferWithLength:sizeof(uint32_t) options:MTLResourceStorageModeShared];
+
+    memset([accumMTL contents], 0, accumBytes);
+
+    id<MTLAccelerationStructure> tlas = (__bridge id<MTLAccelerationStructure>)m_impl->accel->tlas();
+    id<MTLTexture> envTex = m_impl->envTexture ? m_impl->envTexture : m_impl->fallbackEnvTex;
+
+    for (uint32_t s = 0; s < sampleCount; ++s) {
+        *(uint32_t*)[sampleIdxMTL contents] = sampleStart + s;
+
+        id<MTLCommandBuffer>         cmdBuf = [cq commandBuffer];
+        id<MTLComputeCommandEncoder> enc    = [cmdBuf computeCommandEncoder];
+        [enc setComputePipelineState:m_impl->psoShade];
+        [enc setBuffer:camMTL        offset:0 atIndex:0];
+        [enc setBuffer:accumMTL      offset:0 atIndex:1];
+        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->lightBuf->handle() offset:0 atIndex:2];
+        [enc setBuffer:numLightsMTL  offset:0 atIndex:3];
+        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->matBuf->handle()   offset:0 atIndex:4];
+        [enc setBuffer:numMatsMTL    offset:0 atIndex:5];
+        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->normalBuffer()           offset:0 atIndex:6];
+        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->indexBuffer()            offset:0 atIndex:7];
+        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->triMeshIDBuffer()        offset:0 atIndex:8];
+        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->meshVertexOffsetBuffer() offset:0 atIndex:9];
+        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->meshIndexOffsetBuffer()  offset:0 atIndex:10];
+        [enc setBuffer:sampleIdxMTL  offset:0 atIndex:11];
+        [enc setAccelerationStructure:tlas atBufferIndex:12];
+        [enc setTexture:envTex atIndex:0];
+        [enc useResource:tlas usage:MTLResourceUsageRead];
+        for (void* blasVoid : m_impl->accel->blasHandles())
+            [enc useResource:(__bridge id<MTLAccelerationStructure>)blasVoid usage:MTLResourceUsageRead];
+        MTLSize threadsPerGrid        = MTLSizeMake(filmWidth, filmHeight, 1);
+        MTLSize threadsPerThreadgroup = MTLSizeMake(8, 8, 1);
+        [enc dispatchThreads:threadsPerGrid threadsPerThreadgroup:threadsPerThreadgroup];
+        [enc endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+        if (cmdBuf.status == MTLCommandBufferStatusError) {
+            spdlog::error("MetalPathIntegrator::renderFrame GPU error: {}",
+                          cmdBuf.error ? [[cmdBuf.error localizedDescription] UTF8String] : "unknown");
+            return false;
+        }
+    }
+
+    const GpuAccumPixel* accumData = (const GpuAccumPixel*)[accumMTL contents];
+    TileBuffer tb(0, 0, filmWidth, filmHeight);
+    for (uint32_t py = 0; py < filmHeight; ++py) {
+        for (uint32_t px = 0; px < filmWidth; ++px) {
+            const GpuAccumPixel& p = accumData[py * filmWidth + px];
+            float w = p.weight > 0.f ? p.weight : 1.f;
+            tb.add(px, py, p.r / w, p.g / w, p.b / w, w);
+            tb.addLumSq(px, py, p.sumLumSq);
+        }
+    }
+    film.mergeTile(tb);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // renderTile() — dispatch Shade kernel, read back into TileBuffer
 // ---------------------------------------------------------------------------
 void MetalPathIntegrator::renderTile(const SceneView& scene,
@@ -501,7 +631,8 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
         for (uint32_t tx = 0; tx < tileW; ++tx) {
             const GpuAccumPixel& p = accumData[ty * tileW + tx];
             float w = p.weight > 0.f ? p.weight : 1.f;
-            out.add(tx, ty, Spectrum{p.r / w, p.g / w, p.b / w});
+            out.add(tx, ty, p.r / w, p.g / w, p.b / w, w);
+            out.addLumSq(tx, ty, p.sumLumSq);
         }
     }
 }
