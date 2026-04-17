@@ -34,12 +34,14 @@ struct PixelAccumulator {
     std::atomic<float> sumLumSq{0.f};
     std::atomic<uint32_t> count{0};  // reserved / unused
 
+#ifndef __CUDACC__
     void add(float fr, float fg, float fb, float w = 1.f) {
         r.fetch_add(fr * w, std::memory_order_relaxed);
         g.fetch_add(fg * w, std::memory_order_relaxed);
         b.fetch_add(fb * w, std::memory_order_relaxed);
         weight.fetch_add(w,  std::memory_order_relaxed);
     }
+#endif
 
     Spectrum resolve() const {
         float w = weight.load(std::memory_order_relaxed);

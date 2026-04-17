@@ -183,6 +183,17 @@ public:
                             uint32_t filmHeight,
                             ISampler& sampler,
                             TileBuffer& localTile) = 0;
+
+    // Optional: render the entire frame in one call and write directly into
+    // film.  Returns true if the frame was rendered (caller skips tile
+    // dispatch).  Default returns false — tile dispatch is used instead.
+    // Not called for adaptive rendering passes.
+    virtual bool renderFrame(const SceneView& scene,
+                             uint32_t filmWidth,
+                             uint32_t filmHeight,
+                             uint32_t sampleStart,
+                             uint32_t sampleCount,
+                             Film& film) { return false; }
 };
 
 } // namespace anacapa

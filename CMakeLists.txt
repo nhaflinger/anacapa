@@ -12,7 +12,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(ANACAPA_ENABLE_USD    "Build with OpenUSD support (Phase 3)"                OFF)
 option(ANACAPA_ENABLE_OSL    "Build with Open Shading Language support (Phase 4)"  OFF)
 option(ANACAPA_ENABLE_METAL  "Build Metal GPU backend (Phase 5, macOS)"            OFF)
-option(ANACAPA_ENABLE_CUDA   "Build CUDA/OptiX GPU backend (Phase 5)"              OFF)
+option(ANACAPA_ENABLE_CUDA   "Build pure-CUDA GPU backend (Phase 5)"              OFF)
 option(ANACAPA_ENABLE_ASAN   "Build with AddressSanitizer"                         OFF)
 option(ANACAPA_ENABLE_OIDN   "Build with Intel OpenImageDenoise support"           OFF)
 option(ANACAPA_ENABLE_VIEWER "Build SDL2+ImGui progressive render viewer"          OFF)
@@ -76,9 +76,17 @@ if(ANACAPA_ENABLE_OIDN)
 endif()
 
 if(ANACAPA_ENABLE_CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    set(CUDA_ARCH "75" CACHE STRING "CUDA SM architecture (e.g. 75, 86)")
+    set_target_properties(anacapa_lib PROPERTIES
+        CUDA_ARCHITECTURES "${CUDA_ARCH}"
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED ON)
     target_compile_definitions(anacapa_lib PUBLIC ANACAPA_ENABLE_CUDA)
-    add_subdirectory(src/backends/cuda)
+    add_subdirectory(src/gpu/cuda)
 endif()
 
 # ---------------------------------------------------------------------------

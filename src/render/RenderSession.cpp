@@ -5,6 +5,9 @@
 #ifdef ANACAPA_ENABLE_METAL
 #  include "../gpu/metal/MetalPathIntegrator.h"
 #endif
+#ifdef ANACAPA_ENABLE_CUDA
+#  include "../gpu/cuda/CudaPathIntegrator.h"
+#endif
 #include "../sampling/HaltonSampler.h"
 #include "../shading/Lambertian.h"
 #include "../shading/lights/AreaLight.h"
@@ -385,10 +388,19 @@ void RenderSession::render() {
                          "falling back to CPU path tracer");
         }
     }
-#else
-    if (m_settings.interactive)
-        spdlog::warn("--interactive: binary not built with ANACAPA_ENABLE_METAL, "
-                     "using CPU path tracer");
+#endif
+
+#ifdef ANACAPA_ENABLE_CUDA
+    if (m_settings.interactive && !m_integrator) {
+        auto cudaIntegrator = std::make_unique<CudaPathIntegrator>();
+        if (cudaIntegrator->isValid()) {
+            spdlog::info("Interactive mode: using CUDA GPU backend");
+            m_integrator = std::move(cudaIntegrator);
+        } else {
+            spdlog::warn("--interactive: CUDA backend unavailable, "
+                         "falling back to CPU path tracer");
+        }
+    }
 #endif
 
     if (!m_integrator) {
@@ -465,8 +477,14 @@ void RenderSession::render() {
     std::atomic<uint32_t> tilesCompleted{0};
 
     if (!m_settings.adaptive) {
-        // --- Single-pass (non-adaptive) ---
-        runTiles(tiles, totalTiles, tilesCompleted);
+        // --- Single-pass: try whole-frame GPU path first ---
+        bool gpuDone = m_integrator->renderFrame(
+            m_scene,
+            m_settings.imageWidth, m_settings.imageHeight,
+            0, m_settings.samplesPerPixel,
+            *m_film);
+        if (!gpuDone)
+            runTiles(tiles, totalTiles, tilesCompleted);
     } else {
         // --- Adaptive two-pass ---
         uint32_t totalSPP = m_settings.samplesPerPixel;

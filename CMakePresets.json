@@ -63,6 +63,16 @@
       "displayName": "Linux x86_64 (Release)",
       "inherits": "base",
       "binaryDir": "${sourceDir}/build/Linux"
+    },
+    {
+      "name": "linux-x86_64-cuda",
+      "displayName": "Linux x86_64 + CUDA (Release)",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/Linux",
+      "cacheVariables": {
+        "ANACAPA_ENABLE_CUDA": "ON",
+        "CUDA_ARCH": "86"
+      }
     }
   ],
   "buildPresets": [
@@ -81,6 +91,10 @@
     {
       "name": "linux-x86_64",
       "configurePreset": "linux-x86_64"
+    },
+    {
+      "name": "linux-x86_64-cuda",
+      "configurePreset": "linux-x86_64-cuda"
     }
   ]
 }
