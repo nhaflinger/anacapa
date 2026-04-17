@@ -385,13 +385,16 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
         p.transmission = std::max(explicitTransmission, 1.f - opacityVal);
     }
 
-    // Specular: USD UsdPreviewSurface has no separate specular weight input;
-    // use 0 for metals (they have no dielectric specular) and 0.5 for others.
-    // For transmissive materials, set specular weight = 1 so Fresnel is fully evaluated.
-    if (p.transmission > 0.001f && p.metalness.value < 0.001f)
-        p.specular = FloatTOV(1.0f);
-    else
-        p.specular = FloatTOV(p.metalness.value > 0.01f ? 0.f : 0.5f);
+    // Specular: UsdPreviewSurface has an optional inputs:specular weight (0–1,
+    // default 0.5 for dielectrics).  Read it if present; otherwise fall back to
+    // physically-motivated defaults: 0 for metals (no dielectric layer), 1 for
+    // glass (Fresnel must be fully evaluated), 0.5 for ordinary dielectrics.
+    {
+        UsdShadeInput specIn = surface.GetInput(TfToken("specular"));
+        float specularDefault = (p.transmission > 0.001f && p.metalness.value < 0.001f) ? 1.0f
+                              : (p.metalness.value > 0.01f ? 0.f : 0.5f);
+        p.specular = resolveFloatTOV(specIn, specularDefault, stageDir);
+    }
 
     // Clearcoat
     p.coat           = resolveFloatTOV(surface.GetInput(TfToken("clearcoat")), 0.f, stageDir).value;

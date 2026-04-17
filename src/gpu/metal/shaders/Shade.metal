@@ -338,8 +338,10 @@ kernel void shade(
     // accum is tile-sized; use local coordinates for the write index
     uint pixelIdx = gid.y * cam.tileWidth + gid.x;
 
-    // Per-sample RNG seed
-    uint rng = pcg(pixelIdx ^ (sampleIndex * 2654435761u));
+    // Per-sample RNG seed — use global pixel position so tiles at different
+    // screen positions produce different noise patterns.
+    uint globalPixelIdx = py * cam.imageWidth + px;
+    uint rng = pcg(pcg(globalPixelIdx) ^ (sampleIndex * 2654435761u));
 
     // Generate camera ray
     float jx = rand01(rng);
@@ -476,7 +478,7 @@ kernel void shade(
             continue;
 
         } else if (mat.type == kMatGGX && mat.roughness < 0.95f) {
-            float alpha2 = pow(mat.roughness * mat.roughness, 2.0f);
+            float alpha2 = mat.roughness * mat.roughness;  // GGX alpha = roughness^2
             float3 wmLocal = sampleGGX(rand2(rng), alpha2);
             float3 wh = toWorld(wmLocal, n);
             if (dot(wh, n) < 0.0f) wh = -wh;

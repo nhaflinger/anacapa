@@ -403,6 +403,10 @@ void RenderSession::render() {
     }
 #endif
 
+    if (m_settings.interactive && !m_integrator)
+        spdlog::warn("--interactive: GPU backend unavailable, "
+                     "using CPU path tracer");
+
     if (!m_integrator) {
         if (m_settings.integrator == IntegratorType::BDPT)
             m_integrator = std::make_unique<BDPTIntegrator>(m_settings.maxDepth,
