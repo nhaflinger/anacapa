@@ -126,6 +126,7 @@ struct GpuCameraParams {
 // ---------------------------------------------------------------------------
 struct GpuAccumPixel {
     float r, g, b, weight;
+    float sumLumSq;  // sum(luminance(sample)^2) — needed for variance-based adaptive sampling
 };
 
 // ---------------------------------------------------------------------------

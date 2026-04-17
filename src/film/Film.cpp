@@ -118,7 +118,7 @@ bool Film::denoise() {
 
     m_denoised.resize(N * 3);
 
-    OIDNDevice device = oidnNewDevice(OIDN_DEVICE_TYPE_DEFAULT);
+    OIDNDevice device = oidnNewDevice(OIDN_DEVICE_TYPE_CPU);
     oidnCommitDevice(device);
 
     OIDNFilter filter = oidnNewFilter(device, "RT");

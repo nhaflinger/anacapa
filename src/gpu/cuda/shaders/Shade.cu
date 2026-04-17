@@ -435,7 +435,8 @@ void shade(LaunchParams params)
     uint32_t py = params.cam.tileY0 + ty;
     if (px >= params.cam.imageWidth || py >= params.cam.imageHeight) return;
 
-    uint32_t pixelIdx  = ty * params.cam.tileWidth + tx;
+    uint32_t pixelIdx       = ty * params.cam.tileWidth + tx;
+    uint32_t globalPixelIdx = py * params.cam.imageWidth + px;
     uint32_t nSamples  = params.cam.samplesPerPixel;
 
     float3 origin = make3(params.cam.origin);
@@ -443,11 +444,11 @@ void shade(LaunchParams params)
     float3 vert   = make3(params.cam.vertical);
     float3 ll     = make3(params.cam.lowerLeft);
 
-    float rAcc = 0.0f, gAcc = 0.0f, bAcc = 0.0f;
+    float rAcc = 0.0f, gAcc = 0.0f, bAcc = 0.0f, lumSqAcc = 0.0f;
 
     for (uint32_t s = 0; s < nSamples; ++s) {
 
-    uint32_t rng = pcg(pixelIdx ^ ((params.sampleIndex + s) * 2654435761u));
+    uint32_t rng = pcg(pcg(globalPixelIdx) ^ ((params.sampleIndex + s) * 2654435761u));
 
     // Camera ray
     float jx = rand01(rng);
@@ -580,12 +581,15 @@ void shade(LaunchParams params)
     rAcc += L.x;
     gAcc += L.y;
     bAcc += L.z;
+    float lum = 0.2126f * L.x + 0.7152f * L.y + 0.0722f * L.z;
+    lumSqAcc += lum * lum;
 
     } // end sample loop
 
     GpuAccumPixel& out = params.accum[pixelIdx];
-    out.r      += rAcc;
-    out.g      += gAcc;
-    out.b      += bAcc;
-    out.weight += float(nSamples);
+    out.r        += rAcc;
+    out.g        += gAcc;
+    out.b        += bAcc;
+    out.weight   += float(nSamples);
+    out.sumLumSq += lumSqAcc;
 }

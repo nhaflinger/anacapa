@@ -380,7 +380,8 @@ bool CudaPathIntegrator::renderFrame(const SceneView& scene,
         for (uint32_t px = 0; px < filmWidth; ++px) {
             const GpuAccumPixel& p = h_accum[py * filmWidth + px];
             float w = p.weight > 0.f ? p.weight : 1.f;
-            tb.add(px, py, p.r / w, p.g / w, p.b / w);
+            tb.add(px, py, p.r / w, p.g / w, p.b / w, w);
+            tb.addLumSq(px, py, p.sumLumSq);
         }
     }
     film.mergeTile(tb);
@@ -426,7 +427,8 @@ void CudaPathIntegrator::renderTile(const SceneView& scene,
         for (uint32_t tx = 0; tx < tileW; ++tx) {
             const GpuAccumPixel& p = h_accum[ty * tileW + tx];
             float w = p.weight > 0.f ? p.weight : 1.f;
-            out.add(tx, ty, Spectrum{p.r / w, p.g / w, p.b / w});
+            out.add(tx, ty, p.r / w, p.g / w, p.b / w, w);
+            out.addLumSq(tx, ty, p.sumLumSq);
         }
     }
 }

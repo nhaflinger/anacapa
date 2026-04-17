@@ -71,7 +71,12 @@
       "binaryDir": "${sourceDir}/build/Linux",
       "cacheVariables": {
         "ANACAPA_ENABLE_CUDA": "ON",
-        "CUDA_ARCH": "86"
+        "CUDA_ARCH": "86",
+        "ANACAPA_ENABLE_USD": "ON",
+        "USD_ROOT": "$env{HOME}/usd",
+        "ANACAPA_ENABLE_OIDN": "ON",
+        "OpenImageDenoise_DIR": "$env{HOME}/oidn/lib/cmake/OpenImageDenoise-2.3.0",
+        "CMAKE_PREFIX_PATH": "$env{HOME}/usd/lib/cmake/OpenSubdiv"
       }
     }
   ],

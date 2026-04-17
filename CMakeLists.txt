@@ -9,12 +9,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # ---------------------------------------------------------------------------
 # Options
 # ---------------------------------------------------------------------------
-option(ANACAPA_ENABLE_USD    "Build with OpenUSD support (Phase 3)"                OFF)
+option(ANACAPA_ENABLE_USD    "Build with OpenUSD support (Phase 3)"                ON)
 option(ANACAPA_ENABLE_OSL    "Build with Open Shading Language support (Phase 4)"  OFF)
 option(ANACAPA_ENABLE_METAL  "Build Metal GPU backend (Phase 5, macOS)"            OFF)
 option(ANACAPA_ENABLE_CUDA   "Build pure-CUDA GPU backend (Phase 5)"              OFF)
 option(ANACAPA_ENABLE_ASAN   "Build with AddressSanitizer"                         OFF)
-option(ANACAPA_ENABLE_OIDN   "Build with Intel OpenImageDenoise support"           OFF)
+option(ANACAPA_ENABLE_OIDN   "Build with Intel OpenImageDenoise support"           ON)
 option(ANACAPA_ENABLE_VIEWER "Build SDL2+ImGui progressive render viewer"          OFF)
 
 # ---------------------------------------------------------------------------
