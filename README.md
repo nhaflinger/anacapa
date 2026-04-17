@@ -18,7 +18,7 @@ Named after Anacapa Island, part of California's Channel Islands.
 - **HDRI dome lights** — equirectangular EXR/HDR with 2D piecewise-constant importance sampling
 - **Depth of field** — thin-lens model; f-stop and focus distance from the USD camera or CLI override
 - **OSL shading language** — optional (`-DANACAPA_ENABLE_OSL=ON`)
-- **GPU-accelerated interactive rendering** — Metal backend (`--interactive`) for Apple Silicon (hardware ray tracing via `MTLAccelerationStructure`); CUDA+OptiX backend planned for NVIDIA
+- **GPU-accelerated interactive rendering** — Metal backend (`--interactive`) for Apple Silicon (hardware ray tracing via `MTLAccelerationStructure`); pure-CUDA backend for NVIDIA GPUs (WSL2 and Linux)
 - **Progressive render viewer** — SDL2 + Dear ImGui live preview with 8 comparison slots and real-time color controls (exposure, contrast, saturation, temperature)
 - **Zero compiled third-party dependencies** in the core renderer
 
@@ -184,7 +184,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 | `--shutter-close` | `0` | Shutter close override (1 = `endTimeCode`); leave at 0 to use the scene's time range |
 | `--denoise` | off | Run Intel OIDN denoiser after rendering |
 | `--write-aovs` | off | Include albedo and normals layers in the output EXR |
-| `--interactive` | off | Use Metal GPU backend for fast preview (Apple Silicon) |
+| `--interactive` | off | Use GPU backend for fast preview — Metal on Apple Silicon, CUDA on NVIDIA |
 | `--png` | — | Write ACES-tonemapped sRGB PNG alongside the EXR |
 | `--exposure` | `0` | EV exposure adjustment for `--png` output (stops; positive = brighter) |
 | `--override-lights` | off | Replace all scene lights with a single white directional light (isolate material issues) |
@@ -206,7 +206,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 | Emissive surfaces (large area lights) | `path` | Large lights are easy for NEE to hit; BDPT connection overhead not worth it |
 | Outdoor / HDRI dome lighting | `path` | Sky covers a wide solid angle; random scatter hits it reliably |
 | Heavily occluded scenes (corners, crevices) | `bdpt` + `--adaptive` | BDPT handles indirect light better; adaptive concentrates samples where variance is highest |
-| Fast preview / interactive | `path` + `--interactive` | Metal GPU backend only supports path tracing |
+| Fast preview / interactive | `path` + `--interactive` | GPU backend only supports path tracing |
 | Unknown / general | `bdpt` | Default; handles more scenarios well at the cost of slightly higher per-sample overhead |
 
 Both integrators support `--adaptive` sampling. As a rule of thumb: if your scene has difficult light transport (small lights, glass, deep indirection), prefer `bdpt`. If your scene is large and open with broad lighting, `path` is faster per sample and converges equally well.
@@ -345,9 +345,13 @@ For interactive EXR viewing with layer switching:
 
 ## Interactive (GPU) Mode
 
-Pass `--interactive` to use the Metal GPU backend instead of the CPU path tracer. Intended for fast iteration — checking composition, previewing lighting — where speed matters more than accuracy.
+Pass `--interactive` to use the GPU backend instead of the CPU path tracer. Intended for fast iteration — checking composition, previewing lighting — where speed matters more than accuracy.
 
-The GPU backend requires a build with `ANACAPA_ENABLE_METAL` (enabled via the `macos-arm64-usd` preset). If Metal cannot be initialised the renderer falls back to CPU with a warning.
+Two backends are supported:
+- **Metal** (Apple Silicon) — hardware ray tracing via `MTLAccelerationStructure`; requires `ANACAPA_ENABLE_METAL` (enabled via the `macos-arm64-usd` preset)
+- **CUDA** (NVIDIA, Linux/WSL2) — pure-CUDA software BVH path tracer; requires `ANACAPA_ENABLE_CUDA` (enabled via the `linux-x86_64-cuda` preset)
+
+If the GPU backend cannot be initialised the renderer falls back to CPU with a warning.
 
 ### Performance
 
@@ -356,6 +360,12 @@ Measured on Apple M3 Pro, 400×400 @ 64 spp:
 | Scene | CPU (BDPT, 11 threads) | GPU (Metal) | Speedup |
 |---|---|---|---|
 | Cornell box (36 tris) | ~1168 ms | ~301 ms | ~3.9× |
+
+Measured on Linux/WSL2 (NVIDIA RTX A400, 10 CPU threads), 800×800:
+
+| Scene | CPU (path, 256 spp) | GPU CUDA (256 spp) | Speedup |
+|---|---|---|---|
+| Blender 3.5 splash (4.4M tris) | ~83.7 s | ~23.1 s | ~3.6× |
 
 ### Simplifications vs. the CPU renderer
 
@@ -527,7 +537,7 @@ All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable
 | 4 | Complete | OpenUSD scene loading (geometry, materials, lights, camera) |
 | 5 | Complete | GGX `standard_surface` BSDF, HDRI dome lights, depth of field |
 | 6 | Complete | Transformation motion blur (time-sampled USD xforms, temporal BVH, per-ray time) |
-| 7 | In Progress | Metal backend (Apple Silicon), CUDA+OptiX backend (NVIDIA) |
+| 7 | Complete | Metal backend (Apple Silicon), pure-CUDA backend (NVIDIA/Linux/WSL2) |
 
 ## License
 

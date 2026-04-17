@@ -498,11 +498,20 @@ void RenderSession::render() {
         baseSPP = std::min(baseSPP, totalSPP);
         uint32_t extraSPP = totalSPP - baseSPP;
 
-        // Base pass
-        for (auto& t : tiles) { t.sampleStart = 0; t.sampleCount = baseSPP; }
-        uint32_t totalAdaptive = totalTiles; // will grow after variance is known
+        // Base pass — use whole-frame GPU dispatch if available (same path as
+        // non-adaptive), falling back to per-tile dispatch for CPU integrators.
         spdlog::info("  Adaptive base pass: {} spp", baseSPP);
-        runTiles(tiles, totalTiles, tilesCompleted);
+        bool baseGpuDone = m_integrator->renderFrame(
+            m_scene,
+            m_settings.imageWidth, m_settings.imageHeight,
+            0, baseSPP,
+            *m_film);
+        if (!baseGpuDone) {
+            for (auto& t : tiles) { t.sampleStart = 0; t.sampleCount = baseSPP; }
+            runTiles(tiles, totalTiles, tilesCompleted);
+        } else {
+            tilesCompleted.store(totalTiles);
+        }
 
         if (extraSPP > 0) {
             // Compute per-tile variance score = average pixel variance in tile
