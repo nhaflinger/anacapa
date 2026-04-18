@@ -83,6 +83,7 @@ int main(int argc, char** argv) {
                  "Replace all scene materials with white Lambertian "
                  "(useful for isolating lighting issues from material issues)");
 
+
     app.add_option("--png", settings.pngPath,
                    "Write an ACES-tonemapped sRGB PNG for easy comparison (e.g. out.png)");
     app.add_option("--exposure", settings.exposure,

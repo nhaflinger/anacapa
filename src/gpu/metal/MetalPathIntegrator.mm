@@ -421,6 +421,24 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     id<MTLAccelerationStructure> tlas = (__bridge id<MTLAccelerationStructure>)m_impl->accel->tlas();
     id<MTLTexture> envTex = m_impl->envTexture ? m_impl->envTexture : m_impl->fallbackEnvTex;
 
+    // Merge interval: update the film every N samples so the progressive
+    // preview watcher sees incremental updates during the base pass.
+    constexpr uint32_t kMergeInterval = 4;
+
+    auto flushToFilm = [&]() {
+        const GpuAccumPixel* accumData = (const GpuAccumPixel*)[accumMTL contents];
+        TileBuffer tb(0, 0, filmWidth, filmHeight);
+        for (uint32_t py = 0; py < filmHeight; ++py) {
+            for (uint32_t px = 0; px < filmWidth; ++px) {
+                const GpuAccumPixel& p = accumData[py * filmWidth + px];
+                float w = p.weight > 0.f ? p.weight : 1.f;
+                tb.add(px, py, p.r / w, p.g / w, p.b / w, w);
+                tb.addLumSq(px, py, p.sumLumSq);
+            }
+        }
+        film.mergeTile(tb);
+    };
+
     for (uint32_t s = 0; s < sampleCount; ++s) {
         *(uint32_t*)[sampleIdxMTL contents] = sampleStart + s;
 
@@ -455,19 +473,14 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
                           cmdBuf.error ? [[cmdBuf.error localizedDescription] UTF8String] : "unknown");
             return false;
         }
+
+        // Progressive update — flush every kMergeInterval samples
+        if ((s + 1) % kMergeInterval == 0)
+            flushToFilm();
     }
 
-    const GpuAccumPixel* accumData = (const GpuAccumPixel*)[accumMTL contents];
-    TileBuffer tb(0, 0, filmWidth, filmHeight);
-    for (uint32_t py = 0; py < filmHeight; ++py) {
-        for (uint32_t px = 0; px < filmWidth; ++px) {
-            const GpuAccumPixel& p = accumData[py * filmWidth + px];
-            float w = p.weight > 0.f ? p.weight : 1.f;
-            tb.add(px, py, p.r / w, p.g / w, p.b / w, w);
-            tb.addLumSq(px, py, p.sumLumSq);
-        }
-    }
-    film.mergeTile(tb);
+    // Final flush (catches remainder if sampleCount % kMergeInterval != 0)
+    flushToFilm();
     return true;
 }
 

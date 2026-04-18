@@ -494,7 +494,7 @@ void RenderSession::render() {
         uint32_t totalSPP = m_settings.samplesPerPixel;
         uint32_t baseSPP  = m_settings.adaptiveBaseSpp > 0
                             ? m_settings.adaptiveBaseSpp
-                            : std::max(16u, totalSPP / 4);
+                            : std::min(32u, std::max(16u, totalSPP / 16));
         baseSPP = std::min(baseSPP, totalSPP);
         uint32_t extraSPP = totalSPP - baseSPP;
 

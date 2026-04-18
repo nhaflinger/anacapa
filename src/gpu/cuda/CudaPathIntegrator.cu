@@ -352,9 +352,25 @@ bool CudaPathIntegrator::renderFrame(const SceneView& scene,
     dim3 block(16, 16, 1);
     dim3 grid((filmWidth + 15) / 16, (filmHeight + 15) / 16, 1);
 
-    // One kernel per sample: keeps each dispatch short enough to avoid the
-    // GPU watchdog (TDR) killing kernels that run > ~2 s on display adapters.
-    // All kernels are queued on the same stream before the single sync.
+    // One kernel per sample — keeps dispatches short to avoid GPU watchdog.
+    // Flush to film every kMergeInterval samples for progressive preview.
+    constexpr uint32_t kMergeInterval = 4;
+
+    auto flushToFilm = [&]() {
+        std::vector<GpuAccumPixel> h_accum;
+        d_accum.download(h_accum);
+        TileBuffer tb(0, 0, filmWidth, filmHeight);
+        for (uint32_t py = 0; py < filmHeight; ++py) {
+            for (uint32_t px = 0; px < filmWidth; ++px) {
+                const GpuAccumPixel& p = h_accum[py * filmWidth + px];
+                float w = p.weight > 0.f ? p.weight : 1.f;
+                tb.add(px, py, p.r / w, p.g / w, p.b / w, w);
+                tb.addLumSq(px, py, p.sumLumSq);
+            }
+        }
+        film.mergeTile(tb);
+    };
+
     for (uint32_t s = 0; s < sampleCount; ++s) {
         LaunchParams params{};
         m_impl->fillLaunchParams(params, scene,
@@ -363,28 +379,20 @@ bool CudaPathIntegrator::renderFrame(const SceneView& scene,
             sampleStart + s, 1,
             d_accum.ptr());
         shade<<<grid, block, 0, stream>>>(params);
-    }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        fprintf(stderr, "[error] CudaPathIntegrator::renderFrame kernel: %s\n",
-                cudaGetErrorString(err));
-        return false;
-    }
-
-    std::vector<GpuAccumPixel> h_accum;
-    d_accum.download(h_accum);
-
-    TileBuffer tb(0, 0, filmWidth, filmHeight);
-    for (uint32_t py = 0; py < filmHeight; ++py) {
-        for (uint32_t px = 0; px < filmWidth; ++px) {
-            const GpuAccumPixel& p = h_accum[py * filmWidth + px];
-            float w = p.weight > 0.f ? p.weight : 1.f;
-            tb.add(px, py, p.r / w, p.g / w, p.b / w, w);
-            tb.addLumSq(px, py, p.sumLumSq);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            fprintf(stderr, "[error] CudaPathIntegrator::renderFrame kernel: %s\n",
+                    cudaGetErrorString(err));
+            return false;
         }
+
+        if ((s + 1) % kMergeInterval == 0)
+            flushToFilm();
     }
-    film.mergeTile(tb);
+
+    // Final flush
+    flushToFilm();
     return true;
 }
 
