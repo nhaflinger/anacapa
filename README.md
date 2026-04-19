@@ -538,6 +538,7 @@ All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable
 | 5 | Complete | GGX `standard_surface` BSDF, HDRI dome lights, depth of field |
 | 6 | Complete | Transformation motion blur (time-sampled USD xforms, temporal BVH, per-ray time) |
 | 7 | Complete | Metal backend (Apple Silicon), pure-CUDA backend (NVIDIA/Linux/WSL2) |
+| 8 | In Progress | MaterialX/OSL shading — OpenPBR terminal resolution, UsdPreviewSurface texture fallback, JSON sidecar extraction |
 
 ## License
 

@@ -30,8 +30,10 @@
 #include <pxr/base/vt/array.h>
 
 #include <spdlog/spdlog.h>
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <string>
 #include <unordered_map>
 
@@ -108,88 +110,133 @@ struct UVTextureInfo {
     std::string outputChannel;
 };
 
-// resolveUVTexture — extract texture info from a UsdUVTexture shader node.
-// Also follows the st input to pick up UsdTransform2d UV transforms.
-// stageDir: directory of the USD file, used to resolve relative texture paths.
+// resolveAssetPath — shared helper for reading an SdfAssetPath input and
+// resolving it to an absolute file path using stageDir.
+static std::string resolveAssetPath(const UsdShadeInput& fileIn,
+                                     const std::string& stageDir) {
+    if (!fileIn) return {};
+    SdfAssetPath ap;
+    if (!fileIn.Get(&ap)) return {};
+    if (!ap.GetResolvedPath().empty()) return ap.GetResolvedPath();
+    const std::string& asset = ap.GetAssetPath();
+    if (asset.empty()) return {};
+    if (asset[0] == '/') return asset;
+    return stageDir.empty() ? asset : stageDir + "/" + asset;
+}
+
+// resolveUVTexture — extract texture info from a shader node.
+// Handles both UsdUVTexture (UsdPreviewSurface) and MaterialX ND_image_*
+// nodes (Blender MaterialX export with generate_materialx_network=True).
+// Also follows UV-transform connections (UsdTransform2d / ND_place2d_*).
 // Returns true if a valid file path was found.
 static bool resolveUVTexture(const UsdShadeShader& texShader,
                               const std::string& stageDir,
                               UVTextureInfo& out) {
     TfToken shaderId;
     texShader.GetShaderId(&shaderId);
-    if (shaderId != TfToken("UsdUVTexture")) return false;
+    const std::string& sId = shaderId.GetString();
 
-    UsdShadeInput fileIn = texShader.GetInput(TfToken("file"));
-    if (fileIn) {
-        SdfAssetPath ap;
-        if (fileIn.Get(&ap)) {
-            // Prefer the USD-resolved absolute path; fall back to manual join
-            // with the stage directory for relative paths.
-            if (!ap.GetResolvedPath().empty()) {
-                out.path = ap.GetResolvedPath();
-            } else if (!ap.GetAssetPath().empty()) {
-                const std::string& asset = ap.GetAssetPath();
-                if (!asset.empty() && asset[0] == '/') {
-                    out.path = asset;  // already absolute
-                } else if (!stageDir.empty()) {
-                    out.path = stageDir + "/" + asset;
-                } else {
-                    out.path = asset;
+    // -----------------------------------------------------------------------
+    // UsdUVTexture — UsdPreviewSurface texture node
+    // -----------------------------------------------------------------------
+    if (shaderId == TfToken("UsdUVTexture")) {
+        out.path = resolveAssetPath(texShader.GetInput(TfToken("file")), stageDir);
+
+        UsdShadeInput fbIn = texShader.GetInput(TfToken("fallback"));
+        if (fbIn) fbIn.Get(&out.fallback);
+
+        UsdShadeInput scaleIn = texShader.GetInput(TfToken("scale"));
+        if (scaleIn) scaleIn.Get(&out.scale);
+
+        UsdShadeInput biasIn = texShader.GetInput(TfToken("bias"));
+        if (biasIn) biasIn.Get(&out.bias);
+
+        // sourceColorSpace: "sRGB" or "auto" → gamma-encoded; "raw" → linear.
+        UsdShadeInput csIn = texShader.GetInput(TfToken("sourceColorSpace"));
+        if (csIn) {
+            TfToken cs;
+            if (csIn.Get(&cs))
+                out.isSRGB = (cs == TfToken("sRGB") || cs == TfToken("auto"));
+        } else {
+            // No sourceColorSpace → default "auto" treats 8-bit as sRGB.
+            out.isSRGB = true;
+        }
+
+        // Follow st → UsdTransform2d for UV transforms
+        UsdShadeInput stIn = texShader.GetInput(TfToken("st"));
+        if (stIn && stIn.HasConnectedSource()) {
+            UsdShadeSourceInfoVector stSources = stIn.GetConnectedSources();
+            if (!stSources.empty()) {
+                UsdShadeShader stShader(stSources[0].source.GetPrim());
+                if (stShader) {
+                    TfToken stId;
+                    stShader.GetShaderId(&stId);
+                    if (stId == TfToken("UsdTransform2d")) {
+                        GfVec2f sc{1.f, 1.f}, tr{0.f, 0.f};
+                        float   rot = 0.f;
+                        UsdShadeInput scIn  = stShader.GetInput(TfToken("scale"));
+                        UsdShadeInput trIn  = stShader.GetInput(TfToken("translation"));
+                        UsdShadeInput rotIn = stShader.GetInput(TfToken("rotation"));
+                        if (scIn)  scIn.Get(&sc);
+                        if (trIn)  trIn.Get(&tr);
+                        if (rotIn) rotIn.Get(&rot);
+                        out.uvScale       = {sc[0], sc[1]};
+                        out.uvTranslation = {tr[0], tr[1]};
+                        out.uvRotation    = rot;
+                    }
                 }
             }
         }
+        return !out.path.empty();
     }
 
-    UsdShadeInput fbIn = texShader.GetInput(TfToken("fallback"));
-    if (fbIn) fbIn.Get(&out.fallback);
+    // -----------------------------------------------------------------------
+    // MaterialX ND_image_* texture nodes (Blender MaterialX export)
+    // Node IDs: ND_image_color3, ND_image_color4, ND_image_float,
+    //           ND_image_vector2, ND_image_vector3
+    // -----------------------------------------------------------------------
+    if (sId.size() > 9 && sId.substr(0, 9) == "ND_image_") {
+        out.path = resolveAssetPath(texShader.GetInput(TfToken("file")), stageDir);
 
-    UsdShadeInput scaleIn = texShader.GetInput(TfToken("scale"));
-    if (scaleIn) scaleIn.Get(&out.scale);
+        // ND_image nodes don't have a separate "fallback" — the caller's
+        // fallback stays as-is (set before calling resolveUVTexture).
 
-    UsdShadeInput biasIn = texShader.GetInput(TfToken("bias"));
-    if (biasIn) biasIn.Get(&out.bias);
+        // MaterialX image nodes are raw linear by default for non-color data.
+        // Color images need linearization. Infer from node type suffix.
+        // "color3" / "color4" → sRGB input files; "float" / "vector*" → linear.
+        out.isSRGB = (sId.find("color") != std::string::npos);
 
-    // sourceColorSpace: "sRGB" or "auto" means the file is gamma-encoded.
-    // "raw" means linear (used for roughness, metallic, normals).
-    UsdShadeInput csIn = texShader.GetInput(TfToken("sourceColorSpace"));
-    if (csIn) {
-        TfToken cs;
-        if (csIn.Get(&cs)) {
-            out.isSRGB = (cs == TfToken("sRGB") || cs == TfToken("auto"));
-        }
-    } else {
-        // No sourceColorSpace authored — default is "auto" which treats
-        // 8-bit files (PNG/JPG) as sRGB. Err on the side of linearizing
-        // color inputs to avoid overly dark renders.
-        out.isSRGB = true;
-    }
-
-    // Follow st → optional UsdTransform2d for UV transforms
-    UsdShadeInput stIn = texShader.GetInput(TfToken("st"));
-    if (stIn && stIn.HasConnectedSource()) {
-        UsdShadeSourceInfoVector stSources = stIn.GetConnectedSources();
-        if (!stSources.empty()) {
-            UsdShadeShader stShader(stSources[0].source.GetPrim());
-            if (stShader) {
-                TfToken stId;
-                stShader.GetShaderId(&stId);
-                if (stId == TfToken("UsdTransform2d")) {
-                    GfVec2f sc{1.f, 1.f}, tr{0.f, 0.f};
-                    float   rot = 0.f;
-                    UsdShadeInput scIn  = stShader.GetInput(TfToken("scale"));
-                    UsdShadeInput trIn  = stShader.GetInput(TfToken("translation"));
-                    UsdShadeInput rotIn = stShader.GetInput(TfToken("rotation"));
-                    if (scIn)  scIn.Get(&sc);
-                    if (trIn)  trIn.Get(&tr);
-                    if (rotIn) rotIn.Get(&rot);
-                    out.uvScale       = {sc[0], sc[1]};
-                    out.uvTranslation = {tr[0], tr[1]};
-                    out.uvRotation    = rot;
+        // Follow texcoord → ND_place2d_* for UV transforms.
+        // Blender uses ND_place2d_vector2 with inputs: scale (Vec2), offset (Vec2), rotate (float, degrees).
+        UsdShadeInput tcIn = texShader.GetInput(TfToken("texcoord"));
+        if (tcIn && tcIn.HasConnectedSource()) {
+            UsdShadeSourceInfoVector tcSources = tcIn.GetConnectedSources();
+            if (!tcSources.empty()) {
+                UsdShadeShader tcShader(tcSources[0].source.GetPrim());
+                if (tcShader) {
+                    TfToken tcId;
+                    tcShader.GetShaderId(&tcId);
+                    if (tcId.GetString().size() > 11 &&
+                        tcId.GetString().substr(0, 11) == "ND_place2d_") {
+                        GfVec2f sc{1.f, 1.f}, off{0.f, 0.f};
+                        float rot = 0.f;
+                        UsdShadeInput scIn  = tcShader.GetInput(TfToken("scale"));
+                        UsdShadeInput offIn = tcShader.GetInput(TfToken("offset"));
+                        UsdShadeInput rotIn = tcShader.GetInput(TfToken("rotate"));
+                        if (scIn)  scIn.Get(&sc);
+                        if (offIn) offIn.Get(&off);
+                        if (rotIn) rotIn.Get(&rot);
+                        out.uvScale       = {sc[0], sc[1]};
+                        out.uvTranslation = {off[0], off[1]};
+                        out.uvRotation    = rot;
+                    }
                 }
             }
         }
+        return !out.path.empty();
     }
-    return !out.path.empty();
+
+    return false;
 }
 
 // resolveColorTOV — read a color input, returning a SpectrumTOV that carries
@@ -318,12 +365,187 @@ static bool isGlassName(const std::string& name) {
         || lower.find("glazing") != std::string::npos;
 }
 
+// findOpenPBRShader — search a material's prim tree for an
+// ND_open_pbr_surface_surfaceshader node, which Blender 4.x+ emits when
+// generate_materialx_network=True. Returns an invalid shader if not found.
+static UsdShadeShader findOpenPBRShader(const UsdShadeMaterial& mat) {
+    // The OpenPBR shader is wired to outputs:mtlx:surface, not outputs:surface,
+    // so ComputeSurfaceSource() won't find it. Walk children directly.
+    for (const UsdPrim& child : mat.GetPrim().GetAllDescendants()) {
+        if (!child.IsA<UsdShadeShader>()) continue;
+        UsdShadeShader sh(child);
+        TfToken id;
+        sh.GetShaderId(&id);
+        if (id == TfToken("ND_open_pbr_surface_surfaceshader"))
+            return sh;
+    }
+    return UsdShadeShader();
+}
+
+// resolveOpenPBRParams — extract StandardSurfaceMaterial::Params from an
+// ND_open_pbr_surface_surfaceshader node. OpenPBR is a superset of
+// UsdPreviewSurface with better physical parameterisation.
+static StandardSurfaceMaterial::Params resolveOpenPBRParams(
+    const UsdShadeShader& surface, const std::string& stageDir)
+{
+    StandardSurfaceMaterial::Params p;
+
+    // Base layer
+    p.base_color = resolveColorTOV(
+        surface.GetInput(TfToken("base_color")),
+        Spectrum{0.5f, 0.5f, 0.5f}, stageDir);
+    p.roughness = resolveFloatTOV(
+        surface.GetInput(TfToken("specular_roughness")), 0.5f, stageDir);
+    p.metalness = resolveFloatTOV(
+        surface.GetInput(TfToken("base_metalness")), 0.0f, stageDir);
+
+    // IOR / specular
+    p.specular_IOR = resolveFloatTOV(
+        surface.GetInput(TfToken("specular_ior")), 1.5f, stageDir).value;
+    // OpenPBR specular_weight maps to our specular param
+    p.specular = resolveFloatTOV(
+        surface.GetInput(TfToken("specular_weight")), 1.0f, stageDir);
+
+    // Transmission / glass
+    float transmissionWeight = resolveFloatTOV(
+        surface.GetInput(TfToken("transmission_weight")), 0.0f, stageDir).value;
+    p.transmission = transmissionWeight;
+    p.opacity      = FloatTOV(1.0f - transmissionWeight);
+
+    // Emission
+    {
+        float emWeight = resolveFloatTOV(
+            surface.GetInput(TfToken("emission_luminance")), 0.0f, stageDir).value;
+        SpectrumTOV emColor = resolveColorTOV(
+            surface.GetInput(TfToken("emission_color")),
+            Spectrum{1.f, 1.f, 1.f}, stageDir);
+        p.emission_color = emColor;
+        p.emission       = emWeight > 0.f ? emWeight : 0.f;
+    }
+
+    // Coat
+    p.coat           = resolveFloatTOV(
+        surface.GetInput(TfToken("coat_weight")), 0.0f, stageDir).value;
+    p.coat_roughness = resolveFloatTOV(
+        surface.GetInput(TfToken("coat_roughness")), 0.1f, stageDir).value;
+
+    // Normal map — OpenPBR uses geometry_normal input
+    UsdShadeInput normalIn = surface.GetInput(TfToken("geometry_normal"));
+    if (normalIn && normalIn.HasConnectedSource()) {
+        UsdShadeSourceInfoVector nSources = normalIn.GetConnectedSources();
+        if (!nSources.empty()) {
+            UsdShadeShader nShader(nSources[0].source.GetPrim());
+            if (nShader) {
+                UVTextureInfo nInfo;
+                nInfo.fallback = {0.5f, 0.5f, 1.0f, 1.0f};
+                if (resolveUVTexture(nShader, stageDir, nInfo)) {
+                    p.normal_map.path          = nInfo.path;
+                    p.normal_map.value         = {nInfo.fallback[0], nInfo.fallback[1], nInfo.fallback[2]};
+                    p.normal_map.uvScale       = nInfo.uvScale;
+                    p.normal_map.uvTranslation = nInfo.uvTranslation;
+                    p.normal_map.uvRotation    = nInfo.uvRotation;
+                    p.normal_scale             = nInfo.scale[0];
+                    p.normal_bias              = nInfo.bias[0];
+                    p.has_normal_map           = true;
+                }
+            }
+        }
+    }
+
+    // Specular defaults: fully evaluating Fresnel for glass, 0 for metals
+    if (p.transmission > 0.001f && p.metalness.value < 0.001f)
+        p.specular = FloatTOV(1.0f);
+    else if (p.metalness.value > 0.01f)
+        p.specular = FloatTOV(0.0f);
+
+    return p;
+}
+
+// resolveColorTOVWithFallback — return `primary` if it has a texture path,
+// otherwise return `fallback` (which may have one instead).
+static SpectrumTOV resolveColorTOVWithFallback(const SpectrumTOV& primary,
+                                                const SpectrumTOV& fallback) {
+    return primary.path.empty() ? fallback : primary;
+}
+static FloatTOV resolveFloatTOVWithFallback(const FloatTOV& primary,
+                                             const FloatTOV& fallback) {
+    return primary.path.empty() ? fallback : primary;
+}
+
 // resolveMaterial — walk a UsdShadeMaterial's surface output to find
-// a UsdPreviewSurface shader and extract all material parameters including
+// a surface shader and extract all material parameters including
 // file textures, UV transforms, normal maps, opacity, and clearcoat.
+//
+// Strategy when both OpenPBR and UsdPreviewSurface are present (Blender
+// exports both with generate_materialx_network=True):
+//   - OpenPBR is used for physical params: IOR, coat, transmission, etc.
+//   - For textured inputs (base_color, roughness, metalness, normal),
+//     we prefer whichever network actually has a connected texture.
+//     Blender may generate the OpenPBR terminal with literal constants while
+//     keeping the texture connection only in the UsdPreviewSurface network.
 // ---------------------------------------------------------------------------
 static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                                                     const std::string& stageDir) {
+    // Try OpenPBR (MaterialX) first — richer parameterisation
+    UsdShadeShader openPBR = findOpenPBRShader(mat);
+    if (openPBR) {
+        spdlog::debug("USDLoader: material '{}' using ND_open_pbr_surface",
+                      mat.GetPath().GetString());
+        StandardSurfaceMaterial::Params p = resolveOpenPBRParams(openPBR, stageDir);
+
+        // If UsdPreviewSurface is also present, use it as a texture fallback
+        // for inputs that OpenPBR resolved to a literal (no texture path).
+        // This covers the common Blender case where MaterialX terminal nodes
+        // are generated without ND_image_* children — the textures live only
+        // in the UsdPreviewSurface subgraph.
+        UsdShadeShader preview = mat.ComputeSurfaceSource();
+        TfToken previewId;
+        if (preview) preview.GetShaderId(&previewId);
+        if (preview && previewId == TfToken("UsdPreviewSurface")) {
+            SpectrumTOV pvColor = resolveColorTOV(
+                preview.GetInput(TfToken("diffuseColor")),
+                Spectrum{0.5f,0.5f,0.5f}, stageDir);
+            FloatTOV pvRoughness = resolveFloatTOV(
+                preview.GetInput(TfToken("roughness")), 0.5f, stageDir);
+            FloatTOV pvMetalness = resolveFloatTOV(
+                preview.GetInput(TfToken("metallic")), 0.0f, stageDir);
+            FloatTOV pvOpacity   = resolveFloatTOV(
+                preview.GetInput(TfToken("opacity")), 1.0f, stageDir);
+
+            p.base_color = resolveColorTOVWithFallback(p.base_color, pvColor);
+            p.roughness  = resolveFloatTOVWithFallback(p.roughness,  pvRoughness);
+            p.metalness  = resolveFloatTOVWithFallback(p.metalness,  pvMetalness);
+            p.opacity    = resolveFloatTOVWithFallback(p.opacity,    pvOpacity);
+
+            // Normal map: OpenPBR uses geometry_normal; if not resolved,
+            // fall back to UsdPreviewSurface normal input.
+            if (!p.has_normal_map) {
+                UsdShadeInput pvNormalIn = preview.GetInput(TfToken("normal"));
+                if (pvNormalIn && pvNormalIn.HasConnectedSource()) {
+                    UsdShadeSourceInfoVector nSrcs = pvNormalIn.GetConnectedSources();
+                    if (!nSrcs.empty()) {
+                        UsdShadeShader nSh(nSrcs[0].source.GetPrim());
+                        if (nSh) {
+                            UVTextureInfo nInfo;
+                            nInfo.fallback = {0.5f, 0.5f, 1.0f, 1.0f};
+                            if (resolveUVTexture(nSh, stageDir, nInfo)) {
+                                p.normal_map.path          = nInfo.path;
+                                p.normal_map.value         = {nInfo.fallback[0], nInfo.fallback[1], nInfo.fallback[2]};
+                                p.normal_map.uvScale       = nInfo.uvScale;
+                                p.normal_map.uvTranslation = nInfo.uvTranslation;
+                                p.normal_map.uvRotation    = nInfo.uvRotation;
+                                p.normal_scale             = nInfo.scale[0];
+                                p.normal_bias              = nInfo.bias[0];
+                                p.has_normal_map           = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return std::make_unique<StandardSurfaceMaterial>(p);
+    }
+
     UsdShadeShader surface = mat.ComputeSurfaceSource();
     if (!surface) {
         // No surface shader exported — check if the material name implies glass.
@@ -830,6 +1052,33 @@ LoadedScene loadUSD(const std::string& path,
         if (stagePath.empty()) stagePath = path;
         auto slash = stagePath.rfind('/');
         stageDir = (slash != std::string::npos) ? stagePath.substr(0, slash) : ".";
+    }
+
+    // Try to load the MaterialX JSON sidecar produced by blender_prep_for_usd_export.py.
+    // The sidecar captures the full ND_open_pbr_surface node graph for diagnostic logging.
+    // Texture resolution itself happens through the USD prim connections above (ND_image_*
+    // nodes are now handled by resolveUVTexture); the sidecar provides a human-readable
+    // record and may serve as a fallback in future phases.
+    {
+        std::string sidecarPath = path + ".materials.json";
+        std::ifstream sidecarFile(sidecarPath);
+        if (sidecarFile.is_open()) {
+            try {
+                nlohmann::json sidecar = nlohmann::json::parse(sidecarFile);
+                int matCount = static_cast<int>(sidecar.size());
+                spdlog::info("USDLoader: MaterialX sidecar loaded — {} material(s) in '{}'",
+                             matCount, sidecarPath);
+                for (auto& [matPath, matData] : sidecar.items()) {
+                    int nodeCount = matData.contains("nodes")
+                                    ? static_cast<int>(matData["nodes"].size()) : 0;
+                    spdlog::debug("USDLoader:   material '{}' — {} node(s) in graph",
+                                  matPath, nodeCount);
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("USDLoader: failed to parse MaterialX sidecar '{}': {}",
+                             sidecarPath, e.what());
+            }
+        }
     }
 
     const bool zUp = (UsdGeomGetStageUpAxis(stage) == UsdGeomTokens->z);

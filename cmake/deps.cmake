@@ -27,6 +27,20 @@ set(SPDLOG_FMT_EXTERNAL  OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(spdlog)
 
 # ---------------------------------------------------------------------------
+# nlohmann/json — single-header JSON parser (header-only)
+# Used by USDLoader to read MaterialX JSON sidecars produced by the prep script.
+# ---------------------------------------------------------------------------
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+    GIT_SHALLOW    TRUE
+)
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+set(JSON_Install    OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(nlohmann_json)
+
+# ---------------------------------------------------------------------------
 # CLI11 — single-header command-line parser
 # ---------------------------------------------------------------------------
 FetchContent_Declare(

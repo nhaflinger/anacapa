@@ -272,11 +272,9 @@ def apply_modifiers() -> Tuple[int, List[str]]:
             mod_label = safe_name(mod.name)
             # Skip modifiers that are disabled (unchecked in the stack)
             if not mod.show_render:
-                log(f"  Skipping disabled modifier '{mod_label}' on '{obj.name}'.")
                 continue
             try:
                 bpy.ops.object.modifier_apply(modifier=mod.name)
-                log(f"  Applied modifier '{mod_label}' on '{obj.name}'.")
                 applied += 1
             except Exception as e:
                 warnings.append(
@@ -996,6 +994,10 @@ def main():
         export_normals=True,
         export_materials=True,
         use_instancing=False,
+        generate_preview_surface=True,
+        generate_materialx_network=True,
+        export_textures_mode='NEW',
+        overwrite_textures=False,
     )
     print(f"  Operator result      : {result}")
 
@@ -1009,6 +1011,222 @@ def main():
         alt = os.path.join(blend_dir, os.path.basename(out_path))
         if os.path.exists(alt):
             print(f"  (file found at {alt} instead — path was resolved relative to blend file)")
+    print("=" * 60)
+
+    # -----------------------------------------------------------------------
+    # Extract MaterialX node graphs → JSON sidecar
+    # -----------------------------------------------------------------------
+    if os.path.exists(out_path):
+        _extract_materialx_sidecar(out_path)
+
+
+# ---------------------------------------------------------------------------
+# MaterialX JSON sidecar extractor
+# ---------------------------------------------------------------------------
+def _get_shader_input_value(inp):
+    """Return a JSON-serialisable value for a UsdShadeInput, or None."""
+    try:
+        val = inp.Get()
+    except Exception:
+        return None
+    if val is None:
+        return None
+    # GfVec* → list
+    if hasattr(val, '__len__') and not isinstance(val, str):
+        try:
+            return list(val)
+        except Exception:
+            pass
+    # SdfAssetPath → string
+    if hasattr(val, 'resolvedPath'):
+        return val.resolvedPath or val.path
+    if hasattr(val, 'path'):
+        return val.path
+    # TfToken → string
+    if hasattr(val, 'GetString'):
+        return val.GetString()
+    # scalars
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        pass
+    return str(val)
+
+
+def _follow_connection(src_info):
+    """Extract (prim, source_output_name) from a UsdShadeConnectionSourceInfo
+    (or the older tuple form).  Returns (None, None) on failure."""
+    try:
+        prim = src_info.source.GetPrim()
+        out_name = (src_info.sourceName.GetString()
+                    if hasattr(src_info.sourceName, 'GetString')
+                    else str(src_info.sourceName))
+        return prim, out_name
+    except AttributeError:
+        try:
+            prim = src_info[0].GetPrim()
+            return prim, None
+        except Exception:
+            return None, None
+
+
+def _resolve_through_nodegraph(prim, output_name):
+    """Transparently walk through NodeGraph prims to reach the actual shader
+    that drives the named output.  NodeGraphs are purely structural in
+    MaterialX and carry no per-node parameters we care about.
+
+    Returns the resolved Shader prim (may be prim itself if it is already a
+    Shader, or if the NodeGraph cannot be resolved).
+    """
+    from pxr import UsdShade
+    depth = 0
+    while prim and prim.IsValid() and prim.IsA(UsdShade.NodeGraph) and depth < 8:
+        depth += 1
+        ng = UsdShade.NodeGraph(prim)
+        # Find the named output on the NodeGraph (strip namespace prefix if any)
+        bare_name = output_name.split(":")[-1] if output_name else ""
+        out = ng.GetOutput(bare_name) if bare_name else None
+        if out is None:
+            # Fall back: take the first output
+            outs = ng.GetOutputs()
+            out = outs[0] if outs else None
+        if out is None or not out.HasConnectedSource():
+            break
+        src_infos = out.GetConnectedSources()
+        if not src_infos:
+            break
+        inner_prim, inner_out = _follow_connection(src_infos[0])
+        if not inner_prim or not inner_prim.IsValid():
+            break
+        prim, output_name = inner_prim, inner_out
+    return prim
+
+
+def _collect_node(shader_prim, visited):
+    """Recursively collect a shader node and all nodes connected to its inputs.
+    NodeGraph prims are resolved transparently — the JSON only contains actual
+    Shader nodes with concrete parameters."""
+    from pxr import UsdShade
+    path_str = str(shader_prim.GetPath())
+    if path_str in visited:
+        return visited[path_str]
+
+    node_id = ""
+    id_attr = shader_prim.GetAttribute("info:id")
+    if id_attr and id_attr.IsValid():
+        tok = id_attr.Get()
+        node_id = tok.GetString() if hasattr(tok, 'GetString') else str(tok)
+
+    node_data = {
+        "path": path_str,
+        "id": node_id,
+        "inputs": {},
+        "connected_nodes": {},
+    }
+    visited[path_str] = node_data  # register early to break cycles
+
+    sh = UsdShade.Shader(shader_prim)
+    for inp in sh.GetInputs():
+        name = inp.GetBaseName()
+        if not inp.HasConnectedSource():
+            val = _get_shader_input_value(inp)
+            if val is not None:
+                node_data["inputs"][name] = val
+            continue
+        src_info_list = inp.GetConnectedSources()
+        if not src_info_list:
+            continue
+        connected_prim, source_out = _follow_connection(src_info_list[0])
+        if not connected_prim or not connected_prim.IsValid():
+            continue
+        # Pass through any NodeGraph wrappers to reach the concrete shader
+        connected_prim = _resolve_through_nodegraph(connected_prim, source_out)
+        if connected_prim and connected_prim.IsValid():
+            child_node = _collect_node(connected_prim, visited)
+            node_data["connected_nodes"][name] = child_node["path"]
+
+    return node_data
+
+
+def _extract_materialx_sidecar(usd_path):
+    """
+    Walk all materials in the exported USD looking for ND_open_pbr_surface_surfaceshader
+    nodes (Blender 4.x/5.x MaterialX terminal).  For each material found, traverse the
+    full node graph and write the result to <usd_path>.materials.json alongside the USD.
+    """
+    import json
+    try:
+        from pxr import Usd, UsdShade, Sdf, Tf
+    except ImportError:
+        print("  [MaterialX sidecar] pxr not available in this Python — skipping.")
+        return
+
+    print()
+    print("  Extracting MaterialX node graphs...")
+
+    stage = Usd.Stage.Open(usd_path)
+    if not stage:
+        print("  [MaterialX sidecar] Could not open stage — skipping.")
+        return
+
+    materials_data = {}   # material_path → node dict list
+    visited_nodes = {}    # shared across all materials to avoid duplicate work
+
+    OPEN_PBR_ID = "ND_open_pbr_surface_surfaceshader"
+
+    for prim in stage.Traverse():
+        if not prim.IsA(UsdShade.Material):
+            continue
+        mat = UsdShade.Material(prim)
+        mat_path = str(prim.GetPath())
+
+        # Find any ND_open_pbr_surface_surfaceshader descendant
+        openpbr_shader = None
+        for desc in Usd.PrimRange(prim):
+            if not desc.IsA(UsdShade.Shader):
+                continue
+            id_attr = desc.GetAttribute("info:id")
+            if not (id_attr and id_attr.IsValid()):
+                continue
+            tok = id_attr.Get()
+            node_id = tok.GetString() if hasattr(tok, 'GetString') else str(tok)
+            if node_id == OPEN_PBR_ID:
+                openpbr_shader = desc
+                break
+
+        if openpbr_shader is None:
+            continue
+
+        root_node = _collect_node(openpbr_shader, visited_nodes)
+
+        # Collect all nodes reachable from this material's root
+        # (visited_nodes already has them; gather the unique subtree)
+        def _gather_subtree(node, acc):
+            p = node["path"]
+            if p in acc:
+                return
+            acc[p] = node
+            for child_path in node["connected_nodes"].values():
+                if child_path in visited_nodes:
+                    _gather_subtree(visited_nodes[child_path], acc)
+
+        subtree = {}
+        _gather_subtree(root_node, subtree)
+
+        materials_data[mat_path] = {
+            "root": root_node["path"],
+            "nodes": subtree,
+        }
+
+    if not materials_data:
+        print("  [MaterialX sidecar] No ND_open_pbr_surface_surfaceshader materials found.")
+        return
+
+    sidecar_path = usd_path + ".materials.json"
+    with open(sidecar_path, "w") as f:
+        json.dump(materials_data, f, indent=2)
+
+    print(f"  [MaterialX sidecar] Wrote {len(materials_data)} material(s) → {sidecar_path}")
     print("=" * 60)
 
 

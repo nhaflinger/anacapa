@@ -47,6 +47,7 @@ target_link_libraries(anacapa_lib
     PUBLIC
         OpenImageIO::OpenImageIO
         spdlog::spdlog
+        nlohmann_json::nlohmann_json
 )
 
 # compiler options applied after target exists
