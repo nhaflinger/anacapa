@@ -79,6 +79,9 @@ endif()
 if(ANACAPA_ENABLE_CUDA)
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    # Use shared cudart globally — avoids nvlink trying to open the stub librt.a
+    # that modern glibc ships (librt functions are merged into libc).
+    set(CMAKE_CUDA_RUNTIME_LIBRARY "Shared")
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
     set(CUDA_ARCH "75" CACHE STRING "CUDA SM architecture (e.g. 75, 86)")
