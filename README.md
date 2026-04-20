@@ -306,9 +306,6 @@ oiiotool out.exr --ch "denoised.R,denoised.G,denoised.B" --chnames "R,G,B" -o de
 # Extract albedo
 oiiotool out.exr --ch "albedo.R,albedo.G,albedo.B" --chnames "R,G,B" -o albedo.exr
 
-# Extract normals (remap [-1,1] → [0,1] for viewing)
-oiiotool out.exr --ch "normals.R,normals.G,normals.B" --chnames "R,G,B" \
-  --addc 1,1,1 --mulc 0.5,0.5,0.5 -o normals.exr
 ```
 
 ## Progressive Preview
