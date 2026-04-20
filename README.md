@@ -6,7 +6,7 @@ Named after Anacapa Island, part of California's Channel Islands.
 
 ## Features
 
-- **Unidirectional path tracing (path)** with next event estimation
+- **Unidirectional path tracing (Path)** with next event estimation
 - **Bidirectional path tracing (BDPT)** with multiple importance sampling and Veach MIS weights
 - **OpenUSD scene loading** — geometry, materials, lights, camera, and animated transforms from `.usda`/`.usdc` files
 - **Transformation motion blur** — multi-sample USD xformOps with piecewise-linear interpolation per ray; arbitrary number of time samples supported for curved blur streaks; shutter interval read automatically from the camera prim's `shutter:open`/`shutter:close`, falling back to stage `startTimeCode`/`endTimeCode`

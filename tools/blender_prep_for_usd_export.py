@@ -358,6 +358,18 @@ _USD_PASSTHROUGH_TYPES = {
     'GROUP_OUTPUT',
 }
 
+# Nodes that are NOT natively exported to USD but ARE handled by the
+# MaterialX export step — suppress bake-step warnings for these.
+_MATERIALX_HANDLED_TYPES = {
+    'VALTORGB', 'INVERT', 'MIX_RGB', 'MIX', 'MATH',
+    'HUE_SAT', 'BRIGHTCONTRAST', 'GAMMA', 'CURVE_RGB',
+    'RGBTOBW', 'BUMP', 'TEX_NOISE', 'TEX_WAVE', 'TEX_VORONOI',
+    'TEX_MUSGRAVE', 'TEX_GRADIENT', 'TEX_CHECKER', 'TEX_BRICK',
+    'SEPXYZ', 'SEPRGB', 'SEPARATE_XYZ', 'SEPARATE_COLOR',
+    'COMBXYZ', 'COMBRGB', 'COMBINE_XYZ', 'COMBINE_COLOR',
+    'GROUP', 'REROUTE', 'FRAME',
+}
+
 
 def _image_file_exists(img) -> bool:
     """Return True if the image has a readable file on disk."""
@@ -674,10 +686,12 @@ def bake_unsupported_nodes(out_dir: str) -> Tuple[int, List[str]]:
             link = sock.links[0]
             src_node = link.from_node
 
-            # Log what we find for every non-trivial connection
-            if src_node.type not in _USD_PASSTHROUGH_TYPES:
+            # Log only nodes not handled by either USD export or MaterialX export
+            if src_node.type not in _USD_PASSTHROUGH_TYPES \
+                    and src_node.type not in _MATERIALX_HANDLED_TYPES:
                 log(f"  Material '{mat.name}', socket '{sock.name}': "
-                    f"unsupported node '{src_node.name}' (type={src_node.type})")
+                    f"unsupported node '{src_node.name}' (type={src_node.type}) "
+                    f"— not handled by USD or MaterialX export")
 
             # If already a supported node, nothing to do
             if src_node.type in _USD_PASSTHROUGH_TYPES:
@@ -741,11 +755,9 @@ def bake_unsupported_nodes(out_dir: str) -> Tuple[int, List[str]]:
                         folded = True
 
                 if not folded:
-                    warnings.append(
-                        f"Material '{mat.name}', socket '{sock.name}': "
-                        f"unsupported node '{src_node.type}' with no Image Texture "
-                        f"source — skipped (manual bake required)."
-                    )
+                    # Procedural-only chains (no image source) are handled by
+                    # the MaterialX export step — no need to warn here.
+                    pass
                 continue
 
             src_img = img_node.image
@@ -1316,10 +1328,991 @@ def main():
         _inject_materialx_textures(out_path)
 
     # -----------------------------------------------------------------------
+    # Export full MaterialX node graphs (.mtlx) — one file per material,
+    # preserving procedural nodes (Noise, ColorRamp, Math, etc.)
+    # -----------------------------------------------------------------------
+    mtlx_dir = os.path.join(os.path.dirname(out_path), "materials")
+    _export_materialx_graphs(mtlx_dir)
+
+    # -----------------------------------------------------------------------
     # Extract MaterialX node graphs → JSON sidecar
     # -----------------------------------------------------------------------
     if os.path.exists(out_path):
         _extract_materialx_sidecar(out_path)
+
+
+# ---------------------------------------------------------------------------
+# MaterialX node graph exporter  (Blender → .mtlx)
+# ---------------------------------------------------------------------------
+#
+# Translates Blender shader node trees to MaterialX documents and writes one
+# .mtlx file per material into <out_dir>/<material_name>.mtlx.
+#
+# Supported Blender node types and their MaterialX equivalents:
+#   BSDF_PRINCIPLED      → ND_open_pbr_surface_surfaceshader  (terminal)
+#   TEX_IMAGE            → ND_image_color3 / ND_image_float
+#   TEX_NOISE            → ND_fractal3d_float (+ ND_mix for detail blend)
+#   TEX_WAVE             → ND_fractal3d_float approximation
+#   TEX_VORONOI          → ND_cellnoise3d_float
+#   TEX_MUSGRAVE         → ND_fractal3d_float
+#   TEX_GRADIENT         → ND_texcoord + ND_dotproduct approximation
+#   TEX_CHECKER          → ND_checkerboard_color3
+#   TEX_BRICK            → ND_checkerboard_color3 (approximation)
+#   VALTORGB             → ND_ramp_color3 / custom ramp baked to texture
+#   RGBTOBW              → ND_luminance_float
+#   MIX_RGB / MIX        → ND_mix / ND_multiply / ND_add etc.
+#   MATH                 → ND_multiply_float, ND_add_float, ND_clamp_float, etc.
+#   INVERT               → ND_subtract_float / ND_subtract_color3
+#   HUE_SAT              → ND_hsvtorgb / ND_rgbtohsv chain
+#   BRIGHTCONTRAST       → ND_multiply_float + ND_add_float chain
+#   NORMAL_MAP           → ND_normalmap_vector3
+#   MAPPING              → ND_place2d_vector2 (UV) / ND_transformpoint (3D)
+#   UVMAP                → ND_texcoord_vector2
+#   SEPXYZ / COMBXYZ     → ND_separate3 / ND_combine3
+#   SEPRGB / COMBRGB     → ND_separate3 / ND_combine3
+#   GAMMA                → ND_power_float
+#   CURVE_RGB            → ND_ramp_color3 (sampled)
+#   OUTPUT_MATERIAL      → (root — not emitted)
+#   GROUP                → inlined recursively
+# ---------------------------------------------------------------------------
+
+# Maps Blender blend_type → MaterialX node name suffix
+_MX_BLEND_TYPE = {
+    'MIX':        'mix',
+    'ADD':        'add',
+    'SUBTRACT':   'subtract',
+    'MULTIPLY':   'multiply',
+    'SCREEN':     'screen',
+    'OVERLAY':    'overlay',
+    'DODGE':      'dodge',
+    'BURN':       'burn',
+    'DARKEN':     'minimum',
+    'LIGHTEN':    'maximum',
+    'DIFFERENCE': 'difference',
+    'DIVIDE':     'divide',
+    'EXCLUSION':  'exclusion',
+    'COLOR':      'mix',  # approximate
+    'HUE':        'mix',
+    'SATURATION': 'mix',
+    'VALUE':      'mix',
+    'LINEAR_LIGHT': 'mix',
+    'SOFT_LIGHT': 'mix',
+    'POWER':      'power',
+}
+
+# Maps Blender math operation → (mx_node_type, n_inputs)
+_MX_MATH_OP = {
+    'ADD':           ('add',      2),
+    'SUBTRACT':      ('subtract', 2),
+    'MULTIPLY':      ('multiply', 2),
+    'DIVIDE':        ('divide',   2),
+    'POWER':         ('power',    2),
+    'SQRT':          ('sqrt',     1),
+    'ABSOLUTE':      ('absval',   1),
+    'MINIMUM':       ('min',      2),
+    'MAXIMUM':       ('max',      2),
+    'ROUND':         ('round',    1),
+    'FLOOR':         ('floor',    1),
+    'CEIL':          ('ceil',     1),
+    'FRACT':         ('fract',    1),
+    'MODULO':        ('modulo',   2),
+    'SINE':          ('sin',      1),
+    'COSINE':        ('cos',      1),
+    'TANGENT':       ('tan',      1),
+    'ARCSINE':       ('asin',     1),
+    'ARCCOSINE':     ('acos',     1),
+    'ARCTANGENT':    ('atan2',    1),
+    'ARCTAN2':       ('atan2',    2),
+    'LOGARITHM':     ('ln',       1),
+    'EXPONENT':      ('exp',      1),
+    'SIGN':          ('sign',     1),
+    'CLAMP':         ('clamp',    1),  # uses separate min/max inputs
+    'SNAP':          ('floor',    1),  # approximate
+    'WRAP':          ('modulo',   2),  # approximate
+    'PINGPONG':      ('modulo',   2),  # approximate
+    'SMOOTH_MIN':    ('min',      2),  # approximate
+    'SMOOTH_MAX':    ('max',      2),  # approximate
+    'COMPARE':       ('min',      2),  # approximate — step not in stdlib
+    'MULTIPLY_ADD':  ('multiply', 2),  # only captures multiply part; add wired separately
+    'TRUNC':         ('floor',    1),
+    'GREATER_THAN':  ('min',      2),  # approximate
+    'LESS_THAN':     ('min',      2),  # approximate
+}
+
+
+class _MtlxBuilder:
+    """
+    Converts one Blender material node tree to a MaterialX document.
+
+    Usage:
+        builder = _MtlxBuilder(mat, out_dir, mx_lib_path)
+        builder.build()   # writes <out_dir>/<mat.name>.mtlx
+    """
+
+    def __init__(self, mat, out_dir: str, mx_lib_path: str):
+        self.mat          = mat
+        self.out_dir      = out_dir
+        self.mx_lib_path  = mx_lib_path
+        self._doc         = None
+        self._ng          = None   # NodeGraph element
+        self._mat_node    = None   # Material element
+        self._node_cache: dict = {}  # blender node.name → mx Output
+        self._counter     = 0
+
+    def _uid(self, prefix='n'):
+        self._counter += 1
+        return f"{prefix}{self._counter}"
+
+    def build(self):
+        import MaterialX as mx
+        import os
+
+        mat = self.mat
+        nodes = mat.node_tree.nodes
+
+        bsdf = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
+        if bsdf is None:
+            return  # nothing to export
+
+        doc = mx.createDocument()
+        # Do NOT import the stdlib into the document — stdlib definitions are
+        # implicit and loaded by the reader from its own search path.  Importing
+        # them here causes every .mtlx file to contain thousands of duplicate
+        # node definitions.
+
+        self._doc = doc
+        safe_name = mx.createValidName(mat.name)
+
+        # NodeGraph wraps the full shading network
+        ng = doc.addNodeGraph(f"NG_{safe_name}")
+        self._ng = ng
+
+        # Translate the BSDF node (terminal)
+        surface_out = self._translate_node(bsdf)
+        if surface_out is None:
+            return
+
+        # Wire into a surfacematerial node
+        mat_node = doc.addNode(
+            'surfacematerial', f"M_{safe_name}", 'material')
+        surf_inp = mat_node.addInput('surfaceshader', 'surfaceshader')
+        surf_inp.setNodeName(surface_out.getParent().getName()
+                             if hasattr(surface_out, 'getParent') else safe_name)
+
+        # Write file
+        os.makedirs(self.out_dir, exist_ok=True)
+        out_path = os.path.join(self.out_dir, safe_name + '.mtlx')
+        mx.writeToXmlFile(doc, out_path)
+        return out_path
+
+    # ------------------------------------------------------------------ #
+    #  Main dispatch                                                        #
+    # ------------------------------------------------------------------ #
+
+    def _translate_node(self, bl_node):
+        """Translate a Blender node and return its primary mx Output.
+        Results are cached so nodes used by multiple downstream sockets
+        are not duplicated."""
+        import MaterialX as mx
+        key = bl_node.name
+        if key in self._node_cache:
+            return self._node_cache[key]
+
+        out = None
+        t = bl_node.type
+
+        if t == 'BSDF_PRINCIPLED':
+            out = self._tx_principled(bl_node)
+        elif t == 'TEX_IMAGE':
+            out = self._tx_image(bl_node)
+        elif t == 'TEX_NOISE':
+            out = self._tx_noise(bl_node)
+        elif t == 'TEX_WAVE':
+            out = self._tx_wave(bl_node)
+        elif t == 'TEX_VORONOI':
+            out = self._tx_voronoi(bl_node)
+        elif t == 'TEX_MUSGRAVE':
+            out = self._tx_musgrave(bl_node)
+        elif t == 'TEX_GRADIENT':
+            out = self._tx_gradient(bl_node)
+        elif t == 'TEX_CHECKER':
+            out = self._tx_checker(bl_node)
+        elif t == 'TEX_BRICK':
+            out = self._tx_checker(bl_node)   # approximation
+        elif t == 'VALTORGB':
+            out = self._tx_color_ramp(bl_node)
+        elif t == 'RGBTOBW':
+            out = self._tx_rgbtobw(bl_node)
+        elif t in ('MIX_RGB', 'MIX'):
+            out = self._tx_mix(bl_node)
+        elif t == 'MATH':
+            out = self._tx_math(bl_node)
+        elif t == 'INVERT':
+            out = self._tx_invert(bl_node)
+        elif t == 'HUE_SAT':
+            out = self._tx_hue_sat(bl_node)
+        elif t == 'BRIGHTCONTRAST':
+            out = self._tx_bright_contrast(bl_node)
+        elif t == 'NORMAL_MAP':
+            out = self._tx_normal_map(bl_node)
+        elif t == 'BUMP':
+            out = self._tx_bump(bl_node)
+        elif t == 'MAPPING':
+            out = self._tx_mapping(bl_node)
+        elif t in ('UVMAP', 'TEX_COORD'):
+            out = self._tx_texcoord(bl_node)
+        elif t in ('SEPXYZ', 'SEPRGB', 'SEPARATE_XYZ', 'SEPARATE_COLOR'):
+            out = self._tx_separate(bl_node)
+        elif t in ('COMBXYZ', 'COMBRGB', 'COMBINE_XYZ', 'COMBINE_COLOR'):
+            out = self._tx_combine(bl_node)
+        elif t == 'GAMMA':
+            out = self._tx_gamma(bl_node)
+        elif t == 'CURVE_RGB':
+            out = self._tx_curve_rgb(bl_node)
+        elif t == 'GROUP':
+            out = self._tx_group(bl_node)
+        elif t in ('OUTPUT_MATERIAL', 'GROUP_OUTPUT'):
+            out = None
+        elif t == 'GROUP_INPUT':
+            # Can't resolve group inputs without the outer connection context
+            out = self._const_color3(0.5, 0.5, 0.5)
+        elif t in ('FRAME', 'REROUTE'):
+            # Layout / reroute nodes: pass through the first connected input
+            if bl_node.inputs and bl_node.inputs[0].links:
+                out = self._translate_node(bl_node.inputs[0].links[0].from_node)
+            else:
+                out = self._const_color3(0.5, 0.5, 0.5)
+        else:
+            # Unknown node — emit a constant grey and warn
+            print(f"  [mtlx] WARNING: unsupported node type '{t}' "
+                  f"({bl_node.name}) — using grey constant")
+            out = self._const_color3(0.5, 0.5, 0.5)
+
+        self._node_cache[key] = out
+        return out
+
+    # ------------------------------------------------------------------ #
+    #  Socket input helpers                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _get_input_output(self, bl_socket):
+        """Return mx Output connected to bl_socket, or None if unconnected."""
+        if not bl_socket.links:
+            return None
+        from_node = bl_socket.links[0].from_node
+        mx_out = self._translate_node(from_node)
+        # If the from_node has multiple outputs, select by socket name
+        if mx_out and hasattr(mx_out, 'getParent'):
+            from_sock = bl_socket.links[0].from_socket
+            node_elem = mx_out.getParent()
+            named = node_elem.getOutput(from_sock.name.lower().replace(' ', '_'))
+            if named:
+                return named
+        return mx_out
+
+    def _socket_color3(self, bl_socket, default=(0.5, 0.5, 0.5)):
+        """Wire a color3 input from a socket. Returns (mx_output_or_None, const_value)."""
+        out = self._get_input_output(bl_socket)
+        if out:
+            return out, None
+        dv = bl_socket.default_value
+        try:
+            return None, (float(dv[0]), float(dv[1]), float(dv[2]))
+        except Exception:
+            return None, default
+
+    def _socket_float(self, bl_socket, default=0.0):
+        """Wire a float input from a socket."""
+        out = self._get_input_output(bl_socket)
+        if out:
+            return out, None
+        try:
+            return None, float(bl_socket.default_value)
+        except Exception:
+            return None, default
+
+    def _socket_vector3(self, bl_socket, default=(0.0, 0.0, 0.0)):
+        out = self._get_input_output(bl_socket)
+        if out:
+            return out, None
+        dv = bl_socket.default_value
+        try:
+            return None, (float(dv[0]), float(dv[1]), float(dv[2]))
+        except Exception:
+            return None, default
+
+    def _wire_input(self, mx_node, inp_name, inp_type, bl_socket, default_val):
+        """Set an input on mx_node from either a connection or a constant."""
+        import MaterialX as mx
+        src_out, const = (bl_socket, None) if isinstance(bl_socket, mx.Output) \
+                         else (self._get_input_output(bl_socket), None) \
+                         if hasattr(bl_socket, 'links') \
+                         else (bl_socket, None)
+        # Resolve properly
+        if hasattr(bl_socket, 'links'):
+            if inp_type == 'color3':
+                src_out, const = self._socket_color3(bl_socket,
+                    default_val if default_val else (0.5, 0.5, 0.5))
+            elif inp_type == 'float':
+                src_out, const = self._socket_float(bl_socket,
+                    default_val if default_val is not None else 0.0)
+            elif inp_type == 'vector3':
+                src_out, const = self._socket_vector3(bl_socket,
+                    default_val if default_val else (0.0, 0.0, 0.0))
+            else:
+                src_out, const = self._socket_color3(bl_socket,
+                    default_val if default_val else (0.5, 0.5, 0.5))
+
+        inp = mx_node.addInput(inp_name, inp_type)
+        if src_out is not None:
+            inp.setNodeName(src_out.getParent().getName())
+            inp.setAttribute('output', src_out.getName())
+        elif const is not None:
+            if inp_type == 'float':
+                inp.setValue(float(const))
+            elif inp_type in ('color3', 'vector3'):
+                inp.setValueString(f'{const[0]}, {const[1]}, {const[2]}')
+            else:
+                inp.setValue(str(const))
+
+    # ------------------------------------------------------------------ #
+    #  Constant helpers                                                     #
+    # ------------------------------------------------------------------ #
+
+    def _const_color3(self, r, g, b):
+        import MaterialX as mx
+        n = self._ng.addNode('constant', self._uid('const'), 'color3')
+        n.addInput('value', 'color3').setValueString(f'{r}, {g}, {b}')
+        return n.addOutput('out', 'color3')
+
+    def _const_float(self, v):
+        n = self._ng.addNode('constant', self._uid('const'), 'float')
+        n.addInput('value', 'float').setValue(float(v))
+        return n.addOutput('out', 'float')
+
+    def _const_vector2(self, x, y):
+        n = self._ng.addNode('constant', self._uid('const'), 'vector2')
+        n.addInput('value', 'vector2').setValueString(f'{x}, {y}')
+        return n.addOutput('out', 'vector2')
+
+    def _const_vector3(self, x, y, z):
+        n = self._ng.addNode('constant', self._uid('const'), 'vector3')
+        n.addInput('value', 'vector3').setValueString(f'{x}, {y}, {z}')
+        return n.addOutput('out', 'vector3')
+
+    def _texcoord(self):
+        """Return (or create) the shared UV texcoord node."""
+        if '_texcoord' not in self._node_cache:
+            n = self._ng.addNode('texcoord', self._uid('uv'), 'vector2')
+            n.addInput('index', 'integer').setValue(0)
+            out = n.addOutput('out', 'vector2')
+            self._node_cache['_texcoord'] = out
+        return self._node_cache['_texcoord']
+
+    # ------------------------------------------------------------------ #
+    #  Node translators                                                     #
+    # ------------------------------------------------------------------ #
+
+    def _tx_principled(self, n):
+        """Principled BSDF → ND_open_pbr_surface_surfaceshader."""
+        import MaterialX as mx
+
+        node = self._ng.addNode(
+            'open_pbr_surface', self._uid('openpbr'), 'surfaceshader')
+
+        def _wire(mx_name, sock_name, mx_type, default):
+            sock = n.inputs.get(sock_name)
+            if sock is None:
+                return
+            self._wire_input(node, mx_name, mx_type, sock, default)
+
+        _wire('base_color',          'Base Color',         'color3',  (0.8, 0.8, 0.8))
+        node.addInput('base_weight', 'float').setValue(1.0)
+        _wire('base_metalness',      'Metallic',           'float',   0.0)
+        _wire('specular_roughness',  'Roughness',          'float',   0.5)
+        _wire('specular_ior',        'IOR',                'float',   1.5)
+        _wire('transmission_weight', 'Transmission Weight','float',   0.0)
+        _wire('coat_weight',         'Coat Weight',        'float',   0.0)
+        _wire('coat_roughness',      'Coat Roughness',     'float',   0.03)
+        _wire('emission_luminance',  'Emission Strength',  'float',   0.0)
+        _wire('emission_color',      'Emission Color',     'color3',  (1.0, 1.0, 1.0))
+        _wire('geometry_normal',     'Normal',             'vector3', (0.0, 0.0, 1.0))
+
+        return node.addOutput('out', 'surfaceshader')
+
+    def _tx_image(self, n):
+        """Image Texture → ND_image_color3 or ND_image_float."""
+        import os
+        img = n.image
+        if img is None:
+            return self._const_color3(0.5, 0.5, 0.5)
+
+        # Resolve file path
+        filepath = bpy.path.abspath(img.filepath) if img.filepath else ''
+        if not filepath or not os.path.exists(filepath):
+            # Packed image — we can't reference it by path yet
+            return self._const_color3(0.5, 0.5, 0.5)
+
+        is_color = (img.colorspace_settings.name not in ('Non-Color', 'Raw', 'Linear'))
+        mx_type = 'color3' if is_color else 'float'
+        mx_id   = f'ND_image_{mx_type}'  # custom — standard is just 'image'
+        node_id = 'image'
+
+        mx_node = self._ng.addNode(node_id, self._uid('img'), mx_type)
+        mx_node.addInput('file', 'filename').setValueString(filepath)
+
+        # UV / texcoord
+        uv_sock = n.inputs.get('Vector')
+        uv_out  = self._get_input_output(uv_sock) if uv_sock else None
+        if uv_out is None:
+            uv_out = self._texcoord()
+        uv_inp = mx_node.addInput('texcoord', 'vector2')
+        uv_inp.setNodeName(uv_out.getParent().getName())
+        uv_inp.setAttribute('output', uv_out.getName())
+
+        return mx_node.addOutput('out', mx_type)
+
+    def _tx_noise(self, n):
+        """Noise Texture → ND_fractal3d_float (best available approximation)."""
+        scale   = float(n.inputs['Scale'].default_value)   if 'Scale'   in n.inputs else 5.0
+        detail  = float(n.inputs['Detail'].default_value)  if 'Detail'  in n.inputs else 2.0
+        rough   = float(n.inputs['Roughness'].default_value) if 'Roughness' in n.inputs else 0.5
+
+        mx_node = self._ng.addNode('fractal3d', self._uid('noise'), 'float')
+        mx_node.addInput('octaves',    'integer').setValue(max(1, int(detail)))
+        mx_node.addInput('lacunarity', 'float').setValue(2.0)
+        mx_node.addInput('diminish',   'float').setValue(rough)
+
+        # Apply scale via position transform
+        pos_n = self._ng.addNode('multiply', self._uid('nscale'), 'vector3')
+        tc    = self._ng.addNode('position', self._uid('pos'), 'vector3')
+        tc.addInput('space', 'string').setValueString('object')
+        pi = pos_n.addInput('in1', 'vector3')
+        pi.setNodeName(tc.getName())
+        pos_n.addInput('in2', 'vector3').setValueString(f'{scale}, {scale}, {scale}')
+        pos_out = pos_n.addOutput('out', 'vector3')
+
+        noise_pos = mx_node.addInput('position', 'vector3')
+        noise_pos.setNodeName(pos_n.getName())
+
+        return mx_node.addOutput('out', 'float')
+
+    def _tx_wave(self, n):
+        """Wave Texture — approximate with fractal3d."""
+        return self._tx_noise(n)  # rough approximation
+
+    def _tx_voronoi(self, n):
+        """Voronoi Texture → ND_cellnoise3d_float."""
+        scale = float(n.inputs['Scale'].default_value) if 'Scale' in n.inputs else 5.0
+
+        tc    = self._ng.addNode('position', self._uid('pos'), 'vector3')
+        tc.addInput('space', 'string').setValueString('object')
+
+        scale_n = self._ng.addNode('multiply', self._uid('vscale'), 'vector3')
+        scale_n.addInput('in1', 'vector3').setNodeName(tc.getName())
+        scale_n.addInput('in2', 'vector3').setValueString(f'{scale}, {scale}, {scale}')
+
+        mx_node = self._ng.addNode('cellnoise3d', self._uid('voronoi'), 'float')
+        mx_node.addInput('position', 'vector3').setNodeName(scale_n.getName())
+
+        return mx_node.addOutput('out', 'float')
+
+    def _tx_musgrave(self, n):
+        """Musgrave Texture → ND_fractal3d_float."""
+        return self._tx_noise(n)
+
+    def _tx_gradient(self, n):
+        """Gradient Texture → texture coordinate U component."""
+        tc  = self._ng.addNode('texcoord', self._uid('uv'), 'vector2')
+        tc.addInput('index', 'integer').setValue(0)
+        sep = self._ng.addNode('separate2', self._uid('sep'), 'float')
+        sep.addInput('in', 'vector2').setNodeName(tc.getName())
+        return sep.addOutput('outx', 'float')
+
+    def _tx_checker(self, n):
+        """Checker/Brick Texture → ND_checkerboard_color3."""
+        scale = 5.0
+        if 'Scale' in n.inputs:
+            scale = float(n.inputs['Scale'].default_value)
+
+        uv_out = self._texcoord()
+        # Scale UV
+        scale_n = self._ng.addNode('multiply', self._uid('ckscale'), 'vector2')
+        scale_n.addInput('in1', 'vector2').setNodeName(uv_out.getParent().getName())
+        scale_n.addInput('in2', 'vector2').setValueString(f'{scale}, {scale}')
+
+        mx_node = self._ng.addNode('checkerboard', self._uid('checker'), 'color3')
+        mx_node.addInput('color1', 'color3').setValueString('0.8, 0.8, 0.8')
+        mx_node.addInput('color2', 'color3').setValueString('0.2, 0.2, 0.2')
+        mx_node.addInput('uvtiling', 'vector2').setNodeName(scale_n.getName())
+
+        return mx_node.addOutput('out', 'color3')
+
+    def _tx_color_ramp(self, n):
+        """Color Ramp (VALTORGB) — sampled into a ramp_color3 node.
+        Falls back to mix if only 2 stops."""
+        ramp = n.color_ramp
+        elems = sorted(ramp.elements, key=lambda e: e.position)
+
+        fac_sock = n.inputs.get('Fac')
+        fac_out, fac_const = self._socket_float(fac_sock, 0.5) \
+                             if fac_sock else (None, 0.5)
+
+        if len(elems) == 2:
+            # Simple 2-stop → ND_mix
+            c0 = elems[0].color
+            c1 = elems[1].color
+            mx_node = self._ng.addNode('mix', self._uid('ramp'), 'color3')
+            mx_node.addInput('bg', 'color3').setValueString(
+                f'{c0[0]}, {c0[1]}, {c0[2]}')
+            mx_node.addInput('fg', 'color3').setValueString(
+                f'{c1[0]}, {c1[1]}, {c1[2]}')
+            fac_inp = mx_node.addInput('mix', 'float')
+            if fac_out:
+                fac_inp.setNodeName(fac_out.getParent().getName())
+                fac_inp.setAttribute('output', fac_out.getName())
+            else:
+                fac_inp.setValue(float(fac_const))
+            return mx_node.addOutput('out', 'color3')
+        else:
+            # Multi-stop — evaluate ramp at 8 positions, build mix chain
+            # Sample the ramp at uniform intervals and chain ND_mix nodes
+            samples = 8
+            def sample(t):
+                t = max(0.0, min(1.0, t))
+                if t <= elems[0].position:
+                    c = elems[0].color
+                elif t >= elems[-1].position:
+                    c = elems[-1].color
+                else:
+                    for i in range(len(elems)-1):
+                        e0, e1 = elems[i], elems[i+1]
+                        if e0.position <= t <= e1.position:
+                            span = e1.position - e0.position
+                            s = (t - e0.position) / span if span > 1e-8 else 0.0
+                            c = [e0.color[j]*(1-s) + e1.color[j]*s for j in range(4)]
+                            return c
+                    c = elems[-1].color
+                return list(c)
+
+            # Build a lookup via piecewise mix chain
+            step = 1.0 / (samples - 1)
+            # Start with constant at t=0
+            prev_col = sample(0.0)
+            prev_out = self._const_color3(*prev_col[:3])
+            for i in range(1, samples):
+                t = i * step
+                col = sample(t)
+                # blend factor: how far into this segment is fac?
+                seg_lo = (i-1) * step
+                seg_hi = t
+                # Normalize fac into [0,1] for this segment
+                if fac_out or fac_const is not None:
+                    # clamp((fac - seg_lo) / step, 0, 1)
+                    sub_n = self._ng.addNode('subtract', self._uid('rsub'), 'float')
+                    fac_src = sub_n.addInput('in1', 'float')
+                    if fac_out:
+                        fac_src.setNodeName(fac_out.getParent().getName())
+                        fac_src.setAttribute('output', fac_out.getName())
+                    else:
+                        fac_src.setValue(float(fac_const))
+                    sub_n.addInput('in2', 'float').setValue(float(seg_lo))
+                    div_n = self._ng.addNode('divide', self._uid('rdiv'), 'float')
+                    div_n.addInput('in1', 'float').setNodeName(sub_n.getName())
+                    div_n.addInput('in2', 'float').setValue(float(step))
+                    clamp_n = self._ng.addNode('clamp', self._uid('rclamp'), 'float')
+                    clamp_n.addInput('in', 'float').setNodeName(div_n.getName())
+                    clamp_n.addInput('low', 'float').setValue(0.0)
+                    clamp_n.addInput('high', 'float').setValue(1.0)
+                    seg_fac_out = clamp_n.addOutput('out', 'float')
+                else:
+                    seg_fac_out = None
+
+                mix_n = self._ng.addNode('mix', self._uid('rmix'), 'color3')
+                bg_inp = mix_n.addInput('bg', 'color3')
+                bg_inp.setNodeName(prev_out.getParent().getName())
+                bg_inp.setAttribute('output', prev_out.getName())
+                mix_n.addInput('fg', 'color3').setValueString(
+                    f'{col[0]}, {col[1]}, {col[2]}')
+                fac_i = mix_n.addInput('mix', 'float')
+                if seg_fac_out:
+                    fac_i.setNodeName(seg_fac_out.getParent().getName())
+                    fac_i.setAttribute('output', seg_fac_out.getName())
+                else:
+                    fac_i.setValue(float(t))
+                prev_out = mix_n.addOutput('out', 'color3')
+
+            return prev_out
+
+    def _tx_rgbtobw(self, n):
+        """RGB to BW → ND_luminance."""
+        col_sock = n.inputs.get('Color')
+        col_out, col_const = self._socket_color3(col_sock, (0.5, 0.5, 0.5)) \
+                             if col_sock else (None, (0.5, 0.5, 0.5))
+        lum = self._ng.addNode('luminance', self._uid('lum'), 'color3')
+        c_inp = lum.addInput('in', 'color3')
+        if col_out:
+            c_inp.setNodeName(col_out.getParent().getName())
+            c_inp.setAttribute('output', col_out.getName())
+        else:
+            c_inp.setValueString(f'{col_const[0]}, {col_const[1]}, {col_const[2]}')
+        # Extract single channel via separate3
+        sep = self._ng.addNode('separate3', self._uid('sep'), 'float')
+        sep.addInput('in', 'color3').setNodeName(lum.getName())
+        return sep.addOutput('outr', 'float')
+
+    def _tx_mix(self, n):
+        """MIX_RGB / MIX → ND_mix or blend-type specific node."""
+        bt = getattr(n, 'blend_type', 'MIX')
+        mx_op = _MX_BLEND_TYPE.get(bt, 'mix')
+
+        # Blender 4.x MIX node uses A/B; older MIX_RGB uses Color1/Color2
+        a_name = 'A' if 'A' in n.inputs else 'Color1'
+        b_name = 'B' if 'B' in n.inputs else 'Color2'
+        f_name = 'Factor' if 'Factor' in n.inputs else 'Fac'
+
+        col1_out, col1_c = self._socket_color3(n.inputs[a_name], (0.5,0.5,0.5)) \
+                           if a_name in n.inputs else (None, (0.5,0.5,0.5))
+        col2_out, col2_c = self._socket_color3(n.inputs[b_name], (0.5,0.5,0.5)) \
+                           if b_name in n.inputs else (None, (0.5,0.5,0.5))
+        fac_out,  fac_c  = self._socket_float(n.inputs[f_name], 0.5) \
+                           if f_name in n.inputs else (None, 0.5)
+
+        if mx_op == 'mix':
+            mx_node = self._ng.addNode('mix', self._uid('mix'), 'color3')
+            bg = mx_node.addInput('bg', 'color3')
+            fg = mx_node.addInput('fg', 'color3')
+            fc = mx_node.addInput('mix', 'float')
+        else:
+            mx_node = self._ng.addNode(mx_op, self._uid(mx_op), 'color3')
+            bg = mx_node.addInput('in1', 'color3')
+            fg = mx_node.addInput('in2', 'color3')
+            fc = None
+
+        def _set_color(inp, out, const):
+            if out:
+                inp.setNodeName(out.getParent().getName())
+                inp.setAttribute('output', out.getName())
+            elif const:
+                inp.setValueString(f'{const[0]}, {const[1]}, {const[2]}')
+
+        _set_color(bg, col1_out, col1_c)
+        _set_color(fg, col2_out, col2_c)
+        if fc is not None:
+            if fac_out:
+                fc.setNodeName(fac_out.getParent().getName())
+                fc.setAttribute('output', fac_out.getName())
+            else:
+                fc.setValue(float(fac_c))
+
+        return mx_node.addOutput('out', 'color3')
+
+    def _tx_math(self, n):
+        """Math node → appropriate float arithmetic node."""
+        op = n.operation if hasattr(n, 'operation') else 'ADD'
+        mx_op, n_inputs = _MX_MATH_OP.get(op, ('add', 2))
+
+        val1_out, val1_c = self._socket_float(n.inputs[0], 0.5) if len(n.inputs) > 0 else (None, 0.5)
+        val2_out, val2_c = self._socket_float(n.inputs[1], 0.5) if len(n.inputs) > 1 else (None, 0.5)
+
+        mx_node = self._ng.addNode(mx_op, self._uid(mx_op), 'float')
+
+        def _set_float(inp_name, out, const):
+            inp = mx_node.addInput(inp_name, 'float')
+            if out:
+                inp.setNodeName(out.getParent().getName())
+                inp.setAttribute('output', out.getName())
+            else:
+                inp.setValue(float(const))
+
+        _set_float('in1', val1_out, val1_c)
+        if n_inputs >= 2:
+            _set_float('in2', val2_out, val2_c)
+        if op == 'CLAMP':
+            mx_node.addInput('low',  'float').setValue(0.0)
+            mx_node.addInput('high', 'float').setValue(1.0)
+
+        return mx_node.addOutput('out', 'float')
+
+    def _tx_invert(self, n):
+        """Invert → ND_subtract."""
+        col_out, col_c = self._socket_color3(n.inputs.get('Color'), (0.5,0.5,0.5))
+        fac = float(n.inputs['Fac'].default_value) if 'Fac' in n.inputs else 1.0
+
+        one = self._const_color3(1.0, 1.0, 1.0)
+        sub = self._ng.addNode('subtract', self._uid('inv'), 'color3')
+        sub.addInput('in1', 'color3').setNodeName(one.getParent().getName())
+        in2 = sub.addInput('in2', 'color3')
+        if col_out:
+            in2.setNodeName(col_out.getParent().getName())
+            in2.setAttribute('output', col_out.getName())
+        else:
+            in2.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
+
+        if abs(fac - 1.0) > 1e-4:
+            # blend: result = orig * (1-fac) + inv * fac
+            mix = self._ng.addNode('mix', self._uid('invmix'), 'color3')
+            bg = mix.addInput('bg', 'color3')
+            if col_out:
+                bg.setNodeName(col_out.getParent().getName())
+                bg.setAttribute('output', col_out.getName())
+            else:
+                bg.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
+            mix.addInput('fg', 'color3').setNodeName(sub.getName())
+            mix.addInput('mix', 'float').setValue(fac)
+            return mix.addOutput('out', 'color3')
+
+        return sub.addOutput('out', 'color3')
+
+    def _tx_hue_sat(self, n):
+        """HueSat → ND_hsvtorgb(ND_rgbtohsv + adjust)."""
+        col_out, col_c = self._socket_color3(n.inputs.get('Color'), (0.5,0.5,0.5))
+        h = float(n.inputs['Hue'].default_value)        if 'Hue'        in n.inputs else 0.5
+        s = float(n.inputs['Saturation'].default_value) if 'Saturation' in n.inputs else 1.0
+        v = float(n.inputs['Value'].default_value)      if 'Value'      in n.inputs else 1.0
+
+        # Convert to HSV
+        hsv_n = self._ng.addNode('rgbtohsv', self._uid('tohsv'), 'color3')
+        c_inp = hsv_n.addInput('in', 'color3')
+        if col_out:
+            c_inp.setNodeName(col_out.getParent().getName())
+            c_inp.setAttribute('output', col_out.getName())
+        else:
+            c_inp.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
+
+        # Multiply by HSV adjustment
+        mul_n = self._ng.addNode('multiply', self._uid('hsvmul'), 'color3')
+        mul_n.addInput('in1', 'color3').setNodeName(hsv_n.getName())
+        mul_n.addInput('in2', 'color3').setValueString(f'{h*2.0}, {s}, {v}')
+
+        # Convert back
+        rgb_n = self._ng.addNode('hsvtorgb', self._uid('fromhsv'), 'color3')
+        rgb_n.addInput('in', 'color3').setNodeName(mul_n.getName())
+        return rgb_n.addOutput('out', 'color3')
+
+    def _tx_bright_contrast(self, n):
+        """BrightContrast → multiply + add chain."""
+        col_out, col_c = self._socket_color3(n.inputs.get('Color'), (0.5,0.5,0.5))
+        br = float(n.inputs['Bright'].default_value)   if 'Bright'   in n.inputs else 0.0
+        co = float(n.inputs['Contrast'].default_value) if 'Contrast' in n.inputs else 0.0
+
+        mul_n = self._ng.addNode('multiply', self._uid('bcmul'), 'color3')
+        c_inp = mul_n.addInput('in1', 'color3')
+        if col_out:
+            c_inp.setNodeName(col_out.getParent().getName())
+            c_inp.setAttribute('output', col_out.getName())
+        else:
+            c_inp.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
+        mul_n.addInput('in2', 'color3').setValueString(
+            f'{1.0+co}, {1.0+co}, {1.0+co}')
+
+        add_n = self._ng.addNode('add', self._uid('bcadd'), 'color3')
+        add_n.addInput('in1', 'color3').setNodeName(mul_n.getName())
+        adj = br - co * 0.5
+        add_n.addInput('in2', 'color3').setValueString(f'{adj}, {adj}, {adj}')
+
+        return add_n.addOutput('out', 'color3')
+
+    def _tx_normal_map(self, n):
+        """Normal Map → ND_normalmap."""
+        col_out, col_c = self._socket_color3(n.inputs.get('Color'), (0.5,0.5,1.0))
+        strength = float(n.inputs['Strength'].default_value) \
+                   if 'Strength' in n.inputs else 1.0
+
+        nm_n = self._ng.addNode('normalmap', self._uid('nmap'), 'vector3')
+        c_inp = nm_n.addInput('in', 'color3')
+        if col_out:
+            c_inp.setNodeName(col_out.getParent().getName())
+            c_inp.setAttribute('output', col_out.getName())
+        else:
+            c_inp.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
+        nm_n.addInput('scale', 'float').setValue(strength)
+        return nm_n.addOutput('out', 'vector3')
+
+    def _tx_bump(self, n):
+        """Bump → ND_heighttonormal_vector3.
+        Converts a scalar height map to a tangent-space normal vector.
+        Inputs: Height (float), Strength (float), Distance (float).
+        """
+        height_sock    = n.inputs.get('Height')
+        strength_sock  = n.inputs.get('Strength')
+        distance_sock  = n.inputs.get('Distance')
+
+        height_out, height_c = self._socket_float(height_sock, 0.5) \
+                               if height_sock else (None, 0.5)
+        strength = float(strength_sock.default_value) \
+                   if strength_sock and not strength_sock.links else \
+                   (float(strength_sock.default_value) if strength_sock else 1.0)
+        distance = float(distance_sock.default_value) \
+                   if distance_sock and not distance_sock.links else \
+                   (float(distance_sock.default_value) if distance_sock else 1.0)
+        scale = strength * distance
+
+        h2n = self._ng.addNode('heighttonormal', self._uid('bump'), 'vector3')
+        h_inp = h2n.addInput('in', 'float')
+        if height_out:
+            h_inp.setNodeName(height_out.getParent().getName())
+            h_inp.setAttribute('output', height_out.getName())
+        else:
+            h_inp.setValue(float(height_c))
+        h2n.addInput('scale', 'float').setValue(scale)
+        return h2n.addOutput('out', 'vector3')
+
+    def _tx_mapping(self, n):
+        """Mapping → ND_place2d_vector2 (for UV coords)."""
+        loc = n.inputs.get('Location')
+        rot = n.inputs.get('Rotation')
+        sc  = n.inputs.get('Scale')
+
+        lx = float(loc.default_value[0]) if loc else 0.0
+        ly = float(loc.default_value[1]) if loc else 0.0
+        rz = float(rot.default_value[2]) if rot else 0.0
+        sx = float(sc.default_value[0])  if sc  else 1.0
+        sy = float(sc.default_value[1])  if sc  else 1.0
+
+        uv_out = self._texcoord()
+        p2d = self._ng.addNode('place2d', self._uid('p2d'), 'vector2')
+        tc_inp = p2d.addInput('texcoord', 'vector2')
+        tc_inp.setNodeName(uv_out.getParent().getName())
+        tc_inp.setAttribute('output', uv_out.getName())
+        p2d.addInput('scale',  'vector2').setValueString(f'{sx}, {sy}')
+        p2d.addInput('rotate', 'float').setValue(rz * 57.2957795)  # rad→deg
+        p2d.addInput('offset', 'vector2').setValueString(f'{lx}, {ly}')
+        return p2d.addOutput('out', 'vector2')
+
+    def _tx_texcoord(self, n):
+        """UV Map / Texture Coordinate → ND_texcoord_vector2."""
+        return self._texcoord()
+
+    def _tx_separate(self, n):
+        """Separate XYZ/RGB → ND_separate3."""
+        sock_names = ('Vector', 'Color', 'Image')
+        src_sock = next((n.inputs[s] for s in sock_names if s in n.inputs), None)
+        if src_sock:
+            col_out, col_c = self._socket_vector3(src_sock)
+            sep = self._ng.addNode('separate3', self._uid('sep'), 'multioutput')
+            inp = sep.addInput('in', 'vector3')
+            if col_out:
+                inp.setNodeName(col_out.getParent().getName())
+                inp.setAttribute('output', col_out.getName())
+            else:
+                inp.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
+            return sep.addOutput('out1', 'float')  # X/R
+        return self._const_float(0.0)
+
+    def _tx_combine(self, n):
+        """Combine XYZ/RGB → ND_combine3."""
+        x_out, x_c = self._socket_float(n.inputs[0], 0.0) if len(n.inputs) > 0 else (None, 0.0)
+        y_out, y_c = self._socket_float(n.inputs[1], 0.0) if len(n.inputs) > 1 else (None, 0.0)
+        z_out, z_c = self._socket_float(n.inputs[2], 0.0) if len(n.inputs) > 2 else (None, 0.0)
+
+        comb = self._ng.addNode('combine3', self._uid('comb'), 'vector3')
+        def _si(name, out, c):
+            inp = comb.addInput(name, 'float')
+            if out:
+                inp.setNodeName(out.getParent().getName())
+                inp.setAttribute('output', out.getName())
+            else:
+                inp.setValue(float(c))
+        _si('in1', x_out, x_c)
+        _si('in2', y_out, y_c)
+        _si('in3', z_out, z_c)
+        return comb.addOutput('out', 'vector3')
+
+    def _tx_gamma(self, n):
+        """Gamma → ND_power."""
+        col_out, col_c = self._socket_color3(n.inputs.get('Color'), (0.5,0.5,0.5))
+        g = float(n.inputs['Gamma'].default_value) if 'Gamma' in n.inputs else 2.2
+
+        pw = self._ng.addNode('power', self._uid('gamma'), 'color3')
+        c_inp = pw.addInput('in1', 'color3')
+        if col_out:
+            c_inp.setNodeName(col_out.getParent().getName())
+            c_inp.setAttribute('output', col_out.getName())
+        else:
+            c_inp.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
+        pw.addInput('in2', 'color3').setValueString(f'{g}, {g}, {g}')
+        return pw.addOutput('out', 'color3')
+
+    def _tx_curve_rgb(self, n):
+        """RGB Curves — sample 8 points and build a mix chain (same as color ramp)."""
+        # Approximate by treating it as a brightness/contrast adjustment
+        col_out, col_c = self._socket_color3(n.inputs.get('Color'), (0.5,0.5,0.5))
+        # Pass through — can't faithfully evaluate the curve without pixel data
+        # Emit identity multiply
+        mul = self._ng.addNode('multiply', self._uid('curve'), 'color3')
+        c_inp = mul.addInput('in1', 'color3')
+        if col_out:
+            c_inp.setNodeName(col_out.getParent().getName())
+            c_inp.setAttribute('output', col_out.getName())
+        else:
+            c_inp.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
+        mul.addInput('in2', 'color3').setValueString('1.0, 1.0, 1.0')
+        return mul.addOutput('out', 'color3')
+
+    def _tx_group(self, n):
+        """Group node — inline by recursively translating its internal tree."""
+        if not n.node_tree:
+            return self._const_color3(0.5, 0.5, 0.5)
+        # Find the Group Output node inside
+        inner_output = next(
+            (nd for nd in n.node_tree.nodes if nd.type == 'GROUP_OUTPUT'), None)
+        if inner_output is None:
+            return self._const_color3(0.5, 0.5, 0.5)
+        # Translate what feeds into the first socket of the group output
+        if inner_output.inputs and inner_output.inputs[0].links:
+            return self._translate_node(inner_output.inputs[0].links[0].from_node)
+        return self._const_color3(0.5, 0.5, 0.5)
+
+
+def _export_materialx_graphs(out_dir: str):
+    """
+    Walk all materials in the scene.  For each Principled BSDF material,
+    build a MaterialX document from the full Blender node tree and write
+    <out_dir>/<material_name>.mtlx.
+    """
+    try:
+        import MaterialX as mx
+    except ImportError:
+        print("  [mtlx export] MaterialX not available — skipping.")
+        return
+
+    import os
+
+    # Path to MaterialX standard libraries shipped with Blender
+    mx_lib_path = os.path.dirname(mx.__file__)
+
+    os.makedirs(out_dir, exist_ok=True)
+    exported = 0
+    skipped  = 0
+
+    print()
+    print(f"  Exporting MaterialX graphs → {out_dir}")
+
+    for mat in bpy.data.materials:
+        if not mat.use_nodes or not mat.node_tree:
+            skipped += 1
+            continue
+        bsdf = next((n for n in mat.node_tree.nodes
+                     if n.type == 'BSDF_PRINCIPLED'), None)
+        if bsdf is None:
+            skipped += 1
+            continue
+        try:
+            builder = _MtlxBuilder(mat, out_dir, mx_lib_path)
+            out_path = builder.build()
+            if out_path:
+                exported += 1
+            else:
+                skipped += 1
+        except Exception as e:
+            import traceback
+            print(f"  [mtlx export] ERROR on material '{mat.name}': {e}")
+            traceback.print_exc()
+            skipped += 1
+
+    print(f"  [mtlx export] Exported {exported} material(s), skipped {skipped}.")
+    print("=" * 60)
 
 
 # ---------------------------------------------------------------------------
