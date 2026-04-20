@@ -1,6 +1,6 @@
 # Anacapa
 
-A physically-based bidirectional path tracer written in C++20.
+A physically-based path tracer written in C++20.
 
 Named after Anacapa Island, part of California's Channel Islands.
 
