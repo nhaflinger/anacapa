@@ -22,6 +22,7 @@
 #include <pxr/usd/usdLux/domeLight.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
+#include <pxr/usd/usdShade/nodeGraph.h>
 #include <pxr/usd/usdShade/shader.h>
 #include <pxr/usd/usdShade/connectableAPI.h>
 #include <pxr/usd/usdRender/settings.h>
@@ -239,6 +240,36 @@ static bool resolveUVTexture(const UsdShadeShader& texShader,
     return false;
 }
 
+// resolveShaderThroughNodeGraph — when a connection target is a NodeGraph prim
+// (Blender wraps MaterialX subgraphs in NodeGraph containers), follow the named
+// output back to the actual Shader prim inside.  Returns the resolved Shader, or
+// an invalid Shader if the prim is not a NodeGraph or resolution fails.
+// Depth-limited to avoid infinite loops.
+static UsdShadeShader resolveShaderThroughNodeGraph(const UsdPrim& prim,
+                                                     const std::string& outputName,
+                                                     int depth = 0) {
+    if (depth > 8 || !prim.IsValid()) return UsdShadeShader();
+    if (!prim.IsA<UsdShadeNodeGraph>()) return UsdShadeShader(prim);
+
+    UsdShadeNodeGraph ng(prim);
+    // Try the named output first, fall back to first available output
+    UsdShadeOutput out = outputName.empty()
+                         ? UsdShadeOutput()
+                         : ng.GetOutput(TfToken(outputName));
+    if (!out) {
+        std::vector<UsdShadeOutput> outs = ng.GetOutputs();
+        if (!outs.empty()) out = outs[0];
+    }
+    if (!out || !out.HasConnectedSource()) return UsdShadeShader();
+
+    UsdShadeSourceInfoVector innerSrcs = out.GetConnectedSources();
+    if (innerSrcs.empty()) return UsdShadeShader();
+
+    UsdPrim innerPrim = innerSrcs[0].source.GetPrim();
+    std::string innerOut = innerSrcs[0].sourceName.GetString();
+    return resolveShaderThroughNodeGraph(innerPrim, innerOut, depth + 1);
+}
+
 // resolveColorTOV — read a color input, returning a SpectrumTOV that carries
 // either a constant value or a file texture path + UV transform.
 //
@@ -252,14 +283,17 @@ static SpectrumTOV resolveColorTOV(const UsdShadeInput& input,
     // Check for a connected texture source first.
     UsdShadeSourceInfoVector sources = input.GetConnectedSources();
     if (!sources.empty()) {
-        UsdShadeShader texShader(sources[0].source.GetPrim());
+        // Resolve through NodeGraph wrappers (Blender wraps MaterialX subgraphs
+        // in NodeGraph containers; the actual ND_image_* shader is inside).
+        UsdShadeShader texShader = resolveShaderThroughNodeGraph(
+            sources[0].source.GetPrim(), sources[0].sourceName.GetString());
         if (texShader) {
             // Use the authored constant as the fallback value.
             GfVec3f authCol{defaultVal.x, defaultVal.y, defaultVal.z};
             input.Get(&authCol);
             UVTextureInfo info;
             info.fallback      = {authCol[0], authCol[1], authCol[2], 1.f};
-            info.outputChannel = sources[0].sourceName.GetString(); // e.g. "rgb", "r", "g"
+            info.outputChannel = sources[0].sourceName.GetString();
             if (resolveUVTexture(texShader, stageDir, info)) {
                 SpectrumTOV tov(Spectrum{info.fallback[0], info.fallback[1], info.fallback[2]});
                 tov.path          = info.path;
@@ -311,7 +345,9 @@ static FloatTOV resolveFloatTOV(const UsdShadeInput& input, float defaultVal,
     // Check for a connected texture source first.
     UsdShadeSourceInfoVector sources = input.GetConnectedSources();
     if (!sources.empty()) {
-        UsdShadeShader texShader(sources[0].source.GetPrim());
+        // Resolve through NodeGraph wrappers — same as resolveColorTOV.
+        UsdShadeShader texShader = resolveShaderThroughNodeGraph(
+            sources[0].source.GetPrim(), sources[0].sourceName.GetString());
         if (texShader) {
             // Use the authored constant as the fallback value for when the
             // texture file is unavailable; fall back to defaultVal otherwise.

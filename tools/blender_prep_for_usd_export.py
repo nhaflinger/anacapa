@@ -331,13 +331,18 @@ def apply_transforms() -> int:
 # removed.
 #
 # Handled analytically (no render pass needed):
-#   - Invert Color   (ShaderNodeInvert)
-#   - Hue/Saturation (ShaderNodeHueSaturation)
-#   - Bright/Contrast (ShaderNodeBrightContrast)
+#   - Invert Color      (ShaderNodeInvert) — any fac value
+#   - Hue/Saturation    (ShaderNodeHueSaturation)
+#   - Bright/Contrast   (ShaderNodeBrightContrast)
+#   - Color Ramp        (ShaderNodeValToRGB) — per-pixel when driven by image;
+#                         constant-folded when Fac is a constant
+#   - Mix / Mix RGB     (ShaderNodeMix / ShaderNodeMixRGB) — image+constant blend
+#                         or constant-folded when both inputs are constants
+#   - Bump              (ShaderNodeBump) — Sobel-filter bake to normal map
 #
 # Not handled (emits a warning):
-#   - RGB Curves, Color Ramp, Mix RGB with non-trivial factors, procedural
-#     textures with no image source, and any multi-input mixing graphs.
+#   - RGB Curves, procedural textures with no image source,
+#     and Mix nodes where both inputs are textured.
 # ---------------------------------------------------------------------------
 
 # Nodes whose type IDs are supported natively by UsdPreviewSurface / USD export.
@@ -417,14 +422,155 @@ def _save_baked_image(src_img, pixels_rgba: list, suffix: str,
     return save_path
 
 
-def _invert_pixels(pixels: list) -> list:
-    """Invert R, G, B channels; leave A unchanged."""
+def _invert_pixels(pixels: list, fac: float = 1.0) -> list:
+    """Invert R, G, B channels with blend factor; leave A unchanged."""
     out = list(pixels)
     for i in range(0, len(out), 4):
-        out[i]   = 1.0 - out[i]
-        out[i+1] = 1.0 - out[i+1]
-        out[i+2] = 1.0 - out[i+2]
+        out[i]   = out[i]   * (1.0 - fac) + (1.0 - out[i])   * fac
+        out[i+1] = out[i+1] * (1.0 - fac) + (1.0 - out[i+1]) * fac
+        out[i+2] = out[i+2] * (1.0 - fac) + (1.0 - out[i+2]) * fac
     return out
+
+
+def _evaluate_color_ramp(ramp_node, fac: float) -> list:
+    """Evaluate a Color Ramp node at scalar fac ∈ [0,1]. Returns [r,g,b,a]."""
+    ramp = ramp_node.color_ramp
+    elements = sorted(ramp.elements, key=lambda e: e.position)
+    if not elements:
+        return [0.0, 0.0, 0.0, 1.0]
+    fac = max(0.0, min(1.0, fac))
+    if ramp.interpolation == 'CONSTANT':
+        col = elements[0].color[:]
+        for e in elements:
+            if e.position <= fac:
+                col = e.color[:]
+        return list(col)
+    # LINEAR (and approximation for EASE/CARDINAL/B_SPLINE)
+    if fac <= elements[0].position:
+        return list(elements[0].color[:])
+    if fac >= elements[-1].position:
+        return list(elements[-1].color[:])
+    for i in range(len(elements) - 1):
+        e0, e1 = elements[i], elements[i + 1]
+        if e0.position <= fac <= e1.position:
+            span = e1.position - e0.position
+            t = (fac - e0.position) / span if span > 1e-8 else 0.0
+            c0, c1 = e0.color[:], e1.color[:]
+            return [c0[j] * (1 - t) + c1[j] * t for j in range(4)]
+    return list(elements[-1].color[:])
+
+
+def _apply_color_ramp_pixels(grey_pixels: list, ramp_node) -> list:
+    """Apply a Color Ramp to a greyscale pixel buffer (reads R channel as fac).
+    Returns a new RGBA pixel list."""
+    out = []
+    for i in range(0, len(grey_pixels), 4):
+        fac = grey_pixels[i]  # R channel as 0-1 scalar
+        col = _evaluate_color_ramp(ramp_node, fac)
+        out.extend(col[:4])
+    return out
+
+
+def _mix_color(col1, col2, fac: float, blend_type: str) -> list:
+    """Evaluate one MIX_RGB / Mix blend between two [r,g,b] colour lists."""
+    def clamp(v): return max(0.0, min(1.0, v))
+    r1, g1, b1 = col1[0], col1[1], col1[2]
+    r2, g2, b2 = col2[0], col2[1], col2[2]
+    if blend_type in ('MIX', 'MIX'):
+        r = r1 + fac * (r2 - r1)
+        g = g1 + fac * (g2 - g1)
+        b = b1 + fac * (b2 - b1)
+    elif blend_type == 'ADD':
+        r = r1 + fac * r2
+        g = g1 + fac * g2
+        b = b1 + fac * b2
+    elif blend_type == 'MULTIPLY':
+        r = r1 * (1 - fac + fac * r2)
+        g = g1 * (1 - fac + fac * g2)
+        b = b1 * (1 - fac + fac * b2)
+    elif blend_type == 'SUBTRACT':
+        r = r1 - fac * r2
+        g = g1 - fac * g2
+        b = b1 - fac * b2
+    elif blend_type == 'SCREEN':
+        r = 1 - (1 - r1) * (1 - fac * r2)
+        g = 1 - (1 - g1) * (1 - fac * g2)
+        b = 1 - (1 - b1) * (1 - fac * b2)
+    elif blend_type == 'OVERLAY':
+        def ov(a, b_v):
+            return 2*a*b_v if a < 0.5 else 1 - 2*(1-a)*(1-b_v)
+        r = r1 + fac * (ov(r1, r2) - r1)
+        g = g1 + fac * (ov(g1, g2) - g1)
+        b = b1 + fac * (ov(b1, b2) - b1)
+    else:
+        r = r1 + fac * (r2 - r1)
+        g = g1 + fac * (g2 - g1)
+        b = b1 + fac * (b2 - b1)
+    return [clamp(r), clamp(g), clamp(b), 1.0]
+
+
+def _mix_pixels_with_constant(pixels: list, const_rgba: list,
+                               fac: float, blend_type: str,
+                               const_is_b: bool) -> list:
+    """Mix each pixel with a constant colour.
+    const_is_b=True  → pixel is A, const is B  (result blends pixel→const)
+    const_is_b=False → const is A, pixel is B  (result blends const→pixel)"""
+    out = list(pixels)
+    for i in range(0, len(out), 4):
+        px = [out[i], out[i+1], out[i+2]]
+        if const_is_b:
+            col = _mix_color(px, const_rgba, fac, blend_type)
+        else:
+            col = _mix_color(const_rgba, px, fac, blend_type)
+        out[i], out[i+1], out[i+2] = col[0], col[1], col[2]
+    return out
+
+
+def _height_to_normal_pixels(pixels: list, w: int, h: int,
+                              strength: float = 1.0) -> list:
+    """Convert a height map (reads R channel) to a tangent-space normal map
+    using a 3×3 Sobel filter.  Returns RGBA pixels encoded as (n+1)/2."""
+    try:
+        import numpy as np
+        arr = np.array(pixels, dtype=np.float32).reshape(h, w, 4)
+        # Luminance as height
+        lum = (0.2126 * arr[:, :, 0] + 0.7152 * arr[:, :, 1]
+               + 0.0722 * arr[:, :, 2])
+        # Pad with wrap for Sobel
+        p = np.pad(lum, 1, mode='wrap')
+        # Sobel X
+        dx = (p[0:-2, 2:] + 2*p[1:-1, 2:] + p[2:, 2:]
+              - p[0:-2, 0:-2] - 2*p[1:-1, 0:-2] - p[2:, 0:-2]) * strength
+        # Sobel Y
+        dy = (p[2:, 0:-2] + 2*p[2:, 1:-1] + p[2:, 2:]
+              - p[0:-2, 0:-2] - 2*p[0:-2, 1:-1] - p[0:-2, 2:]) * strength
+        nx = -dx
+        ny = -dy
+        nz = np.ones_like(nx)
+        length = np.sqrt(nx*nx + ny*ny + nz*nz)
+        length = np.maximum(length, 1e-8)
+        nx, ny, nz = nx/length, ny/length, nz/length
+        out = np.stack([nx*0.5+0.5, ny*0.5+0.5, nz*0.5+0.5,
+                        np.ones_like(nx)], axis=-1)
+        return out.flatten().tolist()
+    except ImportError:
+        # Pure-Python fallback (slow — only practical for small textures)
+        if w * h > 256 * 256:
+            return None  # signal caller to skip
+        def lum_at(xx, yy):
+            idx = (yy % h * w + xx % w) * 4
+            return 0.2126*pixels[idx] + 0.7152*pixels[idx+1] + 0.0722*pixels[idx+2]
+        out = []
+        for py in range(h):
+            for px in range(w):
+                dx = (lum_at(px+1, py-1) + 2*lum_at(px+1, py) + lum_at(px+1, py+1)
+                      - lum_at(px-1, py-1) - 2*lum_at(px-1, py) - lum_at(px-1, py+1)) * strength
+                dy = (lum_at(px-1, py+1) + 2*lum_at(px, py+1) + lum_at(px+1, py+1)
+                      - lum_at(px-1, py-1) - 2*lum_at(px, py-1) - lum_at(px+1, py-1)) * strength
+                nx, ny, nz = -dx, -dy, 1.0
+                ln = (nx*nx + ny*ny + nz*nz) ** 0.5
+                out += [nx/ln*0.5+0.5, ny/ln*0.5+0.5, nz/ln*0.5+0.5, 1.0]
+        return out
 
 
 def _hue_sat_val_pixels(pixels: list, hue: float, sat: float, val: float) -> list:
@@ -537,14 +683,69 @@ def bake_unsupported_nodes(out_dir: str) -> Tuple[int, List[str]]:
             if src_node.type in _USD_PASSTHROUGH_TYPES:
                 continue
 
-            # Walk back to find the source Image Texture
+            # ----------------------------------------------------------------
+            # Constant-fold: VALTORGB / MIX(+MIX_RGB) with no upstream image
+            # ----------------------------------------------------------------
             img_node, _ = _find_upstream_image_tex(src_node)
             if img_node is None or img_node.image is None:
-                warnings.append(
-                    f"Material '{mat.name}', socket '{sock.name}': "
-                    f"unsupported node '{src_node.type}' with no Image Texture "
-                    f"source — skipped (manual bake required)."
-                )
+                folded = False
+
+                if src_node.type == 'VALTORGB':
+                    fac_inp = src_node.inputs.get('Fac')
+                    if fac_inp and not fac_inp.links:
+                        result = _evaluate_color_ramp(src_node, fac_inp.default_value)
+                        try:
+                            if hasattr(sock, 'default_value'):
+                                dv = sock.default_value
+                                if hasattr(dv, '__len__') and len(dv) >= 3:
+                                    sock.default_value = (result[0], result[1], result[2], 1.0)
+                                else:
+                                    sock.default_value = result[0]
+                        except Exception:
+                            pass
+                        links.remove(link)
+                        nodes.remove(src_node)
+                        log(f"  Material '{mat.name}', socket '{sock.name}': "
+                            f"Color Ramp constant-folded → ({result[0]:.3f},{result[1]:.3f},{result[2]:.3f})")
+                        folded = True
+
+                elif src_node.type in ('MIX_RGB', 'MIX'):
+                    # Determine input socket names (Blender 4.x MIX vs old MIX_RGB)
+                    a_names = ('Color1', 'A')
+                    b_names = ('Color2', 'B')
+                    f_names = ('Fac', 'Factor')
+                    fac_inp  = next((src_node.inputs[n] for n in f_names if n in src_node.inputs), None)
+                    col1_inp = next((src_node.inputs[n] for n in a_names if n in src_node.inputs), None)
+                    col2_inp = next((src_node.inputs[n] for n in b_names if n in src_node.inputs), None)
+                    if (fac_inp and not fac_inp.links and
+                            col1_inp and not col1_inp.links and
+                            col2_inp and not col2_inp.links):
+                        fac  = float(fac_inp.default_value)
+                        col1 = list(col1_inp.default_value)[:4]
+                        col2 = list(col2_inp.default_value)[:4]
+                        bt   = getattr(src_node, 'blend_type', 'MIX')
+                        result = _mix_color(col1, col2, fac, bt)
+                        try:
+                            if hasattr(sock, 'default_value'):
+                                dv = sock.default_value
+                                if hasattr(dv, '__len__') and len(dv) >= 3:
+                                    sock.default_value = (result[0], result[1], result[2], 1.0)
+                                else:
+                                    sock.default_value = result[0]
+                        except Exception:
+                            pass
+                        links.remove(link)
+                        nodes.remove(src_node)
+                        log(f"  Material '{mat.name}', socket '{sock.name}': "
+                            f"Mix constant-folded → ({result[0]:.3f},{result[1]:.3f},{result[2]:.3f})")
+                        folded = True
+
+                if not folded:
+                    warnings.append(
+                        f"Material '{mat.name}', socket '{sock.name}': "
+                        f"unsupported node '{src_node.type}' with no Image Texture "
+                        f"source — skipped (manual bake required)."
+                    )
                 continue
 
             src_img = img_node.image
@@ -561,17 +762,85 @@ def bake_unsupported_nodes(out_dir: str) -> Tuple[int, List[str]]:
                 )
                 continue
 
+            # ----------------------------------------------------------------
+            # BUMP: special path — bake Height map → normal map texture,
+            # then wire TEX_IMAGE → NORMAL_MAP node → bsdf Normal socket.
+            # ----------------------------------------------------------------
+            if src_node.type == 'BUMP':
+                height_inp = src_node.inputs.get('Height')
+                strength_val = float(src_node.inputs['Strength'].default_value
+                                     if 'Strength' in src_node.inputs else 1.0)
+                bump_img_node = None
+                if height_inp and height_inp.links:
+                    hn = height_inp.links[0].from_node
+                    if hn.type == 'TEX_IMAGE':
+                        bump_img_node = hn
+                    else:
+                        bump_img_node, _ = _find_upstream_image_tex(hn)
+
+                if bump_img_node is None or bump_img_node.image is None:
+                    warnings.append(
+                        f"Material '{mat.name}', socket '{sock.name}': "
+                        f"BUMP with no upstream image — skipped."
+                    )
+                    continue
+
+                bump_src = bump_img_node.image
+                if bump_src.size[0] == 0 or bump_src.size[1] == 0:
+                    warnings.append(
+                        f"Material '{mat.name}': BUMP image has zero size — skipped.")
+                    continue
+
+                bw, bh = bump_src.size
+                norm_pixels = _height_to_normal_pixels(
+                    _load_pixels_rgba(bump_src), bw, bh, strength_val)
+                if norm_pixels is None:
+                    warnings.append(
+                        f"Material '{mat.name}': BUMP image too large for "
+                        f"pure-Python bake ({bw}×{bh}) — install numpy or reduce resolution.")
+                    continue
+
+                try:
+                    save_path = _save_baked_image(bump_src, norm_pixels, '_baked_NormalFromBump', out_dir)
+                except Exception as e:
+                    warnings.append(f"Material '{mat.name}': BUMP bake save failed: {e}")
+                    continue
+
+                norm_img = bpy.data.images.load(save_path)
+                norm_img.colorspace_settings.name = 'Non-Color'
+
+                new_tex = nodes.new('ShaderNodeTexImage')
+                new_tex.image = norm_img
+                new_tex.location = src_node.location[0] - 300, src_node.location[1]
+
+                # Copy UV links from the height image node to the new tex node
+                for old_lnk in bump_img_node.inputs['Vector'].links:
+                    links.new(old_lnk.from_socket, new_tex.inputs['Vector'])
+
+                nm_node = nodes.new('ShaderNodeNormalMap')
+                nm_node.location = src_node.location[0], src_node.location[1]
+                links.new(new_tex.outputs['Color'], nm_node.inputs['Color'])
+                links.new(nm_node.outputs['Normal'], sock)
+
+                nodes.remove(src_node)
+                log(f"  Material '{mat.name}', socket '{sock.name}': "
+                    f"BUMP baked → {os.path.basename(save_path)}")
+                baked += 1
+                continue
+
             # Collect the chain of unsupported nodes between img_node and bsdf
+            _CHAIN_INPUT_NAMES = {'Color', 'Image', 'Value', '', 'Fac', 'Height', 'Factor', 'A', 'B'}
             chain = []
             node = src_node
             while node and node.type not in _USD_PASSTHROUGH_TYPES:
                 chain.append(node)
-                # Follow the primary color input back
                 next_node = None
                 for inp in node.inputs:
-                    if inp.links and inp.name in ('Color', 'Image', 'Value', ''):
-                        next_node = inp.links[0].from_node
-                        break
+                    if inp.links and inp.name in _CHAIN_INPUT_NAMES:
+                        cand = inp.links[0].from_node
+                        if cand.type != 'TEX_IMAGE':
+                            next_node = cand
+                            break
                 if next_node is None or next_node == img_node:
                     break
                 node = next_node
@@ -584,12 +853,9 @@ def bake_unsupported_nodes(out_dir: str) -> Tuple[int, List[str]]:
 
             for n in chain:
                 if n.type == 'INVERT':
-                    fac = n.inputs['Fac'].default_value if 'Fac' in n.inputs else 1.0
-                    if fac >= 0.999:
-                        pixels = _invert_pixels(pixels)
-                        applied_ops.append('Invert')
-                    else:
-                        unhandled.append(f"Invert(fac={fac:.2f})")
+                    fac = float(n.inputs['Fac'].default_value) if 'Fac' in n.inputs else 1.0
+                    pixels = _invert_pixels(pixels, fac)
+                    applied_ops.append(f'Invert(fac={fac:.2f})')
                 elif n.type == 'HUE_SAT':
                     h = n.inputs['Hue'].default_value        if 'Hue'        in n.inputs else 0.5
                     s = n.inputs['Saturation'].default_value if 'Saturation' in n.inputs else 1.0
@@ -601,6 +867,33 @@ def bake_unsupported_nodes(out_dir: str) -> Tuple[int, List[str]]:
                     co = n.inputs['Contrast'].default_value if 'Contrast' in n.inputs else 0.0
                     pixels = _bright_contrast_pixels(pixels, br, co)
                     applied_ops.append(f'BrightContrast(br={br:.2f},co={co:.2f})')
+                elif n.type == 'VALTORGB':
+                    # Apply color ramp using the upstream greyscale image as Fac
+                    pixels = _apply_color_ramp_pixels(pixels, n)
+                    applied_ops.append('ColorRamp')
+                elif n.type in ('MIX_RGB', 'MIX'):
+                    a_names = ('Color1', 'A')
+                    b_names = ('Color2', 'B')
+                    f_names = ('Fac', 'Factor')
+                    fac_inp  = next((n.inputs[nm] for nm in f_names if nm in n.inputs), None)
+                    col1_inp = next((n.inputs[nm] for nm in a_names if nm in n.inputs), None)
+                    col2_inp = next((n.inputs[nm] for nm in b_names if nm in n.inputs), None)
+                    fac_v = float(fac_inp.default_value) if fac_inp and not fac_inp.links else 0.5
+                    bt = getattr(n, 'blend_type', 'MIX')
+                    # Determine which input is the texture (already loaded in pixels)
+                    # and which is a constant.  We assume the first linked-to-image
+                    # input is whichever fed into this node via the chain.
+                    # If col1 has no links its value is constant; pixel is "A".
+                    if col1_inp and not col1_inp.links:
+                        const = list(col1_inp.default_value)[:4]
+                        pixels = _mix_pixels_with_constant(pixels, const, fac_v, bt, const_is_b=False)
+                    elif col2_inp and not col2_inp.links:
+                        const = list(col2_inp.default_value)[:4]
+                        pixels = _mix_pixels_with_constant(pixels, const, fac_v, bt, const_is_b=True)
+                    else:
+                        unhandled.append(f'{n.type}(both-inputs-textured)')
+                        continue
+                    applied_ops.append(f'Mix({bt},fac={fac_v:.2f})')
                 else:
                     unhandled.append(n.type)
 
@@ -1014,10 +1307,284 @@ def main():
     print("=" * 60)
 
     # -----------------------------------------------------------------------
+    # Inject ND_image_* nodes into OpenPBR subgraphs that are missing textures
+    # (Blender emits OpenPBR terminals with literal values; textures only exist
+    #  in the UsdPreviewSurface subgraph — we bridge them here so the graph is
+    #  self-contained before OSL/MaterialX evaluation.)
+    # -----------------------------------------------------------------------
+    if os.path.exists(out_path):
+        _inject_materialx_textures(out_path)
+
+    # -----------------------------------------------------------------------
     # Extract MaterialX node graphs → JSON sidecar
     # -----------------------------------------------------------------------
     if os.path.exists(out_path):
         _extract_materialx_sidecar(out_path)
+
+
+# ---------------------------------------------------------------------------
+# MaterialX texture injector
+# ---------------------------------------------------------------------------
+# Maps UsdPreviewSurface input → (OpenPBR input, ND_image node type, SdfType)
+_PREVIEW_TO_OPENPBR_TEX = [
+    # (preview_input,   openpbr_input,         nd_image_type,       output_name)
+    ('diffuseColor',   'base_color',           'ND_image_color3',   'out'),
+    ('roughness',      'specular_roughness',   'ND_image_float',    'out'),
+    ('metallic',       'base_metalness',       'ND_image_float',    'out'),
+    ('emissiveColor',  'emission_color',       'ND_image_color3',   'out'),
+    # Normal handled separately below
+]
+
+
+def _inject_materialx_textures(usd_path):
+    """
+    Post-process the exported USD to inject ND_image_* nodes into OpenPBR
+    subgraphs where Blender left literal values instead of texture connections.
+
+    For each material that has both an ND_open_pbr_surface_surfaceshader and a
+    UsdPreviewSurface shader, we inspect the UsdPreviewSurface subgraph for
+    UsdUVTexture connections.  For each texture found on a mapped input, if the
+    corresponding OpenPBR input has no connection, we create:
+      - ND_texcoord_vector2  (shared per material, created once)
+      - ND_place2d_vector2   (if the UsdTransform2d has non-identity values)
+      - ND_image_<type>      (one per texture)
+    and wire them into the OpenPBR terminal.
+
+    The stage is saved in-place.  This makes the OpenPBR subgraph self-contained
+    so OSL/MaterialX evaluation does not need to fall back to UsdPreviewSurface.
+    """
+    try:
+        from pxr import Usd, UsdShade, Sdf, Gf
+    except ImportError:
+        print("  [mtlx inject] pxr not available — skipping.")
+        return
+
+    print()
+    print("  Injecting MaterialX texture nodes into OpenPBR subgraphs...")
+
+    stage = Usd.Stage.Open(usd_path)
+    if not stage:
+        print("  [mtlx inject] Could not open stage — skipping.")
+        return
+
+    OPEN_PBR_ID  = "ND_open_pbr_surface_surfaceshader"
+    PREVIEW_ID   = "UsdPreviewSurface"
+    UVTEX_ID     = "UsdUVTexture"
+    TRANSFORM_ID = "UsdTransform2d"
+    injected_total = 0
+
+    for mat_prim in stage.Traverse():
+        if not mat_prim.IsA(UsdShade.Material):
+            continue
+
+        # --- find OpenPBR terminal ---
+        openpbr = None
+        for desc in Usd.PrimRange(mat_prim):
+            if not desc.IsA(UsdShade.Shader):
+                continue
+            id_attr = desc.GetAttribute("info:id")
+            if id_attr and id_attr.IsValid():
+                tok = id_attr.Get()
+                sid = tok.GetString() if hasattr(tok, 'GetString') else str(tok)
+                if sid == OPEN_PBR_ID:
+                    openpbr = UsdShade.Shader(desc)
+                    break
+        if openpbr is None:
+            continue
+
+        # --- find UsdPreviewSurface shader ---
+        preview = None
+        for desc in Usd.PrimRange(mat_prim):
+            if not desc.IsA(UsdShade.Shader):
+                continue
+            id_attr = desc.GetAttribute("info:id")
+            if id_attr and id_attr.IsValid():
+                tok = id_attr.Get()
+                sid = tok.GetString() if hasattr(tok, 'GetString') else str(tok)
+                if sid == PREVIEW_ID:
+                    preview = UsdShade.Shader(desc)
+                    break
+        if preview is None:
+            continue
+
+        mat_path = mat_prim.GetPath()
+        injected = 0
+
+        # Shared ND_texcoord_vector2 prim (one per material, created on demand)
+        texcoord_prim_path = mat_path.AppendChild("mtlx_texcoord")
+        texcoord_output    = None   # filled lazily
+
+        def _ensure_texcoord():
+            nonlocal texcoord_output
+            if texcoord_output is not None:
+                return texcoord_output
+            tc = UsdShade.Shader.Define(stage, texcoord_prim_path)
+            tc.CreateIdAttr("ND_texcoord_vector2")
+            tc.CreateInput("index", Sdf.ValueTypeNames.Int).Set(0)
+            texcoord_output = tc.CreateOutput("out", Sdf.ValueTypeNames.Float2)
+            return texcoord_output
+
+        def _get_asset_path_str(prim, input_name):
+            """Return resolved (or raw) file path from a shader prim's asset input."""
+            attr = prim.GetAttribute(f"inputs:{input_name}")
+            if not attr:
+                return None
+            val = attr.Get()
+            if val is None:
+                return None
+            resolved = val.GetResolvedPath() if hasattr(val, 'GetResolvedPath') else ""
+            asset    = val.GetAssetPath()    if hasattr(val, 'GetAssetPath')    else str(val)
+            return resolved if resolved else asset if asset else None
+
+        # ---- colour / scalar inputs ----
+        for preview_inp_name, openpbr_inp_name, nd_type, out_name in _PREVIEW_TO_OPENPBR_TEX:
+            # Skip if OpenPBR input is already connected (to ND_image or NodeGraph)
+            openpbr_inp = openpbr.GetInput(openpbr_inp_name)
+            if openpbr_inp and openpbr_inp.HasConnectedSource():
+                continue
+
+            preview_inp = preview.GetInput(preview_inp_name)
+            if not preview_inp or not preview_inp.HasConnectedSource():
+                continue
+
+            srcs = preview_inp.GetConnectedSources()
+            if not srcs:
+                continue
+            uvtex_prim, _ = _follow_connection(srcs[0])
+            if not uvtex_prim or not uvtex_prim.IsValid():
+                continue
+
+            uvtex = UsdShade.Shader(uvtex_prim)
+            uv_id_attr = uvtex_prim.GetAttribute("info:id")
+            uv_id = ""
+            if uv_id_attr and uv_id_attr.IsValid():
+                tok = uv_id_attr.Get()
+                uv_id = tok.GetString() if hasattr(tok, 'GetString') else str(tok)
+            if uv_id != UVTEX_ID:
+                continue
+
+            # Read file path
+            file_path = _get_asset_path_str(uvtex_prim, "file")
+            if not file_path:
+                continue
+
+            # Check for UsdTransform2d on the st input
+            place2d_output = None
+            st_inp = uvtex.GetInput("st")
+            if st_inp and st_inp.HasConnectedSource():
+                st_srcs = st_inp.GetConnectedSources()
+                if st_srcs:
+                    xf_prim, _ = _follow_connection(st_srcs[0])
+                    xf = UsdShade.Shader(xf_prim)
+                    xf_id_attr = xf_prim.GetAttribute("info:id")
+                    xf_id = ""
+                    if xf_id_attr and xf_id_attr.IsValid():
+                        tok = xf_id_attr.Get()
+                        xf_id = tok.GetString() if hasattr(tok, 'GetString') else str(tok)
+                    if xf_id == TRANSFORM_ID:
+                        # Read scale / translation / rotation
+                        sc_inp  = xf.GetInput("scale")
+                        tr_inp  = xf.GetInput("translation")
+                        rot_inp = xf.GetInput("rotation")
+                        sc  = sc_inp.Get()  if sc_inp  else Gf.Vec2f(1, 1)
+                        tr  = tr_inp.Get()  if tr_inp  else Gf.Vec2f(0, 0)
+                        rot = rot_inp.Get() if rot_inp else 0.0
+                        if sc  is None: sc  = Gf.Vec2f(1, 1)
+                        if tr  is None: tr  = Gf.Vec2f(0, 0)
+                        if rot is None: rot = 0.0
+
+                        is_identity = (abs(sc[0]-1)<1e-5 and abs(sc[1]-1)<1e-5
+                                       and abs(tr[0])<1e-5 and abs(tr[1])<1e-5
+                                       and abs(rot)<1e-5)
+                        if not is_identity:
+                            # Create ND_place2d_vector2
+                            p2d_path = mat_path.AppendChild(
+                                f"mtlx_place2d_{preview_inp_name}")
+                            p2d = UsdShade.Shader.Define(stage, p2d_path)
+                            p2d.CreateIdAttr("ND_place2d_vector2")
+                            p2d.CreateInput("scale",  Sdf.ValueTypeNames.Float2).Set(sc)
+                            p2d.CreateInput("offset", Sdf.ValueTypeNames.Float2).Set(tr)
+                            p2d.CreateInput("rotate", Sdf.ValueTypeNames.Float).Set(rot)
+                            tc_out = _ensure_texcoord()
+                            p2d.CreateInput("texcoord",
+                                            Sdf.ValueTypeNames.Float2).ConnectToSource(tc_out)
+                            place2d_output = p2d.CreateOutput("out", Sdf.ValueTypeNames.Float2)
+
+            # Create ND_image_* node
+            img_prim_path = mat_path.AppendChild(f"mtlx_image_{preview_inp_name}")
+            img_shader = UsdShade.Shader.Define(stage, img_prim_path)
+            img_shader.CreateIdAttr(nd_type)
+            img_shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(
+                Sdf.AssetPath(file_path))
+
+            # Determine output SdfType from nd_type
+            if nd_type == 'ND_image_color3':
+                out_type = Sdf.ValueTypeNames.Color3f
+            elif nd_type == 'ND_image_float':
+                out_type = Sdf.ValueTypeNames.Float
+            else:
+                out_type = Sdf.ValueTypeNames.Float3
+
+            # Wire UV
+            uv_src = place2d_output if place2d_output else _ensure_texcoord()
+            img_shader.CreateInput("texcoord", Sdf.ValueTypeNames.Float2).ConnectToSource(uv_src)
+
+            img_out = img_shader.CreateOutput("out", out_type)
+
+            # Connect to OpenPBR input
+            if openpbr_inp is None:
+                openpbr_inp = openpbr.CreateInput(openpbr_inp_name, out_type)
+            openpbr_inp.ConnectToSource(img_out)
+            injected += 1
+
+        # ---- normal map ----
+        norm_inp_preview = preview.GetInput("normal")
+        norm_inp_openpbr = openpbr.GetInput("geometry_normal")
+        if (norm_inp_preview and norm_inp_preview.HasConnectedSource()
+                and (norm_inp_openpbr is None or not norm_inp_openpbr.HasConnectedSource())):
+            srcs = norm_inp_preview.GetConnectedSources()
+            if srcs:
+                uvtex_prim, _ = _follow_connection(srcs[0])
+                uvtex = UsdShade.Shader(uvtex_prim)
+                file_path = _get_asset_path_str(uvtex_prim, "file")
+                if file_path:
+                        img_prim_path = mat_path.AppendChild("mtlx_image_normal")
+                        img_shader = UsdShade.Shader.Define(stage, img_prim_path)
+                        img_shader.CreateIdAttr("ND_image_vector3")
+                        img_shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(
+                            Sdf.AssetPath(file_path))
+                        tc_out = _ensure_texcoord()
+                        img_shader.CreateInput("texcoord",
+                                               Sdf.ValueTypeNames.Float2).ConnectToSource(tc_out)
+                        img_out = img_shader.CreateOutput("out", Sdf.ValueTypeNames.Float3)
+
+                        nm_path = mat_path.AppendChild("mtlx_normalmap")
+                        nm = UsdShade.Shader.Define(stage, nm_path)
+                        nm.CreateIdAttr("ND_normalmap_vector3")
+                        nm.CreateInput("in", Sdf.ValueTypeNames.Float3).ConnectToSource(img_out)
+                        # Read scale from UsdUVTexture scale/bias if present
+                        sc_attr = uvtex_prim.GetAttribute("inputs:scale")
+                        sc_val = sc_attr.Get() if sc_attr else None
+                        nm_scale = float(sc_val[0]) if sc_val is not None else 2.0
+                        nm.CreateInput("scale", Sdf.ValueTypeNames.Float).Set(nm_scale)
+                        nm_out = nm.CreateOutput("out", Sdf.ValueTypeNames.Float3)
+
+                        if norm_inp_openpbr is None:
+                            norm_inp_openpbr = openpbr.CreateInput(
+                                "geometry_normal", Sdf.ValueTypeNames.Float3)
+                        norm_inp_openpbr.ConnectToSource(nm_out)
+                        injected += 1
+
+        if injected:
+            print(f"  [mtlx inject] {mat_prim.GetPath()}: injected {injected} texture node(s)")
+            injected_total += injected
+
+    if injected_total == 0:
+        print("  [mtlx inject] No missing texture connections found.")
+    else:
+        stage.Save()
+        print(f"  [mtlx inject] Saved stage with {injected_total} new node(s).")
+    print("=" * 60)
 
 
 # ---------------------------------------------------------------------------
@@ -1054,20 +1621,26 @@ def _get_shader_input_value(inp):
 
 
 def _follow_connection(src_info):
-    """Extract (prim, source_output_name) from a UsdShadeConnectionSourceInfo
-    (or the older tuple form).  Returns (None, None) on failure."""
+    """Extract (prim, source_output_name) from a UsdShadeConnectionSourceInfo.
+
+    Blender's bundled USD wraps each element in an extra list, so
+    GetConnectedSources() returns [[ConnectionSourceInfo], ...] rather than
+    [ConnectionSourceInfo, ...].  Unwrap one level if needed.
+    """
+    # Unwrap list-of-list if present
+    if isinstance(src_info, list):
+        if not src_info:
+            return None, None
+        src_info = src_info[0]
+    # src_info is now a ConnectionSourceInfo object
     try:
         prim = src_info.source.GetPrim()
         out_name = (src_info.sourceName.GetString()
                     if hasattr(src_info.sourceName, 'GetString')
                     else str(src_info.sourceName))
         return prim, out_name
-    except AttributeError:
-        try:
-            prim = src_info[0].GetPrim()
-            return prim, None
-        except Exception:
-            return None, None
+    except Exception:
+        return None, None
 
 
 def _resolve_through_nodegraph(prim, output_name):
