@@ -78,6 +78,14 @@
         "OpenImageDenoise_DIR": "$env{HOME}/oidn/lib/cmake/OpenImageDenoise-2.3.0",
         "CMAKE_PREFIX_PATH": "$env{HOME}/usd/lib/cmake/OpenSubdiv"
       }
+    },
+    {
+      "name": "linux-x86_64-cuda-viewer",
+      "displayName": "Linux x86_64 + CUDA + Viewer (Release)",
+      "inherits": "linux-x86_64-cuda",
+      "cacheVariables": {
+        "ANACAPA_ENABLE_VIEWER": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -100,6 +108,10 @@
     {
       "name": "linux-x86_64-cuda",
       "configurePreset": "linux-x86_64-cuda"
+    },
+    {
+      "name": "linux-x86_64-cuda-viewer",
+      "configurePreset": "linux-x86_64-cuda-viewer"
     }
   ]
 }
