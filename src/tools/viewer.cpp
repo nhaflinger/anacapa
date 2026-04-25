@@ -71,14 +71,21 @@ uniform float uExposure;      // EV stops
 uniform float uSaturation;    // 0=greyscale, 1=original, 2=vivid
 uniform float uContrast;      // -1 to +1
 uniform float uTemperature;   // -1=cool, 0=neutral, +1=warm
+uniform bool  uTonemap;       // ACES filmic tone mapping on/off
 
 // sRGB decode (approximate)
 vec3 srgbToLinear(vec3 c) { return pow(max(c, 0.0), vec3(2.2)); }
 // sRGB encode (approximate)
 vec3 linearToSrgb(vec3 c) { return pow(max(c, 0.0), vec3(1.0/2.2)); }
 
+// ACES RRT+ODT approximation (Krzysztof Narkowicz, 2016)
+vec3 aces(vec3 x) {
+    x *= 0.6;
+    const float a = 2.51, b = 0.03, c2 = 2.43, d = 0.59, e = 0.14;
+    return clamp((x*(a*x+b))/(x*(c2*x+d)+e), 0.0, 1.0);
+}
+
 vec3 applyTemperature(vec3 c, float t) {
-    // Warm: boost R, reduce B. Cool: boost B, reduce R.
     c.r *= 1.0 + t * 0.2;
     c.g *= 1.0 + t * 0.05;
     c.b *= 1.0 - t * 0.2;
@@ -103,6 +110,12 @@ void main() {
 
     // Contrast (pivot around 0.5 in linear)
     c = (c - 0.5) * (1.0 + uContrast) + 0.5;
+
+    // Optional ACES tone mapping
+    if (uTonemap)
+        c = aces(c);
+    else
+        c = clamp(c, 0.0, 1.0);
 
     c = linearToSrgb(c);
     fragColor = vec4(c, 1.0);
@@ -178,7 +191,7 @@ static void ensureFBO(int w, int h)
 }
 
 static void processImage(float exposure, float saturation,
-                         float contrast, float temperature)
+                         float contrast, float temperature, bool tonemap)
 {
     if (!g_srcTexture || g_texWidth == 0) return;
 
@@ -195,6 +208,7 @@ static void processImage(float exposure, float saturation,
     glUniform1f(glGetUniformLocation(g_shader, "uSaturation"),  saturation);
     glUniform1f(glGetUniformLocation(g_shader, "uContrast"),    contrast);
     glUniform1f(glGetUniformLocation(g_shader, "uTemperature"), temperature);
+    glUniform1i(glGetUniformLocation(g_shader, "uTonemap"),     tonemap ? 1 : 0);
 
     glBindVertexArray(g_quadVAO);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -322,6 +336,7 @@ int main(int argc, char** argv)
         float       saturation = 1.f;
         float       contrast   = 0.f;
         float       temperature= 0.f;
+        bool        toneMap    = false;
     };
     SlotState slots[kNumSlots];
 
@@ -359,6 +374,7 @@ int main(int argc, char** argv)
                     auto& s = slots[activeSlot];
                     s.exposure = 0.f; s.saturation = 1.f;
                     s.contrast = 0.f; s.temperature = 0.f;
+                    s.toneMap  = false;
                 }
                 // Number keys 1-8 switch view slot; Shift+number sets record slot
                 if (event.key.keysym.sym >= SDLK_1 && event.key.keysym.sym <= SDLK_8) {
@@ -399,7 +415,7 @@ int main(int argc, char** argv)
         g_srcTexture = as.srcTex;
         g_texWidth   = as.texW;
         g_texHeight  = as.texH;
-        processImage(as.exposure, as.saturation, as.contrast, as.temperature);
+        processImage(as.exposure, as.saturation, as.contrast, as.temperature, as.toneMap);
         g_srcTexture = 0; g_texWidth = 0; g_texHeight = 0;
 
         // ImGui frame
@@ -471,6 +487,7 @@ int main(int argc, char** argv)
         ImGui::SliderFloat("##exp", &as.exposure,    -4.f, 4.f, "Exposure: %.2f EV");
         ImGui::SetNextItemWidth(-1);
         ImGui::SliderFloat("##con", &as.contrast,    -1.f, 1.f, "Contrast: %.2f");
+        ImGui::Checkbox("ACES Filmic", &as.toneMap);
 
         ImGui::SeparatorText("Color");
         ImGui::SetNextItemWidth(-1);
@@ -489,6 +506,7 @@ int main(int argc, char** argv)
         if (ImGui::Button("Reset  (R)", {-1, 0})) {
             as.exposure = 0.f; as.saturation = 1.f;
             as.contrast = 0.f; as.temperature = 0.f;
+            as.toneMap  = false;
         }
 
         ImGui::Spacing();

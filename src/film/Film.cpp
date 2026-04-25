@@ -228,7 +228,7 @@ bool Film::writeEXR(const std::string& path,
 }
 
 // ---------------------------------------------------------------------------
-// writePNG — ACES filmic tone map + sRGB gamma, written as 8-bit PNG/JPEG
+// writePNG — exposure + sRGB gamma only (no tone mapping), written as 8-bit PNG/JPEG
 // ---------------------------------------------------------------------------
 bool Film::writePNG(const std::string& path, float exposure) const {
     using namespace OIIO;
@@ -236,17 +236,9 @@ bool Film::writePNG(const std::string& path, float exposure) const {
     const uint32_t N = m_width * m_height;
     const float evScale = std::pow(2.f, exposure);
 
-    // ACES RRT+ODT approximation (Krzysztof Narkowicz, 2016)
-    auto aces = [](float x) -> float {
-        x *= 0.6f;  // pre-exposure to bring scene-linear into ACES range
-        const float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
-        return std::max(0.f, std::min(1.f,
-            (x * (a * x + b)) / (x * (c * x + d) + e)));
-    };
-
-    // linear -> sRGB
+    // linear -> sRGB (no tone mapping — clamp to [0,1] after exposure)
     auto linearToSRGB = [](float x) -> float {
-        x = std::max(0.f, x);
+        x = std::max(0.f, std::min(1.f, x));
         if (x <= 0.0031308f) return 12.92f * x;
         return 1.055f * std::pow(x, 1.f / 2.4f) - 0.055f;
     };
@@ -257,9 +249,9 @@ bool Film::writePNG(const std::string& path, float exposure) const {
         c.x *= evScale;
         c.y *= evScale;
         c.z *= evScale;
-        pixels[i*3+0] = static_cast<uint8_t>(std::min(255.f, linearToSRGB(aces(c.x)) * 255.f + 0.5f));
-        pixels[i*3+1] = static_cast<uint8_t>(std::min(255.f, linearToSRGB(aces(c.y)) * 255.f + 0.5f));
-        pixels[i*3+2] = static_cast<uint8_t>(std::min(255.f, linearToSRGB(aces(c.z)) * 255.f + 0.5f));
+        pixels[i*3+0] = static_cast<uint8_t>(linearToSRGB(c.x) * 255.f + 0.5f);
+        pixels[i*3+1] = static_cast<uint8_t>(linearToSRGB(c.y) * 255.f + 0.5f);
+        pixels[i*3+2] = static_cast<uint8_t>(linearToSRGB(c.z) * 255.f + 0.5f);
     }
 
     ImageSpec spec(static_cast<int>(m_width), static_cast<int>(m_height), 3, TypeDesc::UINT8);

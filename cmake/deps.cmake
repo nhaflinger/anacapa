@@ -85,13 +85,58 @@ endif()
 
 # ---------------------------------------------------------------------------
 # Open Shading Language (optional — Phase 4)
-# MaterialX node implementations are often written in OSL; the two work together.
-# Expected: brew install open-shading-language
+#
+# Strategy: link against Blender's bundled liboslexec/liboslcomp dylibs
+# (no system package needed), and fetch the OSL 1.14.7 headers-only from
+# GitHub so we can compile against them.
+#
+# Override paths:
+#   OSL_INCLUDE_DIR  — path to OSL headers (src/include inside a checkout)
+#   OSL_LIB_DIR      — directory containing liboslexec.dylib / .so
 # ---------------------------------------------------------------------------
 if(ANACAPA_ENABLE_OSL)
-    find_package(OSL REQUIRED COMPONENTS oslexec oslcomp)
-    target_link_libraries(anacapa_lib PUBLIC OSL::oslexec OSL::oslcomp)
-    target_compile_definitions(anacapa_lib PUBLIC ANACAPA_ENABLE_OSL)
+    # --- Headers: fetch OSL 1.14.7 source for its include/ directory ---------
+    if(NOT OSL_INCLUDE_DIR)
+        FetchContent_Declare(
+            osl_headers
+            GIT_REPOSITORY https://github.com/AcademySoftwareFoundation/OpenShadingLanguage.git
+            GIT_TAG        v1.14.7.0
+            GIT_SHALLOW    TRUE
+            # Only need the include directory — skip everything else.
+            GIT_SUBMODULES ""
+        )
+        # We never call FetchContent_MakeAvailable (no build needed) — just
+        # populate so we know the source directory.
+        FetchContent_GetProperties(osl_headers)
+        if(NOT osl_headers_POPULATED)
+            FetchContent_Populate(osl_headers)
+        endif()
+        set(OSL_INCLUDE_DIR "${osl_headers_SOURCE_DIR}/src/include"
+            CACHE PATH "Path to OSL headers" FORCE)
+    endif()
+    message(STATUS "OSL headers: ${OSL_INCLUDE_DIR}")
+
+    # --- Libraries: prefer explicit OSL_LIB_DIR, then Blender (Steam/App) ----
+    if(NOT OSL_LIB_DIR)
+        # Steam install
+        set(_blender_steam
+            "$ENV{HOME}/Library/Application Support/Steam/steamapps/common/Blender/Blender.app/Contents/Resources/lib")
+        # Non-Steam .app install
+        set(_blender_app
+            "/Applications/Blender.app/Contents/Resources/lib")
+        if(EXISTS "${_blender_steam}/liboslexec.dylib")
+            set(OSL_LIB_DIR "${_blender_steam}" CACHE PATH "OSL library directory" FORCE)
+        elseif(EXISTS "${_blender_app}/liboslexec.dylib")
+            set(OSL_LIB_DIR "${_blender_app}" CACHE PATH "OSL library directory" FORCE)
+        else()
+            message(FATAL_ERROR
+                "ANACAPA_ENABLE_OSL: cannot find liboslexec.dylib.\n"
+                "Set -DOSL_LIB_DIR=/path/to/dir/containing/liboslexec")
+        endif()
+    endif()
+    message(STATUS "OSL libs: ${OSL_LIB_DIR}")
+
+    # target_* commands are applied in CMakeLists.txt after anacapa_lib is defined
 endif()
 
 # ---------------------------------------------------------------------------

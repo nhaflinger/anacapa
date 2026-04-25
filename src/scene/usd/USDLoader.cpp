@@ -3,6 +3,7 @@
 #include "USDLoader.h"
 #include "../../shading/Lambertian.h"
 #include "../../shading/StandardSurface.h"
+#include "../../shading/OslMaterial.h"
 #include "../../shading/lights/AreaLight.h"
 #include "../../shading/lights/DirectionalLight.h"
 #include "../../shading/lights/DomeLight.h"
@@ -31,9 +32,11 @@
 #include <pxr/base/vt/array.h>
 
 #include <spdlog/spdlog.h>
+
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <unordered_map>
@@ -522,6 +525,64 @@ static FloatTOV resolveFloatTOVWithFallback(const FloatTOV& primary,
 // ---------------------------------------------------------------------------
 static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                                                     const std::string& stageDir) {
+#ifdef ANACAPA_ENABLE_OSL
+    // If a matching .osl/.oso file exists in <stageDir>/materials/, prefer
+    // OslMaterial — it evaluates the full procedural MaterialX graph.
+    //
+    // OSL compilation (.osl → .oso) is done via oslCompileShader() in
+    // OslMaterial.cpp which isolates all OSL/OIIO includes from this TU.
+    {
+        auto tryOsl = [&](const std::string& name) -> std::unique_ptr<IMaterial> {
+            if (name.empty()) return nullptr;
+            std::string matDir = stageDir + "/materials";
+            std::string osoPath = matDir + "/" + name + ".oso";
+            std::string oslPath = matDir + "/" + name + ".osl";
+
+            // Compile .osl → .oso if .oso is missing or older than .osl
+            {
+                namespace fs = std::filesystem;
+                bool needCompile = false;
+                if (!fs::exists(osoPath)) {
+                    if (!fs::exists(oslPath)) return nullptr;
+                    needCompile = true;
+                } else if (fs::exists(oslPath) &&
+                           fs::last_write_time(oslPath) > fs::last_write_time(osoPath)) {
+                    needCompile = true;
+                }
+                if (needCompile) {
+                    spdlog::info("USDLoader: compiling OSL shader '{}'", oslPath);
+                    if (!oslCompileShader(oslPath, osoPath, matDir)) return nullptr;
+                }
+            }
+
+            // Register the materials/ dir with the OSL ShadingSystem (once per dir)
+            static std::string s_registeredDir;
+            if (s_registeredDir != matDir) {
+                oslAddSearchPath(matDir);
+                s_registeredDir = matDir;
+            }
+
+            spdlog::info("USDLoader: material '{}' → OslMaterial ('{}')",
+                         mat.GetPath().GetString(), name);
+            auto m = makeOslMaterial(name);
+            if (!m)
+                spdlog::warn("USDLoader: OslMaterial load failed for '{}'; "
+                             "falling back to StandardSurface", name);
+            return m;
+        };
+
+        // Prefer blender:data_name (the Blender material name used as filename)
+        std::string blenderName;
+        UsdAttribute nameAttr = mat.GetPrim().GetAttribute(
+            TfToken("userProperties:blender:data_name"));
+        if (nameAttr) nameAttr.Get(&blenderName);
+
+        auto osl = tryOsl(blenderName);
+        if (!osl) osl = tryOsl(mat.GetPrim().GetName().GetString());
+        if (osl) return osl;
+    }
+#endif
+
     // Try OpenPBR (MaterialX) first — richer parameterisation
     UsdShadeShader openPBR = findOpenPBRShader(mat);
     if (openPBR) {

@@ -63,6 +63,20 @@ if(ANACAPA_ENABLE_USD)
     target_compile_definitions(anacapa_lib PUBLIC ANACAPA_ENABLE_USD)
 endif()
 
+if(ANACAPA_ENABLE_OSL)
+    target_include_directories(anacapa_lib PUBLIC "${OSL_INCLUDE_DIR}")
+    target_link_directories(anacapa_lib PUBLIC "${OSL_LIB_DIR}")
+    target_link_libraries(anacapa_lib PUBLIC
+        "${OSL_LIB_DIR}/liboslexec.dylib"
+        "${OSL_LIB_DIR}/liboslcomp.dylib"
+    )
+    set_target_properties(anacapa_lib PROPERTIES
+        BUILD_RPATH "${OSL_LIB_DIR}"
+        INSTALL_RPATH "${OSL_LIB_DIR}"
+    )
+    target_compile_definitions(anacapa_lib PUBLIC ANACAPA_ENABLE_OSL)
+endif()
+
 if(ANACAPA_ENABLE_METAL)
     target_link_libraries(anacapa_lib PUBLIC
         ${METAL_LIBRARY} ${FOUNDATION_LIB} ${QUARTZCORE_LIB}

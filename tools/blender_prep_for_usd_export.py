@@ -3002,16 +3002,137 @@ def _generate_osl_from_mtlx_dir(mtlx_dir: str, mx_lib_path: str):
     shared_header = None
     if first_boilerplate.strip():
         header_path = os.path.join(mtlx_dir, '_mx_stdlib.h')
+
+        # Collect mx_*.osl function bodies from the MaterialX genosl directory.
+        # These files contain function definitions (e.g. mx_fractal3d_float,
+        # mx_heighttonormal_vector3) that the generator calls but does not
+        # inline.  We need to append them to the shared header so oslc can
+        # find them when compiling each per-material shader.
+        genosl_extras = []
+        genosl_dir = os.path.join(mx_lib_path, 'libraries', 'stdlib', 'genosl')
+        genosl_file_count = 0
+
+        if os.path.isdir(genosl_dir):
+            import re as _re2
+
+            # Helper: strip all #include lines from OSL source.
+            def _strip_includes(src):
+                return ''.join(
+                    ln for ln in src.splitlines(keepends=True)
+                    if not ln.lstrip().startswith('#include')
+                )
+
+            # Helper: extract function/struct names defined at top level.
+            # Covers all OSL primitives + Imath/MaterialX extended types.
+            _DEF_RE = _re2.compile(
+                r'^(?:void|float|int|string'
+                r'|color[234]?|vector[234]?|point|normal|matrix(?:33|44)?'
+                r'|closure\s+color|struct'
+                r'|MATERIAL|surfaceshader|displacementshader)\s+(\w+)\s*[({]',
+                _re2.MULTILINE)
+
+            def _defined_names(src):
+                return set(_DEF_RE.findall(src))
+
+            # Names already defined in the boilerplate — skip these to avoid
+            # redefinition warnings/errors.
+            already_defined = _defined_names(first_boilerplate)
+
+            # Read all mx_*.osl files from the genosl root.
+            genosl_contents = {}  # name -> raw text
+            for gname in os.listdir(genosl_dir):
+                if gname.startswith('mx_') and gname.endswith('.osl'):
+                    gpath = os.path.join(genosl_dir, gname)
+                    with open(gpath, 'r', errors='replace') as gf:
+                        genosl_contents[gname] = gf.read()
+
+            # Also read lib/ helpers (mx_transform_uv etc.).
+            genosl_lib_contents = {}
+            genosl_lib_dir = os.path.join(genosl_dir, 'lib')
+            if os.path.isdir(genosl_lib_dir):
+                for lname in os.listdir(genosl_lib_dir):
+                    if lname.endswith('.osl'):
+                        lpath = os.path.join(genosl_lib_dir, lname)
+                        with open(lpath, 'r', errors='replace') as lf:
+                            genosl_lib_contents[lname] = lf.read()
+
+            # Build dependency graph from #include "mx_*.osl" directives
+            # (e.g. mx_burn_color3.osl includes mx_burn_float.osl).
+            def _cross_deps(name, contents_dict):
+                src = contents_dict.get(name, '')
+                return [
+                    d for d in _re2.findall(
+                        r'^#include\s+"(mx_[^"]+\.osl)"', src, _re2.MULTILINE)
+                    if d in contents_dict
+                ]
+
+            # Topological sort via DFS so dependencies come before dependents.
+            def _topo_sort(names, contents_dict):
+                result, visited, in_stack = [], set(), set()
+                def visit(n):
+                    if n in in_stack or n in visited:
+                        return
+                    in_stack.add(n)
+                    for dep in _cross_deps(n, contents_dict):
+                        visit(dep)
+                    in_stack.discard(n)
+                    visited.add(n)
+                    result.append(n)
+                for n in sorted(names):
+                    visit(n)
+                return result
+
+            # Append a file's stripped body if it introduces new function names.
+            def _append_if_new(name, src, label):
+                nonlocal genosl_file_count
+                detected = _defined_names(src)
+                new_names = detected - already_defined
+                if detected and not new_names:
+                    return  # all functions already covered by the boilerplate
+                # If detected is empty (regex didn't match the type), include
+                # the file anyway to be safe — don't silently drop it.
+                already_defined.update(new_names)
+                stripped = _strip_includes(src)
+                genosl_extras.append(f'// --- {label} ---\n')
+                genosl_extras.append(stripped)
+                if not stripped.endswith('\n'):
+                    genosl_extras.append('\n')
+                genosl_extras.append('\n')
+                genosl_file_count += 1
+
+            # 1. lib/ helpers first (mx_transform_uv etc.)
+            for lname in sorted(genosl_lib_contents):
+                _append_if_new(lname, genosl_lib_contents[lname], f'lib/{lname}')
+
+            # 2. mx_*.osl in topological order (deps before dependents)
+            for gname in _topo_sort(genosl_contents, genosl_contents):
+                _append_if_new(gname, genosl_contents[gname], gname)
+
+            print(f"  [osl gen] Appended {genosl_file_count} genosl function file(s) "
+                  f"from {genosl_dir}")
+
         with open(header_path, 'w') as f:
             f.write(first_boilerplate)
+            if genosl_extras:
+                f.write('\n// ---- mx_*.osl function definitions ----\n')
+                f.writelines(genosl_extras)
         shared_header = '_mx_stdlib.h'
         print(f"  [osl gen] Boilerplate extracted → {shared_header} "
               f"({len(first_boilerplate.splitlines())} lines)")
 
-    # Rewrite each .osl: strip its own boilerplate, prepend the #include
+    # Rewrite each .osl: strip its own boilerplate, prepend the #include,
+    # and inject "Ci = out;" before the final closing brace so the renderer
+    # can read the closure via sg.Ci without needing find_symbol().
+    def _inject_ci_assignment(shader_body: str) -> str:
+        idx = shader_body.rfind('}')
+        if idx < 0:
+            return shader_body
+        return shader_body[:idx] + '    Ci = out;\n' + shader_body[idx:]
+
     for osl_path, osl_source in generated:
         if shared_header:
             _, shader_body = _split_osl(osl_source)
+            shader_body = _inject_ci_assignment(shader_body)
             content = f'#include "{shared_header}"\n\n{shader_body}'
         else:
             content = osl_source

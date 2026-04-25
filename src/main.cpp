@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
     app.add_option("--tile-size",  settings.tileSize,        "Tile size in pixels")
        ->default_val(64);
 
-    std::string integratorName = "bdpt";
+    std::string integratorName = "path";
     app.add_option("--integrator", integratorName,
                    "Integrator: bdpt (default) or path")
        ->default_val("bdpt");
