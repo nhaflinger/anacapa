@@ -104,8 +104,11 @@ public:
         return s;
     }
 
+    // wo = direction from scene point toward the emitter (outgoing at the surface,
+    // consistent with DomeLight::Le convention). The emitter is visible when wo
+    // and m_normal point in opposite hemispheres (m_normal faces the scene).
     Spectrum Le(Vec3f /*pos*/, Vec3f normal, Vec3f wo) const override {
-        return dot(wo, normal) > 0.f ? m_Le : Spectrum{};
+        return dot(wo, normal) < 0.f ? m_Le : Spectrum{};
     }
 
     float power() const override {

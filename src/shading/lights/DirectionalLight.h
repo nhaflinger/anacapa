@@ -85,7 +85,7 @@ public:
     // Disk placed at  sceneCenter + dirToLight * 100R,  radius = sceneRadius.
     // Rays travel in direction  -dirToLight  toward the scene.
     // -----------------------------------------------------------------------
-    LightLeSample sampleLe(Vec2f uPos, Vec2f /*uDir*/) const override {
+    LightLeSample sampleLe(Vec2f uPos, Vec2f uDir) const override {
         // Uniform disk sampling
         float r   = m_sceneRadius * std::sqrt(uPos.x);
         float phi = 2.f * kDirLightPi * uPos.y;
@@ -96,24 +96,41 @@ public:
                          + t  * (r * std::cos(phi))
                          + bt * (r * std::sin(phi));
 
-        // Disk normal faces toward scene (-m_dir), ray direction is -m_dir
-        Vec3f normal = -m_dir;
-        Vec3f dir    = -m_dir;
+        // Ray direction: jitter within the cone using uDir, matching sample().
+        // This gives BDPT light subpath rays the same angular spread as NEE rays,
+        // so soft shadows from --light-angle work correctly in both integrators.
+        Vec3f dir;
+        if (m_cosCone >= 1.f - 1e-6f) {
+            dir = -m_dir;  // hard shadow, no jitter
+        } else {
+            float cosTheta = 1.f - uDir.x * (1.f - m_cosCone);
+            float sinTheta = std::sqrt(std::max(0.f, 1.f - cosTheta * cosTheta));
+            float p        = 2.f * kDirLightPi * uDir.y;
+            // Jitter around -m_dir (the travel direction away from source)
+            Vec3f negDir = -m_dir;
+            Vec3f dt, dbt;
+            buildOrthonormalBasis(negDir, dt, dbt);
+            dir = safeNormalize(
+                dt    * (sinTheta * std::cos(p)) +
+                dbt   * (sinTheta * std::sin(p)) +
+                negDir * cosTheta);
+        }
 
         LightLeSample s;
         s.Le     = m_Le;
         s.pos    = pos;
-        s.normal = normal;
+        s.normal = dir;   // disk normal aligns with travel direction
         s.dir    = dir;
         s.pdfPos = 1.f / m_diskArea;
-        s.pdfDir = 1.f;   // delta in direction; treated as fixed by BDPT
+        s.pdfDir = 1.f;   // delta in direction for MIS purposes
         return s;
     }
 
-    // Radiance emitted from a point on the imaginary disk in direction wo.
-    // Returns Le when wo points back toward scene (dot with disk normal > 0).
-    Spectrum Le(Vec3f /*pos*/, Vec3f normal, Vec3f wo) const override {
-        return dot(wo, normal) > 0.f ? m_Le : Spectrum{};
+    // wo = direction from scene point toward the light (outgoing at the surface,
+    // consistent with DomeLight::Le convention). Returns Le when wo aligns with
+    // m_dir (the direction from scene toward the light source).
+    Spectrum Le(Vec3f /*pos*/, Vec3f /*normal*/, Vec3f wo) const override {
+        return dot(wo, m_dir) > m_cosCone - 1e-4f ? m_Le : Spectrum{};
     }
 
     float power() const override {

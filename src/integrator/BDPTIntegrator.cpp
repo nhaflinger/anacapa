@@ -88,6 +88,7 @@ uint32_t BDPTIntegrator::traceCameraSubpath(const SceneView& scene,
     path.pdfRev[vi]   = 0.f;
     path.flags[vi]    = static_cast<uint32_t>(PathVertexType::Camera);
     path.meshID[vi]   = ~0u;
+    path.material[vi] = nullptr;
 
     Spectrum beta     = {1.f, 1.f, 1.f};
     Ray      ray      = primaryRay;
@@ -111,6 +112,7 @@ uint32_t BDPTIntegrator::traceCameraSubpath(const SceneView& scene,
                 path.flags[ei]    = static_cast<uint32_t>(PathVertexType::Light)
                                   | kVertexInfiniteBit;
                 path.meshID[ei]   = ~0u;
+                path.material[ei] = nullptr;   // must clear — reset() only zeroes count
                 path.light[ei]    = scene.envLight;
             }
             break;
@@ -208,9 +210,10 @@ uint32_t BDPTIntegrator::traceLightSubpath(const SceneView& scene,
     if (path.full() || m_lightSampler.empty()) return 0;
 
     path.sceneTime = sceneTime;
+    path.lightPdf  = m_lightSampler.pdf(lightIdx);
 
     const ILight* light    = scene.lights[lightIdx];
-    float         lightPdf = m_lightSampler.pdf(lightIdx);
+    float         lightPdf = path.lightPdf;
     if (lightPdf <= 0.f) return 0;
 
     // Sample a ray from the light
@@ -236,6 +239,7 @@ uint32_t BDPTIntegrator::traceLightSubpath(const SceneView& scene,
                       | (light->isDelta() ? kVertexDeltaBit : 0u)
                       | (light->isInfinite() ? kVertexInfiniteBit : 0u);
     path.meshID[vi]   = ~0u;
+    path.material[vi] = nullptr;
     path.light[vi]    = light;
 
     Ray   ray    = Ray{ls.pos, ls.dir};
@@ -346,40 +350,60 @@ Spectrum BDPTIntegrator::connect(const SceneView& scene,
         if (!cp.isConnectible(ct)) return {};
         if (!cp.material[ct]) return {};
 
-        // lp[0] is a point on the light — reconnect it toward cp[ct]
         const ILight* light = lp.light[0];
         if (!light) return {};
 
-        Vec3f toLight = lp.position[0] - cp.position[ct];
-        float dist    = toLight.length();
-        if (dist < 1e-6f) return {};
-        Vec3f wi = toLight * (1.f / dist);
+        Vec3f wi;
+        float shadowDist;
+        if (lp.isInfinite(0)) {
+            // Infinite light: direction is stored in lp.wo[0] (travel direction =
+            // from light toward scene).  Negate to get scene→light direction.
+            // Fire a long shadow ray — there is no finite geometry to connect to.
+            wi         = safeNormalize(-lp.wo[0]);
+            shadowDist = 1e10f;
+        } else {
+            Vec3f toLight = lp.position[0] - cp.position[ct];
+            float dist    = toLight.length();
+            if (dist < 1e-6f) return {};
+            wi         = toLight * (1.f / dist);
+            shadowDist = dist;
+        }
 
-        // Visibility — pass through transmissive surfaces
-        Ray shadowRay = spawnRayTo(cp.position[ct], cp.normal[ct], lp.position[0]);
+        // Visibility
+        Ray shadowRay = spawnRayTo(cp.position[ct], cp.normal[ct],
+                                   cp.position[ct] + wi * shadowDist);
         shadowRay.time = cp.sceneTime;
         Spectrum Tr1 = shadowTransmittance(shadowRay, scene);
         if (isBlack(Tr1)) return {};
 
-        // Evaluate BSDF at camera vertex
-        SurfaceInteraction si;
-        si.p = cp.position[ct]; si.n = cp.normal[ct]; si.ng = cp.normal[ct];
-        ShadingContext ctx(si, -cp.wo[ct]);
+        // BSDF at camera vertex
+        SurfaceInteraction si2;
+        si2.p = cp.position[ct]; si2.n = cp.normal[ct]; si2.ng = cp.normal[ct];
+        ShadingContext ctx(si2, -cp.wo[ct]);
         BSDFEval be = cp.material[ct]->evaluate(ctx, cp.wo[ct], wi);
         if (isBlack(be.f)) return {};
 
-        // Light emitted toward cp[ct]
-        // wi points from cp[ct] toward the infinite-light position, which is
-        // the outgoing direction toward the sky — correct convention for Le().
+        // Le: wi = direction from surface toward emitter (outgoing convention)
         Spectrum Le = light->Le(lp.position[0], lp.normal[0], wi);
         if (isBlack(Le)) return {};
 
         float cosI = std::abs(dot(wi, cp.normal[ct]));
-        float cosL = std::abs(dot(-wi, lp.normal[0]));
-        float dist2 = dist * dist;
 
-        L = cp.beta[ct] * be.f * cosI * Le * cosL * Tr1
-          / (dist2 * lp.pdfFwd[0]);
+        if (lp.isInfinite(0)) {
+            // Infinite light: correct formula is L = beta * f * cosI * Le / (lightPdf * pdfDir).
+            // For delta directional lights pdfDir = 1.
+            // For dome lights pdfDir = light->pdf(p, wi).
+            float pdfDir = light->pdf(cp.position[ct], wi);
+            if (pdfDir <= 0.f) pdfDir = 1.f;  // delta (directional) light
+            L = cp.beta[ct] * be.f * cosI * Le * Tr1 / (lp.lightPdf * pdfDir);
+        } else {
+            // Finite area light: standard solid-angle conversion.
+            // pdfFwd[0] = lightPdf * pdfPos (area PDF on the light surface).
+            float cosL  = std::abs(dot(-wi, lp.normal[0]));
+            float dist2 = shadowDist * shadowDist;
+            L = cp.beta[ct] * be.f * cosI * Le * cosL * Tr1
+              / (dist2 * lp.pdfFwd[0]);
+        }
         return L;
     }
 

@@ -169,6 +169,9 @@ enum OslClosureId : int {
 // ===========================================================================
 class OslRendererServices : public OSL::RendererServices {
 public:
+    explicit OslRendererServices(OSL::TextureSystem* texsys = nullptr)
+        : OSL::RendererServices(texsys) {}
+
     bool texture(OSL::ustringhash filename,
                  TextureHandle* texture_handle,
                  TexturePerthread* texture_thread_info,
@@ -180,10 +183,11 @@ public:
                  int nchannels, float* result,
                  float* dresultds, float* dresultdt,
                  OSL::ustringhash* errormessage) override {
-        return OSL::RendererServices::texture(
+        bool ok = OSL::RendererServices::texture(
             filename, texture_handle, texture_thread_info, options, sg,
             s, t, dsdx, dtdx, dsdy, dtdy,
             nchannels, result, dresultds, dresultdt, errormessage);
+        return ok;
     }
 
     bool trace(OSL::TraceOpt&, OSL::ShaderGlobals*,
@@ -362,6 +366,9 @@ public:
 private:
     OslShadingSystem() {
         m_textureSystem = OSL::TextureSystem::create(true);
+        // Pass texture system to RendererServices base via constructor so that
+        // RendererServices::texture() can dispatch to OIIO for texture lookups.
+        m_services = OslRendererServices(m_textureSystem.get());
         m_sys = new OSL::ShadingSystem(&m_services, m_textureSystem.get());
         registerOslClosures(m_sys);
     }
@@ -878,6 +885,18 @@ public:
                     break;
                 }
             }
+            // Cache the diffuse lobe weight as the base color for GPU/Metal preview.
+            // Only use the diffuse lobe — GGX specular is handled separately by the
+            // GPU shader and summing both would exceed 1.0 and make the scene too bright.
+            // Fall back to 0.5 grey for pure-specular / glass materials.
+            Spectrum diffuseColor{};
+            for (auto& l : lobes) {
+                if (l.kind == OslLobe::Kind::Diffuse) {
+                    diffuseColor = diffuseColor + l.weight;
+                }
+            }
+            float lum = luminance(diffuseColor);
+            m_baseColor = (lum > 1e-4f) ? diffuseColor : Spectrum{0.5f, 0.5f, 0.5f};
         }
     }
 
@@ -889,6 +908,10 @@ public:
     // The tint is probed once at construction so this is free at render time.
     Spectrum transmittanceColor(const ShadingContext&) const override {
         return m_transmittanceTint;
+    }
+    // Cached base color for GPU/Metal preview (probed at construction).
+    Spectrum reflectance(const ShadingContext&) const override {
+        return m_baseColor;
     }
     float    roughness() const override { return 0.5f; }
 
@@ -995,6 +1018,7 @@ private:
     std::string                 m_shaderName;
     OSL::ShaderGroupRef         m_group;
     Spectrum                    m_transmittanceTint = {};  // cached from ctor probe
+    Spectrum                    m_baseColor = {0.5f, 0.5f, 0.5f};  // cached for GPU preview
 
     // Execute the shader and collect lobes.  Each call obtains its own
     // ShadingContext from the ShadingSystem (thread-safe).

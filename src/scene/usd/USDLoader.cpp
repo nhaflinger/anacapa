@@ -568,7 +568,7 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
             if (!m)
                 spdlog::warn("USDLoader: OslMaterial load failed for '{}'; "
                              "falling back to StandardSurface", name);
-            return m;
+            return m;  // nullptr → caller falls through to StandardSurface
         };
 
         // Prefer blender:data_name (the Blender material name used as filename)

@@ -70,6 +70,12 @@ struct PathVertexBuffer {
     // near zero and the contribution would be discarded after MIS weighting.
     std::vector<float> pathMinRoughness;
 
+    // lightPdf: probability of selecting the light used for this subpath from
+    // the light sampler.  Stored for vertex 0 only (the light endpoint).
+    // Used by connect() s=1 to correctly normalize infinite-light contributions
+    // without conflating lightPdf with the position/direction sampling PDF.
+    float lightPdf = 1.f;
+
     // Scene time sampled for this subpath — propagated to all spawned rays so
     // the entire path evaluates the scene at one consistent moment in time.
     float sceneTime = 0.f;

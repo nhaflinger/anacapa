@@ -1739,10 +1739,46 @@ class _MtlxBuilder:
         if not bl_socket.links:
             return None
         from_node = bl_socket.links[0].from_node
+        from_sock = bl_socket.links[0].from_socket
+
+        # Separate XYZ / Separate Color: _tx_separate always creates index-0 extract,
+        # but the downstream socket may request X(0), Y(1), or Z(2) / R(0), G(1), B(2).
+        # Create a per-channel extract node keyed by (node_name, channel_index).
+        if from_node.type in ('SEPXYZ', 'SEPARATE_XYZ', 'SEPRGB', 'SEPARATE_COLOR'):
+            sock_name = from_sock.name.upper()
+            is_color = from_node.type in ('SEPRGB', 'SEPARATE_COLOR')
+            channel_map = {'X': 0, 'Y': 1, 'Z': 2, 'R': 0, 'G': 1, 'B': 2}
+            idx = channel_map.get(sock_name, 0)
+            cache_key = (id(from_node), idx)
+            if not hasattr(self, '_sep_channel_cache'):
+                self._sep_channel_cache = {}
+            if cache_key not in self._sep_channel_cache:
+                # Get (or create) the source vector/color input
+                src_sock_name = 'Color' if is_color else 'Vector'
+                src_sock = from_node.inputs.get(src_sock_name) or next(
+                    (from_node.inputs[s] for s in ('Color', 'Vector', 'Image')
+                     if s in from_node.inputs), None)
+                mx_type = 'color3' if is_color else 'vector3'
+                if src_sock is None:
+                    self._sep_channel_cache[cache_key] = self._const_float(0.0)
+                else:
+                    if is_color:
+                        col_out, col_c = self._socket_color3(src_sock)
+                    else:
+                        col_out, col_c = self._socket_vector3(src_sock)
+                    ext = self._ng.addNode('extract', self._uid('ext'), 'float')
+                    inp = ext.addInput('in', mx_type)
+                    if col_out:
+                        self._connect(inp, col_out)
+                    else:
+                        inp.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
+                    ext.addInput('index', 'integer').setValue(idx)
+                    self._sep_channel_cache[cache_key] = ext.addOutput('out', 'float')
+            return self._sep_channel_cache[cache_key]
+
         mx_out = self._translate_node(from_node)
         # If the from_node has multiple outputs, select by socket name
         if mx_out and hasattr(mx_out, 'getParent'):
-            from_sock = bl_socket.links[0].from_socket
             node_elem = mx_out.getParent()
             named = node_elem.getOutput(from_sock.name.lower().replace(' ', '_'))
             if named:
@@ -1942,23 +1978,68 @@ class _MtlxBuilder:
     def _tx_image(self, n):
         """Image Texture → ND_image_color3 or ND_image_float."""
         import os
+        import shutil
         img = n.image
         if img is None:
             return self._const_color3(0.5, 0.5, 0.5)
 
-        # Resolve file path
+        # Resolve file path — try abspath first, then look relative to blend file dir.
         filepath = bpy.path.abspath(img.filepath) if img.filepath else ''
+        if filepath and not os.path.exists(filepath):
+            blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else ''
+            alt = os.path.join(blend_dir, img.filepath.lstrip('/\\'))
+            if os.path.exists(alt):
+                filepath = alt
+
+        # If still not found and the image has packed data, unpack it using img.save()
+        # which writes the raw pixel data without any render color management.
+        # Never use save_render() — it applies Blender's display/render transforms.
+        if (not filepath or not os.path.exists(filepath)) and img.packed_file:
+            tex_dir = os.path.abspath(os.path.join(self.out_dir, '..', 'textures'))
+            os.makedirs(tex_dir, exist_ok=True)
+            # Derive filename from img.filepath (may be relative like //textures/Foo.png)
+            # or fall back to img.name. Keep the original extension.
+            raw_name = os.path.basename(img.filepath) if img.filepath else img.name
+            if not raw_name:
+                raw_name = 'texture.png'
+            if not any(raw_name.lower().endswith(e)
+                       for e in ('.png', '.jpg', '.jpeg', '.exr', '.tiff', '.tga')):
+                raw_name += '.png'
+            packed_path = os.path.join(tex_dir, raw_name)
+            try:
+                # Write raw packed bytes directly — no color management, no source
+                # path lookup. img.packed_file.data is the original file content.
+                with open(packed_path, 'wb') as fh:
+                    fh.write(img.packed_file.data)
+                filepath = packed_path
+            except Exception:
+                return self._const_color3(0.5, 0.5, 0.5)
+
         if not filepath or not os.path.exists(filepath):
-            # Packed image — we can't reference it by path yet
             return self._const_color3(0.5, 0.5, 0.5)
+
+        # Copy the texture to <out_dir>/../textures/ so the absolute path stays valid
+        # when the .mtlx is compiled into OSL, regardless of where it was originally.
+        tex_dir = os.path.abspath(os.path.join(self.out_dir, '..', 'textures'))
+        os.makedirs(tex_dir, exist_ok=True)
+        tex_name = os.path.basename(filepath)
+        dest = os.path.join(tex_dir, tex_name)
+        if not os.path.exists(dest) or os.path.getmtime(filepath) > os.path.getmtime(dest):
+            shutil.copy2(filepath, dest)
+        filepath = os.path.abspath(dest)
 
         is_color = (img.colorspace_settings.name not in ('Non-Color', 'Raw', 'Linear'))
         mx_type = 'color3' if is_color else 'float'
-        mx_id   = f'ND_image_{mx_type}'  # custom — standard is just 'image'
         node_id = 'image'
 
         mx_node = self._ng.addNode(node_id, self._uid('img'), mx_type)
-        mx_node.addInput('file', 'filename').setValueString(filepath)
+        file_inp = mx_node.addInput('file', 'filename')
+        file_inp.setValueString(filepath)
+        # Set colorspace so the OSL texture() call applies sRGB→linear for color maps.
+        # Without this, img2_file_colorspace="" and OIIO returns raw sRGB values
+        # which are used as if they were linear — producing washed-out colors.
+        if is_color:
+            file_inp.setAttribute('colorspace', 'srgb_texture')
 
         # UV / texcoord
         uv_sock = n.inputs.get('Vector')
@@ -1996,8 +2077,104 @@ class _MtlxBuilder:
         return mx_node.addOutput('out', 'float')
 
     def _tx_wave(self, n):
-        """Wave Texture — approximate with fractal3d."""
-        return self._tx_noise(n)  # rough approximation
+        """Wave Texture → sin-based bands/rings matching Blender's formula:
+        output = 0.5 + 0.5 * sin(2π * (coord + distortion * noise + phase))
+        where coord is an axis component (BANDS) or distance from origin (RINGS).
+        """
+        kTwoPi = 6.28318530717958647692
+
+        scale        = float(n.inputs['Scale'].default_value)           if 'Scale'            in n.inputs else 5.0
+        distortion   = float(n.inputs['Distortion'].default_value)      if 'Distortion'       in n.inputs else 0.0
+        detail       = float(n.inputs['Detail'].default_value)          if 'Detail'           in n.inputs else 2.0
+        detail_scale = float(n.inputs['Detail Scale'].default_value)    if 'Detail Scale'     in n.inputs else 1.0
+        detail_rough = float(n.inputs['Detail Roughness'].default_value) if 'Detail Roughness' in n.inputs else 0.5
+        phase        = float(n.inputs['Phase Offset'].default_value)    if 'Phase Offset'     in n.inputs else 0.0
+
+        wave_type  = getattr(n, 'wave_type',       'BANDS')
+        bands_dir  = getattr(n, 'bands_direction', 'X')
+
+        # Object-space position scaled by Scale
+        pos_n = self._ng.addNode('position', self._uid('wpos'), 'vector3')
+        pos_n.addInput('space', 'string').setValueString('object')
+
+        sc_n = self._ng.addNode('multiply', self._uid('wsc'), 'vector3')
+        sc_n.addInput('in1', 'vector3').setNodeName(pos_n.getName())
+        sc_n.addInput('in2', 'vector3').setValueString(f'{scale}, {scale}, {scale}')
+
+        # Derive scalar coordinate from position
+        if wave_type == 'RINGS':
+            mag_n = self._ng.addNode('magnitude', self._uid('wmag'), 'float')
+            mag_n.addInput('in', 'vector3').setNodeName(sc_n.getName())
+            coord_node = mag_n
+        else:
+            axis_map = {'X': 0, 'Y': 1, 'Z': 2}
+            if bands_dir == 'DIAGONAL':
+                # sum X+Y+Z components
+                ex = [self._ng.addNode('extract', self._uid('wex'), 'float') for _ in range(3)]
+                for i, e in enumerate(ex):
+                    e.addInput('in', 'vector3').setNodeName(sc_n.getName())
+                    e.addInput('index', 'integer').setValue(i)
+                a01 = self._ng.addNode('add', self._uid('wadd'), 'float')
+                a01.addInput('in1', 'float').setNodeName(ex[0].getName())
+                a01.addInput('in2', 'float').setNodeName(ex[1].getName())
+                a012 = self._ng.addNode('add', self._uid('wadd'), 'float')
+                a012.addInput('in1', 'float').setNodeName(a01.getName())
+                a012.addInput('in2', 'float').setNodeName(ex[2].getName())
+                coord_node = a012
+            else:
+                idx = axis_map.get(bands_dir, 0)
+                ext_n = self._ng.addNode('extract', self._uid('wext'), 'float')
+                ext_n.addInput('in', 'vector3').setNodeName(sc_n.getName())
+                ext_n.addInput('index', 'integer').setValue(idx)
+                coord_node = ext_n
+
+        # Optional distortion: coord += distortion * fractal3d(pos * detail_scale)
+        if abs(distortion) > 1e-6:
+            dsc_n = self._ng.addNode('multiply', self._uid('wdsc'), 'vector3')
+            dsc_n.addInput('in1', 'vector3').setNodeName(pos_n.getName())
+            dsc_n.addInput('in2', 'vector3').setValueString(
+                f'{detail_scale}, {detail_scale}, {detail_scale}')
+
+            frac_n = self._ng.addNode('fractal3d', self._uid('wfrac'), 'float')
+            frac_n.addInput('octaves',    'integer').setValue(max(1, int(detail)))
+            frac_n.addInput('lacunarity', 'float').setValue(2.0)
+            frac_n.addInput('diminish',   'float').setValue(detail_rough)
+            frac_n.addInput('position',   'vector3').setNodeName(dsc_n.getName())
+
+            dmul_n = self._ng.addNode('multiply', self._uid('wdmul'), 'float')
+            dmul_n.addInput('in1', 'float').setNodeName(frac_n.getName())
+            dmul_n.addInput('in2', 'float').setValue(float(distortion))
+
+            dadd_n = self._ng.addNode('add', self._uid('wdadd'), 'float')
+            dadd_n.addInput('in1', 'float').setNodeName(coord_node.getName())
+            dadd_n.addInput('in2', 'float').setNodeName(dmul_n.getName())
+            coord_node = dadd_n
+
+        # Phase offset
+        if abs(phase) > 1e-8:
+            ph_n = self._ng.addNode('add', self._uid('wph'), 'float')
+            ph_n.addInput('in1', 'float').setNodeName(coord_node.getName())
+            ph_n.addInput('in2', 'float').setValue(float(phase))
+            coord_node = ph_n
+
+        # Multiply by 2π then sin
+        pi2_n = self._ng.addNode('multiply', self._uid('w2pi'), 'float')
+        pi2_n.addInput('in1', 'float').setNodeName(coord_node.getName())
+        pi2_n.addInput('in2', 'float').setValue(kTwoPi)
+
+        sin_n = self._ng.addNode('sin', self._uid('wsin'), 'float')
+        sin_n.addInput('in', 'float').setNodeName(pi2_n.getName())
+
+        # Remap [-1,1] → [0,1]: out = sin * 0.5 + 0.5
+        mh_n = self._ng.addNode('multiply', self._uid('wmh'), 'float')
+        mh_n.addInput('in1', 'float').setNodeName(sin_n.getName())
+        mh_n.addInput('in2', 'float').setValue(0.5)
+
+        ah_n = self._ng.addNode('add', self._uid('wah'), 'float')
+        ah_n.addInput('in1', 'float').setNodeName(mh_n.getName())
+        ah_n.addInput('in2', 'float').setValue(0.5)
+
+        return ah_n.addOutput('out', 'float')
 
     def _tx_voronoi(self, n):
         """Voronoi Texture → ND_cellnoise3d_float."""
@@ -2020,13 +2197,128 @@ class _MtlxBuilder:
         return self._tx_noise(n)
 
     def _tx_gradient(self, n):
-        """Gradient Texture → texture coordinate U component."""
-        tc  = self._ng.addNode('texcoord', self._uid('uv'), 'vector2')
-        tc.addInput('index', 'integer').setValue(0)
-        ext = self._ng.addNode('extract', self._uid('ext'), 'float')
-        ext.addInput('in', 'vector2').setNodeName(tc.getName())
-        ext.addInput('index', 'integer').setValue(0)
-        return ext.addOutput('out', 'float')
+        """Gradient Texture → UV-based gradient.
+
+        Blender's Gradient Texture uses Generated coordinates by default
+        (object bounding-box 0..1).  For LINEAR mode this is coord.x (U),
+        but in practice most materials author vertical gradients by relying
+        on the object's UV V axis.
+
+        Mapping:
+          LINEAR    → UV V (index=1) — vertical gradient, most common use
+          QUADRATIC → UV V (index=1)
+          EASING    → UV V (index=1)
+          DIAGONAL  → UV U + V summed
+          RADIAL    → atan2(V-0.5, U-0.5) normalised to [0,1]
+          SPHERICAL / QUADRATIC_SPHERE → length from (0.5,0.5) normalised
+
+        If the Vector socket is explicitly connected, follow the connection
+        instead of using the default texcoord.
+        """
+        gradient_type = getattr(n, 'gradient_type', 'LINEAR')
+
+        # --- Vector input ---
+        vec_sock = n.inputs.get('Vector') if n.inputs else None
+        vec_out  = None
+        vec_c    = None
+        vec_type = 'vector2'  # default: UV texcoord
+        tc_node  = None
+
+        if vec_sock and vec_sock.links:
+            # Explicit Vector input — trace it; detect actual output type
+            vec_out, vec_c = self._socket_vector3(vec_sock)
+            if vec_out is not None:
+                try:
+                    vec_type = vec_out.getType()
+                except Exception:
+                    vec_type = 'vector3'
+            else:
+                vec_type = 'vector3'
+        else:
+            # Default: use UV texcoord (vector2)
+            tc_node = self._ng.addNode('texcoord', self._uid('uv'), 'vector2')
+            tc_node.addInput('index', 'integer').setValue(0)
+            vec_type = 'vector2'
+
+        def _extract_uv(idx):
+            """Extract component idx from UV texcoord or traced vector."""
+            e = self._ng.addNode('extract', self._uid('ext'), 'float')
+            if tc_node is not None:
+                e.addInput('in', 'vector2').setNodeName(tc_node.getName())
+            else:
+                inp = e.addInput('in', vec_type)
+                if vec_out:
+                    self._connect(inp, vec_out)
+                elif vec_c:
+                    if vec_type == 'vector2':
+                        inp.setValueString(f'{vec_c[0]}, {vec_c[1]}')
+                    else:
+                        inp.setValueString(f'{vec_c[0]}, {vec_c[1]}, {vec_c[2]}')
+            e.addInput('index', 'integer').setValue(idx)
+            return e.addOutput('out', 'float')
+
+        if gradient_type in ('LINEAR', 'QUADRATIC', 'EASING', 'QUADRATIC_SPHERE'):
+            # Vertical gradient — use V (index 1)
+            return _extract_uv(1)
+
+        elif gradient_type == 'DIAGONAL':
+            u = _extract_uv(0)
+            v = _extract_uv(1)
+            add_n = self._ng.addNode('add', self._uid('gdiag'), 'float')
+            add_n.addInput('in1', 'float').setNodeName(u.getParent().getName())
+            add_n.addInput('in2', 'float').setNodeName(v.getParent().getName())
+            mul_n = self._ng.addNode('multiply', self._uid('gdiagm'), 'float')
+            mul_n.addInput('in1', 'float').setNodeName(add_n.getName())
+            mul_n.addInput('in2', 'float').setValue(0.5)
+            return mul_n.addOutput('out', 'float')
+
+        elif gradient_type == 'RADIAL':
+            # atan2(v-0.5, u-0.5) / (2π) + 0.5  →  [0,1]
+            kInv2Pi = 0.15915494309189534
+            u = _extract_uv(0)
+            v = _extract_uv(1)
+            su = self._ng.addNode('subtract', self._uid('gru'), 'float')
+            su.addInput('in1', 'float').setNodeName(u.getParent().getName())
+            su.addInput('in2', 'float').setValue(0.5)
+            sv = self._ng.addNode('subtract', self._uid('grv'), 'float')
+            sv.addInput('in1', 'float').setNodeName(v.getParent().getName())
+            sv.addInput('in2', 'float').setValue(0.5)
+            at = self._ng.addNode('atan2', self._uid('grat'), 'float')
+            at.addInput('in1', 'float').setNodeName(sv.getName())
+            at.addInput('in2', 'float').setNodeName(su.getName())
+            sc = self._ng.addNode('multiply', self._uid('grsc'), 'float')
+            sc.addInput('in1', 'float').setNodeName(at.getName())
+            sc.addInput('in2', 'float').setValue(kInv2Pi)
+            off = self._ng.addNode('add', self._uid('groff'), 'float')
+            off.addInput('in1', 'float').setNodeName(sc.getName())
+            off.addInput('in2', 'float').setValue(0.5)
+            return off.addOutput('out', 'float')
+
+        else:  # SPHERICAL fallback
+            u = _extract_uv(0)
+            v = _extract_uv(1)
+            su = self._ng.addNode('subtract', self._uid('gsu'), 'float')
+            su.addInput('in1', 'float').setNodeName(u.getParent().getName())
+            su.addInput('in2', 'float').setValue(0.5)
+            sv = self._ng.addNode('subtract', self._uid('gsv'), 'float')
+            sv.addInput('in1', 'float').setNodeName(v.getParent().getName())
+            sv.addInput('in2', 'float').setValue(0.5)
+            u2 = self._ng.addNode('multiply', self._uid('gsu2'), 'float')
+            u2.addInput('in1', 'float').setNodeName(su.getName())
+            u2.addInput('in2', 'float').setNodeName(su.getName())
+            v2 = self._ng.addNode('multiply', self._uid('gsv2'), 'float')
+            v2.addInput('in1', 'float').setNodeName(sv.getName())
+            v2.addInput('in2', 'float').setNodeName(sv.getName())
+            s = self._ng.addNode('add', self._uid('gss'), 'float')
+            s.addInput('in1', 'float').setNodeName(u2.getName())
+            s.addInput('in2', 'float').setNodeName(v2.getName())
+            sq = self._ng.addNode('sqrt', self._uid('gssq'), 'float')
+            sq.addInput('in', 'float').setNodeName(s.getName())
+            cl = self._ng.addNode('clamp', self._uid('gscl'), 'float')
+            cl.addInput('in', 'float').setNodeName(sq.getName())
+            cl.addInput('low', 'float').setValue(0.0)
+            cl.addInput('high', 'float').setValue(1.0)
+            return cl.addOutput('out', 'float')
 
     def _tx_checker(self, n):
         """Checker/Brick Texture → ND_checkerboard_color3."""
@@ -3111,11 +3403,46 @@ def _generate_osl_from_mtlx_dir(mtlx_dir: str, mx_lib_path: str):
             print(f"  [osl gen] Appended {genosl_file_count} genosl function file(s) "
                   f"from {genosl_dir}")
 
+        # NG_place2d_vector2 is defined as a nodegraph in stdlib_ng.mtlx but
+        # has no native .osl file in genosl/.  The MaterialX OSL code generator
+        # emits calls to this function but never writes the body.  We provide
+        # a hand-written OSL implementation here so it is always available.
+        place2d_impl = r"""
+// ---- NG_place2d_vector2 (from stdlib_ng.mtlx, no genosl counterpart) ----
+vector2 mx_rotate2d(vector2 v, float degrees) {
+    float r = radians(degrees);
+    float c = cos(r), s = sin(r);
+    return vector2(v.x*c - v.y*s, v.x*s + v.y*c);
+}
+void NG_place2d_vector2(
+    vector2 texcoord, vector2 pivot, vector2 scale,
+    float rotate, vector2 offset, int operationorder,
+    output vector2 result)
+{
+    vector2 p = texcoord - pivot;
+    if (operationorder == 0) {
+        // SRT: scale -> rotate -> translate
+        float sx = (scale.x != 0.0) ? p.x / scale.x : p.x;
+        float sy = (scale.y != 0.0) ? p.y / scale.y : p.y;
+        vector2 ro = mx_rotate2d(vector2(sx, sy), rotate);
+        result = ro - offset + pivot;
+    } else {
+        // TRS: translate -> rotate -> scale
+        vector2 tr = p - offset;
+        vector2 ro = mx_rotate2d(tr, rotate);
+        float rx = (scale.x != 0.0) ? ro.x / scale.x : ro.x;
+        float ry = (scale.y != 0.0) ? ro.y / scale.y : ro.y;
+        result = vector2(rx, ry) + pivot;
+    }
+}
+"""
+
         with open(header_path, 'w') as f:
             f.write(first_boilerplate)
             if genosl_extras:
                 f.write('\n// ---- mx_*.osl function definitions ----\n')
                 f.writelines(genosl_extras)
+            f.write(place2d_impl)
         shared_header = '_mx_stdlib.h'
         print(f"  [osl gen] Boilerplate extracted → {shared_header} "
               f"({len(first_boilerplate.splitlines())} lines)")
