@@ -75,6 +75,17 @@ if(ANACAPA_ENABLE_OSL)
         INSTALL_RPATH "${OSL_LIB_DIR}"
     )
     target_compile_definitions(anacapa_lib PUBLIC ANACAPA_ENABLE_OSL)
+
+    # Copy _mx_stdlib.h (shared OSL boilerplate) to the build directory so
+    # oslCompileShader can add it to the include path at runtime.
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/shading/_mx_stdlib.h"
+        "${CMAKE_BINARY_DIR}/_mx_stdlib.h"
+        COPYONLY
+    )
+    target_compile_definitions(anacapa_lib PUBLIC
+        ANACAPA_MX_STDLIB_DIR="${CMAKE_BINARY_DIR}"
+    )
 endif()
 
 if(ANACAPA_ENABLE_METAL)

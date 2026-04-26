@@ -1236,6 +1236,11 @@ bool oslCompileShader(const std::string& oslPath,
 
     std::vector<std::string> opts;
     opts.push_back("-I"); opts.push_back(matDir);
+    // Add the build-time _mx_stdlib.h directory so shaders can #include it
+    // without it being present in the scene's materials directory.
+#ifdef ANACAPA_MX_STDLIB_DIR
+    opts.push_back("-I"); opts.push_back(ANACAPA_MX_STDLIB_DIR);
+#endif
     opts.push_back("-o"); opts.push_back(osoPath);
     opts.push_back("-O2");
     bool ok = compiler.compile(oslPath, opts, stdosl);
