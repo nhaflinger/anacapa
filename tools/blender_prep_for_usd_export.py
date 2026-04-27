@@ -2258,8 +2258,10 @@ class _MtlxBuilder:
             return e.addOutput('out', 'float')
 
         if gradient_type in ('LINEAR', 'QUADRATIC', 'EASING', 'QUADRATIC_SPHERE'):
-            # Vertical gradient — use V (index 1)
-            return _extract_uv(1)
+            # Blender's Gradient Texture LINEAR mode uses the X component of its
+            # input vector as the factor.  When no Vector is connected, Blender
+            # uses Generated coordinates where X varies horizontally — use index 0.
+            return _extract_uv(0)
 
         elif gradient_type == 'DIAGONAL':
             u = _extract_uv(0)
@@ -2641,7 +2643,13 @@ class _MtlxBuilder:
         return h2n.addOutput('out', 'vector3')
 
     def _tx_mapping(self, n):
-        """Mapping → ND_place2d_vector2 (for UV coords)."""
+        """Mapping node → explicit UV transform matching Blender's forward transform:
+           output = rotate(input - location) * scale
+        Blender's Mapping node multiplies by scale (forward), unlike place2d which
+        divides (inverse/texture-space).  Using multiply correctly handles scale=0
+        (collapses that axis to zero) and matches Cycles' behavior exactly.
+        """
+        import math
         loc = n.inputs.get('Location')
         rot = n.inputs.get('Rotation')
         sc  = n.inputs.get('Scale')
@@ -2652,14 +2660,30 @@ class _MtlxBuilder:
         sx = float(sc.default_value[0])  if sc  else 1.0
         sy = float(sc.default_value[1])  if sc  else 1.0
 
+        # Step 1: texcoord - location
         uv_out = self._texcoord()
-        p2d = self._ng.addNode('place2d', self._uid('p2d'), 'vector2')
-        tc_inp = p2d.addInput('texcoord', 'vector2')
-        self._connect(tc_inp, uv_out)
-        p2d.addInput('scale',  'vector2').setValueString(f'{sx}, {sy}')
-        p2d.addInput('rotate', 'float').setValue(rz * 57.2957795)  # rad→deg
-        p2d.addInput('offset', 'vector2').setValueString(f'{lx}, {ly}')
-        return p2d.addOutput('out', 'vector2')
+        if abs(lx) > 1e-9 or abs(ly) > 1e-9:
+            sub_n = self._ng.addNode('subtract', self._uid('msub'), 'vector2')
+            self._connect(sub_n.addInput('in1', 'vector2'), uv_out)
+            sub_n.addInput('in2', 'vector2').setValueString(f'{lx}, {ly}')
+            uv_out = sub_n.addOutput('out', 'vector2')
+
+        # Step 2: rotate around Z (2D rotation)
+        if abs(rz) > 1e-9:
+            deg = rz * 57.2957795  # rad→deg
+            rot_n = self._ng.addNode('rotate2d', self._uid('mrot'), 'vector2')
+            self._connect(rot_n.addInput('in', 'vector2'), uv_out)
+            rot_n.addInput('amount', 'float').setValue(deg)
+            uv_out = rot_n.addOutput('out', 'vector2')
+
+        # Step 3: multiply by scale
+        if abs(sx - 1.0) > 1e-9 or abs(sy - 1.0) > 1e-9:
+            mul_n = self._ng.addNode('multiply', self._uid('mscale'), 'vector2')
+            self._connect(mul_n.addInput('in1', 'vector2'), uv_out)
+            mul_n.addInput('in2', 'vector2').setValueString(f'{sx}, {sy}')
+            uv_out = mul_n.addOutput('out', 'vector2')
+
+        return uv_out
 
     def _tx_texcoord(self, n):
         """UV Map / Texture Coordinate → ND_texcoord_vector2."""
