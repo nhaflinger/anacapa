@@ -66,10 +66,17 @@ endif()
 if(ANACAPA_ENABLE_OSL)
     target_include_directories(anacapa_lib PUBLIC "${OSL_INCLUDE_DIR}")
     target_link_directories(anacapa_lib PUBLIC "${OSL_LIB_DIR}")
-    target_link_libraries(anacapa_lib PUBLIC
-        "${OSL_LIB_DIR}/liboslexec.dylib"
-        "${OSL_LIB_DIR}/liboslcomp.dylib"
-    )
+    if(APPLE)
+        target_link_libraries(anacapa_lib PUBLIC
+            "${OSL_LIB_DIR}/liboslexec.dylib"
+            "${OSL_LIB_DIR}/liboslcomp.dylib"
+        )
+    else()
+        target_link_libraries(anacapa_lib PUBLIC
+            "${OSL_LIB_DIR}/liboslexec.so"
+            "${OSL_LIB_DIR}/liboslcomp.so"
+        )
+    endif()
     set_target_properties(anacapa_lib PROPERTIES
         BUILD_RPATH "${OSL_LIB_DIR}"
         INSTALL_RPATH "${OSL_LIB_DIR}"
@@ -123,6 +130,9 @@ endif()
 # ---------------------------------------------------------------------------
 add_executable(anacapa src/main.cpp)
 target_link_libraries(anacapa PRIVATE anacapa_lib CLI11::CLI11)
+if(ANACAPA_ENABLE_CUDA)
+    set_target_properties(anacapa PROPERTIES CUDA_RUNTIME_LIBRARY "Shared")
+endif()
 
 # ---------------------------------------------------------------------------
 # Tools

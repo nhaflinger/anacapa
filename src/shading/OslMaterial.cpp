@@ -54,9 +54,16 @@ struct OslDiffuseParams { OSL::Vec3 N; };
 // oren_nayar(N, sigma)  [standard OSL]
 struct OslOrenNayarParams { OSL::Vec3 N; float sigma; };
 
+// OSL 1.13+ uses ustringhash for string closure params; 1.12 uses ustring.
+#if OSL_LIBRARY_VERSION_MINOR >= 13
+    using OslStringParam = OSL::ustringhash;
+#else
+    using OslStringParam = OSL::ustring;
+#endif
+
 // microfacet(dist, N, U, xalpha, yalpha, eta, refract)  [standard OSL]
 struct OslMicrofacetParams {
-    OSL::ustringhash dist;
+    OslStringParam dist;
     OSL::Vec3 N, U;
     float xalpha, yalpha, eta;
     int refract; // 0=refl, 1=refr, 2=both
@@ -92,7 +99,7 @@ struct OslMxDielectricParams {
     OSL::Color3  refr_tint;
     float        roughness_x, roughness_y;
     float        ior;
-    OSL::ustringhash distribution;
+    OslStringParam distribution;
 };
 
 // conductor_bsdf(N, U, rx, ry, ior, extinction, dist)  [MaterialX]
@@ -101,7 +108,7 @@ struct OslMxConductorParams {
     float        roughness_x, roughness_y;
     OSL::Color3  ior;
     OSL::Color3  extinction;
-    OSL::ustringhash distribution;
+    OslStringParam distribution;
 };
 
 // generalized_schlick_bsdf(N, U, refl_tint, refr_tint, rx, ry, f0, f90, exp, dist)
@@ -112,7 +119,7 @@ struct OslMxSchlickParams {
     float        roughness_x, roughness_y;
     OSL::Color3  f0, f90;
     float        exponent;
-    OSL::ustringhash distribution;
+    OslStringParam distribution;
 };
 
 // layer(top, base)  [MaterialX]
@@ -172,6 +179,7 @@ public:
     explicit OslRendererServices(OSL::TextureSystem* texsys = nullptr)
         : OSL::RendererServices(texsys) {}
 
+#if OSL_LIBRARY_VERSION_MINOR >= 13
     bool texture(OSL::ustringhash filename,
                  TextureHandle* texture_handle,
                  TexturePerthread* texture_thread_info,
@@ -183,16 +191,15 @@ public:
                  int nchannels, float* result,
                  float* dresultds, float* dresultdt,
                  OSL::ustringhash* errormessage) override {
-        bool ok = OSL::RendererServices::texture(
+        return OSL::RendererServices::texture(
             filename, texture_handle, texture_thread_info, options, sg,
             s, t, dsdx, dtdx, dsdy, dtdy,
             nchannels, result, dresultds, dresultdt, errormessage);
-        return ok;
     }
 
-    bool trace(OSL::TraceOpt&, OSL::ShaderGlobals*,
-               const OSL::Vec3&, const OSL::Vec3&, const OSL::Vec3&,
-               const OSL::Vec3&, const OSL::Vec3&, const OSL::Vec3&) override {
+    bool trace(OSL::TraceOpt& opt, OSL::ShaderGlobals* sg,
+               const OSL::Vec3& P, const OSL::Vec3& dPdx, const OSL::Vec3& dPdy,
+               const OSL::Vec3& R, const OSL::Vec3& dRdx, const OSL::Vec3& dRdy) override {
         return false;
     }
 
@@ -201,6 +208,36 @@ public:
                        OSL::ustringhash, void*) override {
         return false;
     }
+#else
+    bool texture(OSL::ustring filename,
+                 TextureHandle* texture_handle,
+                 TexturePerthread* texture_thread_info,
+                 OSL::TextureOpt& options,
+                 OSL::ShaderGlobals* sg,
+                 float s, float t,
+                 float dsdx, float dtdx,
+                 float dsdy, float dtdy,
+                 int nchannels, float* result,
+                 float* dresultds, float* dresultdt,
+                 OSL::ustring* errormessage) override {
+        return OSL::RendererServices::texture(
+            filename, texture_handle, texture_thread_info, options, sg,
+            s, t, dsdx, dtdx, dsdy, dtdy,
+            nchannels, result, dresultds, dresultdt, errormessage);
+    }
+
+    bool trace(OSL::RendererServices::TraceOpt& opt, OSL::ShaderGlobals* sg,
+               const OSL::Vec3& P, const OSL::Vec3& dPdx, const OSL::Vec3& dPdy,
+               const OSL::Vec3& R, const OSL::Vec3& dRdx, const OSL::Vec3& dRdy) override {
+        return false;
+    }
+
+    bool get_attribute(OSL::ShaderGlobals*, bool,
+                       OSL::ustring, OSL::TypeDesc,
+                       OSL::ustring, void*) override {
+        return false;
+    }
+#endif
 };
 
 // ===========================================================================
@@ -365,22 +402,34 @@ public:
 
 private:
     OslShadingSystem() {
+#if OSL_LIBRARY_VERSION_MINOR >= 13
+        // OIIO 2.4+: TextureSystem::create returns shared_ptr
         m_textureSystem = OSL::TextureSystem::create(true);
-        // Pass texture system to RendererServices base via constructor so that
-        // RendererServices::texture() can dispatch to OIIO for texture lookups.
-        m_services = OslRendererServices(m_textureSystem.get());
-        m_sys = new OSL::ShadingSystem(&m_services, m_textureSystem.get());
+        OSL::TextureSystem* texRaw = m_textureSystem.get();
+#else
+        // OIIO 2.2: TextureSystem::create returns raw pointer
+        m_texRaw = OSL::TextureSystem::create(true);
+        OSL::TextureSystem* texRaw = m_texRaw;
+#endif
+        m_services = OslRendererServices(texRaw);
+        m_sys = new OSL::ShadingSystem(&m_services, texRaw);
         registerOslClosures(m_sys);
     }
     ~OslShadingSystem() {
         delete m_sys;
-        // m_textureSystem shared_ptr released automatically
+#if OSL_LIBRARY_VERSION_MINOR < 13
+        if (m_texRaw) OSL::TextureSystem::destroy(m_texRaw);
+#endif
     }
 
-    OslRendererServices                    m_services;
-    std::shared_ptr<OSL::TextureSystem>    m_textureSystem;
-    OSL::ShadingSystem*  m_sys           = nullptr;
+    OslRendererServices  m_services;
+    OSL::ShadingSystem*  m_sys = nullptr;
     std::string          m_searchPaths;
+#if OSL_LIBRARY_VERSION_MINOR >= 13
+    std::shared_ptr<OSL::TextureSystem> m_textureSystem;
+#else
+    OSL::TextureSystem* m_texRaw = nullptr;
+#endif
 };
 
 // ===========================================================================
