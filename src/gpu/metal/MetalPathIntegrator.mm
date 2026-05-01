@@ -51,9 +51,32 @@ struct MetalPathIntegrator::Impl {
     uint32_t numLights    = 0;
     uint32_t maxDepth     = 6;
 
+    // Persistent full-frame accumulation buffer.
+    // Allocated once and reused across renderFrame() calls so samples accumulate
+    // without re-allocation.  clearAccum() zeros it when the scene/camera changes.
+    id<MTLBuffer> accumMTL    = nil;
+    uint32_t      accumWidth  = 0;
+    uint32_t      accumHeight = 0;
+
     // Pointer to scene geometry (for building the accel structure)
     const GeometryPool* geomPool = nullptr;
     bool preparedOnce = false;
+
+    // Ensure the persistent accum buffer is allocated and sized for (w x h).
+    // Zeros the buffer if it had to be (re)allocated.
+    void ensureAccum(id<MTLDevice> dev, uint32_t w, uint32_t h) {
+        if (accumMTL && accumWidth == w && accumHeight == h) return;
+        size_t bytes = (size_t)w * h * sizeof(GpuAccumPixel);
+        accumMTL    = [dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+        accumWidth  = w;
+        accumHeight = h;
+        memset([accumMTL contents], 0, bytes);
+    }
+
+    void clearAccum() {
+        if (accumMTL)
+            memset([accumMTL contents], 0, (size_t)accumWidth * accumHeight * sizeof(GpuAccumPixel));
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -252,6 +275,10 @@ bool MetalPathIntegrator::isValid() const {
     return m_impl->ctx && m_impl->ctx->isValid() && m_impl->psoShade != nil;
 }
 
+void MetalPathIntegrator::clearAccum() {
+    m_impl->clearAccum();
+}
+
 // ---------------------------------------------------------------------------
 // prepare() — build accel structure, upload materials + lights
 // ---------------------------------------------------------------------------
@@ -428,9 +455,11 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
         camParams.envLe = {avg.x, avg.y, avg.z};
     }
 
-    size_t accumBytes = filmWidth * filmHeight * sizeof(GpuAccumPixel);
-    id<MTLBuffer> accumMTL = [dev newBufferWithLength:accumBytes
-                                              options:MTLResourceStorageModeShared];
+    // Use the persistent accum buffer — allocates only on first call or size change.
+    // clearAccum() should be called when starting a fresh render (new scene/camera).
+    m_impl->ensureAccum(dev, filmWidth, filmHeight);
+    id<MTLBuffer> accumMTL = m_impl->accumMTL;
+
     id<MTLBuffer> camMTL   = [dev newBufferWithBytes:&camParams
                                               length:sizeof(GpuCameraParams)
                                              options:MTLResourceStorageModeShared];
@@ -439,8 +468,6 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     id<MTLBuffer> numLightsMTL = [dev newBufferWithBytes:&numLightsVal length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
     id<MTLBuffer> numMatsMTL   = [dev newBufferWithBytes:&numMatsVal   length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
     id<MTLBuffer> sampleIdxMTL = [dev newBufferWithLength:sizeof(uint32_t) options:MTLResourceStorageModeShared];
-
-    memset([accumMTL contents], 0, accumBytes);
 
     id<MTLAccelerationStructure> tlas = (__bridge id<MTLAccelerationStructure>)m_impl->accel->tlas();
     id<MTLTexture> envTex = m_impl->envTexture ? m_impl->envTexture : m_impl->fallbackEnvTex;

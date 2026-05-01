@@ -48,6 +48,11 @@ public:
 
     bool isValid() const;
 
+    // Zero the persistent accumulation buffer.
+    // Call before starting a fresh render (scene/camera change) so stale
+    // samples from the previous render do not bleed into the new one.
+    void clearAccum();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;

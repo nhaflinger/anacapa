@@ -482,6 +482,10 @@ void RenderSession::render() {
 
     if (!m_settings.adaptive) {
         // --- Single-pass: try whole-frame GPU path first ---
+#ifdef ANACAPA_ENABLE_METAL
+        if (auto* mp = dynamic_cast<MetalPathIntegrator*>(m_integrator.get()))
+            mp->clearAccum();
+#endif
         bool gpuDone = m_integrator->renderFrame(
             m_scene,
             m_settings.imageWidth, m_settings.imageHeight,
@@ -501,6 +505,10 @@ void RenderSession::render() {
         // Base pass — use whole-frame GPU dispatch if available (same path as
         // non-adaptive), falling back to per-tile dispatch for CPU integrators.
         spdlog::info("  Adaptive base pass: {} spp", baseSPP);
+#ifdef ANACAPA_ENABLE_METAL
+        if (auto* mp = dynamic_cast<MetalPathIntegrator*>(m_integrator.get()))
+            mp->clearAccum();
+#endif
         bool baseGpuDone = m_integrator->renderFrame(
             m_scene,
             m_settings.imageWidth, m_settings.imageHeight,
@@ -513,7 +521,16 @@ void RenderSession::render() {
             tilesCompleted.store(totalTiles);
         }
 
-        if (extraSPP > 0) {
+        if (extraSPP > 0 && baseGpuDone) {
+            // GPU handled the base pass — add remaining samples via another
+            // full-frame dispatch (no tile seam artifacts, accumulates on top).
+            spdlog::info("  Adaptive GPU refinement: {} extra spp", extraSPP);
+            m_integrator->renderFrame(
+                m_scene,
+                m_settings.imageWidth, m_settings.imageHeight,
+                baseSPP, extraSPP,
+                *m_film);
+        } else if (extraSPP > 0) {
             // Compute per-tile variance score = average pixel variance in tile
             uint32_t W  = m_settings.imageWidth;
             std::vector<float> tileVar(totalTiles, 0.f);
