@@ -276,7 +276,7 @@ static __forceinline__ __device__ float3 schlick(float cosI, float3 F0) {
     return F0 + (1.0f - F0) * p;
 }
 static __forceinline__ __device__ float fresnelDielectric(float cosI, float eta) {
-    float sinT2 = eta * eta * (1.0f - cosI * cosI);
+    float sinT2 = (1.0f - cosI * cosI) / (eta * eta);
     if (sinT2 >= 1.0f) return 1.0f;
     float cosT = sqrtf(1.0f - sinT2);
     float rs = (cosI - eta * cosT) / (cosI + eta * cosT);
@@ -325,7 +325,7 @@ float3 shadowTransmittance(float3 origin, float3 dir, float tMax,
         GpuMaterial mat = p.materials[matIdx];
 
         if (mat.type == kMatGlass) {
-            T *= make_float3(mat.baseColor.x, mat.baseColor.y, mat.baseColor.z);
+            T *= mat.transmission;
             if (compmax(T) < 1e-4f) return make_float3(0.0f, 0.0f, 0.0f);
             remaining -= hit.t + 1e-4f;
             if (remaining <= 0.0f) break;
@@ -475,6 +475,7 @@ void shade(LaunchParams params)
 
     float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
     float3 L          = make_float3(0.0f, 0.0f, 0.0f);
+    uint32_t glassDepth = 0;
 
     for (uint32_t bounce = 0; bounce <= params.cam.maxDepth; ++bounce) {
         TraceResult hit = bvhTrace(rayOrig, rayDir, 1e-4f, 1e10f,
@@ -501,8 +502,9 @@ void shade(LaunchParams params)
         float3 hitPos = rayOrig + rayDir * hit.t;
 
         uint32_t idxOff = params.meshIndexOffsets[hit.meshID];
-        float3 n = interpolateNormal(hit.primID, hit.bary,
-                                     params.normals, params.indices, idxOff);
+        float3 geomN = interpolateNormal(hit.primID, hit.bary,
+                                          params.normals, params.indices, idxOff);
+        float3 n = geomN;
         if (dot(-1.0f * rayDir, n) < 0.0f) n = -1.0f * n;
 
         uint32_t matIdx  = (hit.meshID < params.numMaterials) ? hit.meshID : 0u;
@@ -536,8 +538,8 @@ void shade(LaunchParams params)
         float3 bsdfF;
 
         if (mat.type == kMatGlass) {
-            bool   entering = dot(-1.0f * rayDir, n) > 0.0f;
-            float3 faceN    = entering ? n : -1.0f * n;
+            bool   entering = dot(rayDir, geomN) < 0.0f;
+            float3 faceN    = entering ? geomN : -1.0f * geomN;
             float  eta      = entering ? (1.0f / mat.specularIOR) : mat.specularIOR;
             float  cosI     = dot(-1.0f * rayDir, faceN);
             float  Fr       = fresnelDielectric(cosI, 1.0f / eta);
@@ -554,8 +556,11 @@ void shade(LaunchParams params)
                     rayOrig = hitPos - faceN * 1e-4f;
                 }
             }
-            throughput *= baseColor;
+            // Delta BSDF: f/pdf = 1, throughput unchanged.
+            // Glass hits don't count against bounce budget — use a separate limiter.
             rayDir = normalize(wi);
+            if (++glassDepth >= 16) break;
+            if (bounce > 0) --bounce;
             continue;
 
         } else if (mat.type == kMatGGX && mat.roughness < 0.95f) {

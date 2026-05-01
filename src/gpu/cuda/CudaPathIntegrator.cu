@@ -60,17 +60,30 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
         gm.baseColor = {alb.x, alb.y, alb.z};
         return gm;
     }
-    const StandardSurfaceMaterial* ssm = dynamic_cast<const StandardSurfaceMaterial*>(mat);
-    if (ssm && ssm->params().transmission > 0.001f && ssm->params().metalness.value < 0.001f) {
-        gm.type        = kMatGlass;
-        gm.specularIOR = ssm->params().specular_IOR;
-        gm.transmission = ssm->params().transmission;
+    {
         SurfaceInteraction si; si.n = si.ng = {0,0,1};
         ShadingContext ctx(si, {0,0,1});
-        Spectrum alb = mat->reflectance(ctx);
-        gm.baseColor = {alb.x, alb.y, alb.z};
-        gm.roughness = ssm->params().roughness.value;
-        return gm;
+        Spectrum tint = mat->transmittanceColor(ctx);
+        bool isTransmissive = (tint.x > 0.1f || tint.y > 0.1f || tint.z > 0.1f);
+
+        const StandardSurfaceMaterial* ssm = dynamic_cast<const StandardSurfaceMaterial*>(mat);
+        if (ssm && ssm->params().transmission > 0.001f && ssm->params().metalness.value < 0.001f) {
+            gm.type         = kMatGlass;
+            gm.specularIOR  = ssm->params().specular_IOR;
+            gm.transmission = ssm->params().transmission;
+            Spectrum alb = mat->reflectance(ctx);
+            gm.baseColor = {alb.x, alb.y, alb.z};
+            gm.roughness = ssm->params().roughness.value;
+            return gm;
+        }
+        if (isTransmissive) {
+            gm.type         = kMatGlass;
+            gm.specularIOR  = 1.5f;
+            gm.transmission = 1.0f;
+            Spectrum alb = mat->reflectance(ctx);
+            gm.baseColor = {alb.x, alb.y, alb.z};
+            return gm;
+        }
     }
     if (mat->flags() & BSDFFlag_Glossy) {
         gm.type = kMatGGX;
