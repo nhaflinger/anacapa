@@ -260,7 +260,25 @@ static float3 sampleDirect(
         Li   = float3(light.Le.x, light.Le.y, light.Le.z);
 
     } else if (light.type == kLightDirectional) {
-        wi   = float3(light.normal.x, light.normal.y, light.normal.z);
+        float3 baseDir = float3(light.normal.x, light.normal.y, light.normal.z);
+        float  cc = light.cosCone;
+        if (cc < 0.9999f) {
+            float2 uCone    = rand2(rng);
+            float  cosTheta = 1.0f - uCone.x * (1.0f - cc);
+            float  sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
+            float  phi      = 2.0f * M_PI_F * uCone.y;
+            float3 tangent, bitangent;
+            if (abs(baseDir.x) > 0.9f)
+                tangent = normalize(cross(float3(0,1,0), baseDir));
+            else
+                tangent = normalize(cross(float3(1,0,0), baseDir));
+            bitangent = cross(baseDir, tangent);
+            wi = normalize(tangent  * (sinTheta * cos(phi))
+                         + bitangent * (sinTheta * sin(phi))
+                         + baseDir   * cosTheta);
+        } else {
+            wi = baseDir;
+        }
         tMax = 1e9f;
         pdfL = lightPick;
         Li   = float3(light.Le.x, light.Le.y, light.Le.z);

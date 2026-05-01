@@ -91,7 +91,7 @@ struct GpuLight {
     GpuFloat3   position;     // rect/sphere center; unused for directional/dome
     float       area;         // rect/sphere area; unused for others
     GpuFloat3   normal;       // rect normal / directional direction-to-light
-    float       _pad0;
+    float       cosCone;      // directional: cos(halfAngle), 1=hard shadow; unused for others
     GpuFloat3   uHalf;        // rect half-extent u (rect only)
     float       _pad1;
     GpuFloat3   vHalf;        // rect half-extent v (rect only)

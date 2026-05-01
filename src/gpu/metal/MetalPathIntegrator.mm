@@ -172,6 +172,14 @@ static GpuLight extractGpuLight(const ILight* light) {
         LightSample ls = dl->sample({0,0,0}, {0,1,0}, {0.5f, 0.5f});
         gl.Le     = {ls.Li.x, ls.Li.y, ls.Li.z};
         gl.normal = {ls.wi.x,  ls.wi.y,  ls.wi.z};  // dirToLight
+        // Derive cosCone by sampling two directions at extremes of the u range.
+        // If the light has an angular extent, the directions will differ; the dot
+        // product of the two gives cos(halfAngle) of the cone.
+        LightLeSample le0 = dl->sampleLe({0.5f, 0.5f}, {0.f, 0.f});
+        LightLeSample le1 = dl->sampleLe({0.5f, 0.5f}, {1.f, 0.f});
+        Vec3f d0 = le0.dir, d1 = le1.dir;
+        float cc = d0.x*d1.x + d0.y*d1.y + d0.z*d1.z;
+        gl.cosCone = std::max(0.f, std::min(1.f, cc));
         return gl;
     }
 
