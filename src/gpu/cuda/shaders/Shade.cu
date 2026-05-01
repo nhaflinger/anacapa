@@ -374,7 +374,21 @@ float3 sampleDirect(float3 hitPos, float3 n, float3 wo,
         Li   = make3(light.Le);
 
     } else if (light.type == kLightDirectional) {
-        wi   = make3(light.normal);
+        float3 baseDir = make3(light.normal);
+        float  cc = light.cosCone;
+        if (cc < 0.9999f) {
+            float2 uCone    = rand2(rng);
+            float  cosTheta = 1.0f - uCone.x * (1.0f - cc);
+            float  sinTheta = sqrtf(fmaxf(0.0f, 1.0f - cosTheta * cosTheta));
+            float  phi      = 2.0f * CUDART_PI_F * uCone.y;
+            float3 t, bt;
+            buildONB(baseDir, t, bt);
+            wi = normalize(t  * (sinTheta * cosf(phi))
+                         + bt * (sinTheta * sinf(phi))
+                         + baseDir * cosTheta);
+        } else {
+            wi = baseDir;
+        }
         tMax = 1e9f;
         pdfL = lightPick;
         Li   = make3(light.Le);

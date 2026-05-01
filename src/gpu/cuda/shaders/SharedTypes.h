@@ -85,7 +85,7 @@ struct GpuLight {
     GpuFloat3  position;
     float      area;
     GpuFloat3  normal;
-    float      _pad0;
+    float      cosCone;  // directional: cos(halfAngle), 1=hard shadow; unused for others
     GpuFloat3  uHalf;
     float      _pad1;
     GpuFloat3  vHalf;
