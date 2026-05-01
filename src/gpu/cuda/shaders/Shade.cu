@@ -418,7 +418,8 @@ float3 sampleDirect(float3 hitPos, float3 n, float3 wo,
         float  cosH = fmaxf(0.0f, dot(n, wh));
         float  cosO = fmaxf(0.0f, dot(n, wo));
         float  cosII= fmaxf(0.0f, dot(n, wi));
-        float  a    = roughness * roughness;
+        float  neeR = fmaxf(roughness, 0.2f);
+        float  a    = neeR * neeR;
         float  a2   = a * a;
         float  D    = ggxD(cosH, a2);
         float  G    = ggxG1(cosO, a2) * ggxG1(cosII, a2);
@@ -564,25 +565,40 @@ void shade(LaunchParams params)
             continue;
 
         } else if (mat.type == kMatGGX && mat.roughness < 0.95f) {
-            float  a2     = mat.roughness * mat.roughness;
-            a2 = a2 * a2;
-            float3 wmLocal = sampleGGX(rand2(rng), a2);
-            float3 wh      = toWorld(wmLocal, n);
-            if (dot(wh, n) < 0.0f) wh = -1.0f * wh;
-            wi = reflect(-1.0f * wo, wh);
+            float  alpha  = mat.roughness * mat.roughness;
+            float  alpha2 = alpha * alpha;
+            float3 F0     = lerp3(make_float3(0.04f, 0.04f, 0.04f), baseColor, mat.metalness);
+
+            float lumSpec = (F0.x + F0.y + F0.z) / 3.0f;
+            float lumDiff = (1.0f - mat.metalness) * (baseColor.x + baseColor.y + baseColor.z) / 3.0f;
+            float pSpec   = lumSpec / fmaxf(1e-4f, lumSpec + lumDiff);
+            float pDiff   = 1.0f - pSpec;
+
+            float3 wh;
+            if (rand01(rng) < pSpec) {
+                float3 wmLocal = sampleGGX(rand2(rng), alpha2);
+                wh = toWorld(wmLocal, n);
+                if (dot(wh, n) < 0.0f) wh = -1.0f * wh;
+                wi = reflect(-1.0f * wo, wh);
+            } else {
+                wi = cosineSampleHemisphere(rand2(rng), n);
+                wh = normalize(wo + wi);
+            }
             if (dot(wi, n) <= 0.0f) break;
 
             float cosII = dot(n, wi);
             float cosO  = dot(n, wo);
-            float cosH  = dot(n, wh);
-            float D     = ggxD(cosH, a2);
-            float G     = ggxG1(cosO, a2) * ggxG1(cosII, a2);
-            float3 F0   = lerp3(make_float3(0.04f, 0.04f, 0.04f), baseColor, mat.metalness);
-            float3 F    = schlick(dot(wi, wh), F0);
-            bsdfPdf = D * cosH / fmaxf(1e-7f, 4.0f * dot(wo, wh));
+            float cosH  = fmaxf(0.0f, dot(n, wh));
+            float D     = ggxD(cosH, alpha2);
+            float G     = ggxG1(cosO, alpha2) * ggxG1(cosII, alpha2);
+            float3 F    = schlick(fmaxf(0.0f, dot(wi, wh)), F0);
             float3 spec = D * G * F * (1.0f / fmaxf(1e-7f, 4.0f * cosO * cosII));
             float3 diff = (1.0f - mat.metalness) * baseColor * (1.0f / CUDART_PI_F);
             bsdfF = diff + spec;
+
+            float ggxPdf = D * cosH / fmaxf(1e-7f, 4.0f * dot(wo, wh));
+            float cosPdf = cosII / CUDART_PI_F;
+            bsdfPdf = pSpec * ggxPdf + pDiff * cosPdf;
         } else {
             wi      = cosineSampleHemisphere(rand2(rng), n);
             bsdfPdf = fmaxf(1e-7f, dot(n, wi)) / CUDART_PI_F;
