@@ -111,7 +111,9 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
         SurfaceInteraction si; si.n = si.ng = {0,0,1};
         ShadingContext ctx(si, {0,0,1});
         Spectrum tint = mat->transmittanceColor(ctx);
-        bool isTransmissive = (tint.x > 0.001f || tint.y > 0.001f || tint.z > 0.001f);
+        // Use a higher threshold for OslMaterial to avoid misclassifying materials
+        // with tiny incidental refraction lobes (e.g. eyes) as glass.
+        bool isTransmissive = (tint.x > 0.1f || tint.y > 0.1f || tint.z > 0.1f);
 
         const StandardSurfaceMaterial* ssm = dynamic_cast<const StandardSurfaceMaterial*>(mat);
         if (ssm && ssm->params().transmission > 0.001f && ssm->params().metalness.value < 0.001f) {

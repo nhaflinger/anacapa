@@ -946,6 +946,24 @@ public:
             }
             float lum = luminance(diffuseColor);
             m_baseColor = (lum > 1e-4f) ? diffuseColor : Spectrum{0.5f, 0.5f, 0.5f};
+
+            // Cache roughness from the dominant GGX lobe for the GPU preview.
+            // alpha2 = roughness^4 in Disney convention, so roughness = (alpha2)^0.25.
+            float bestWeight = 0.f;
+            for (auto& l : lobes) {
+                if (l.kind == OslLobe::Kind::GGXRefl ||
+                    l.kind == OslLobe::Kind::GGXBoth) {
+                    float w = luminance(l.weight);
+                    if (w > bestWeight) {
+                        bestWeight  = w;
+                        // l.alpha2 is GGX alpha^2 where alpha = roughness^2,
+                        // so perceptual roughness = sqrt(sqrt(l.alpha2))
+                        // Floor at 0.25 — the GPU preview can't handle near-delta
+                        // materials without MIS; values below this cause fireflies.
+                        m_roughness = std::max(0.25f, std::sqrt(std::sqrt(std::max(0.f, l.alpha2))));
+                    }
+                }
+            }
         }
     }
 
@@ -962,7 +980,7 @@ public:
     Spectrum reflectance(const ShadingContext&) const override {
         return m_baseColor;
     }
-    float    roughness() const override { return 0.5f; }
+    float    roughness() const override { return m_roughness; }
 
     // ---------- Le: emitted radiance ----------
     Spectrum Le(const ShadingContext& ctx, Vec3f wo) const override {
@@ -1066,8 +1084,9 @@ public:
 private:
     std::string                 m_shaderName;
     OSL::ShaderGroupRef         m_group;
-    Spectrum                    m_transmittanceTint = {};  // cached from ctor probe
-    Spectrum                    m_baseColor = {0.5f, 0.5f, 0.5f};  // cached for GPU preview
+    Spectrum                    m_transmittanceTint = {};
+    Spectrum                    m_baseColor         = {0.5f, 0.5f, 0.5f};
+    float                       m_roughness         = 1.0f;  // from dominant GGX lobe, cached at ctor
 
     // Execute the shader and collect lobes.  Each call obtains its own
     // ShadingContext from the ShadingSystem (thread-safe).

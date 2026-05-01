@@ -319,7 +319,11 @@ static float3 sampleDirect(
         float  cosH = max(0.0f, dot(n, wh));
         float  cosO = max(0.0f, dot(n, wo));
         float  cosII = max(0.0f, dot(n, wi));
-        float  alpha  = roughness * roughness;
+        // Clamp roughness to 0.2 floor for NEE eval only — very tight lobes sampled
+        // from a random light direction produce huge D values (fireflies) without MIS.
+        // The bounce path uses the real roughness with importance sampling where it's safe.
+        float  neeRoughness = max(roughness, 0.2f);
+        float  alpha  = neeRoughness * neeRoughness;
         float  alpha2 = alpha * alpha;
         float  D  = ggxD(cosH, alpha2);
         float  G  = ggxG1(cosO, alpha2) * ggxG1(cosII, alpha2);
@@ -510,26 +514,45 @@ kernel void shade(
             continue;
 
         } else if (mat.type == kMatGGX && mat.roughness < 0.95f) {
-            float alpha2 = mat.roughness * mat.roughness;  // GGX alpha = roughness^2
-            float3 wmLocal = sampleGGX(rand2(rng), alpha2);
-            float3 wh = toWorld(wmLocal, n);
-            if (dot(wh, n) < 0.0f) wh = -wh;
-            wi = reflect(-wo, wh);
+            float alpha  = mat.roughness * mat.roughness;
+            float alpha2 = alpha * alpha;
+            float3 F0    = mix(float3(0.04f), baseColor, mat.metalness);
+
+            // Mixed diffuse/specular sampler — choose GGX with probability pSpec,
+            // cosine hemisphere with pDiff.  This preserves indirect fill in shadowed
+            // areas (where pure GGX sampling would produce near-zero diffuse weight).
+            float lumSpec = (F0.x + F0.y + F0.z) / 3.0f;
+            float lumDiff = (1.0f - mat.metalness) * (baseColor.x + baseColor.y + baseColor.z) / 3.0f;
+            float pSpec   = lumSpec / max(1e-4f, lumSpec + lumDiff);
+            float pDiff   = 1.0f - pSpec;
+
+            float3 wh;
+            if (rand01(rng) < pSpec) {
+                float3 wmLocal = sampleGGX(rand2(rng), alpha2);
+                wh = toWorld(wmLocal, n);
+                if (dot(wh, n) < 0.0f) wh = -wh;
+                wi = reflect(-wo, wh);
+            } else {
+                wi = cosineSampleHemisphere(rand2(rng), n);
+                wh = normalize(wo + wi);
+            }
             if (dot(wi, n) <= 0.0f) break;
 
-            float cosI = dot(n, wi);
-            float cosO = dot(n, wo);
-            float cosH = dot(n, wh);
-            float D    = ggxD(cosH, alpha2);
-            float G    = ggxG1(cosO, alpha2) * ggxG1(cosI, alpha2);
-            float3 F0  = mix(float3(0.04f), baseColor, mat.metalness);
-            float3 F   = schlick(dot(wi, wh), F0);
-            bsdfPdf = D * cosH / max(1e-7f, 4.0f * dot(wo, wh));
+            float cosI  = dot(n, wi);
+            float cosO  = dot(n, wo);
+            float cosH  = max(0.0f, dot(n, wh));
+            float D     = ggxD(cosH, alpha2);
+            float G     = ggxG1(cosO, alpha2) * ggxG1(cosI, alpha2);
+            float3 F    = schlick(max(0.0f, dot(wi, wh)), F0);
             float3 spec = D * G * F / max(1e-7f, 4.0f * cosO * cosI);
             float3 diff = (1.0f - mat.metalness) * baseColor * (1.0f / M_PI_F);
             bsdfF = diff + spec;
+
+            float ggxPdf = D * cosH / max(1e-7f, 4.0f * dot(wo, wh));
+            float cosPdf = cosI / M_PI_F;
+            bsdfPdf = pSpec * ggxPdf + pDiff * cosPdf;
         } else {
-            // Cosine hemisphere (Lambertian)
+            // Cosine hemisphere (Lambertian or very rough GGX)
             wi       = cosineSampleHemisphere(rand2(rng), n);
             bsdfPdf  = max(1e-7f, dot(n, wi)) / M_PI_F;
             bsdfF    = baseColor / M_PI_F;
