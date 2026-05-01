@@ -99,7 +99,10 @@ static float3 schlick(float cosI, float3 F0) {
 // cosI: cosine of angle with surface normal (must be >= 0).
 // eta:  relative IOR = n_inside / n_outside (eta > 1 = entering denser medium).
 static float fresnelDielectric(float cosI, float eta) {
-    float sinT2 = eta * eta * (1.0f - cosI * cosI);
+    // sinT = sinI / eta  (Snell's law), so sinT2 = sin2I / eta2.
+    // The wrong formula eta2*sin2I triggers false TIR when entering glass from air,
+    // making the dome nearly fully reflective and the interior dark.
+    float sinT2 = (1.0f - cosI * cosI) / (eta * eta);
     if (sinT2 >= 1.0f) return 1.0f;  // total internal reflection
     float cosT  = sqrt(1.0f - sinT2);
     float rs = (cosI - eta * cosT) / (cosI + eta * cosT);
@@ -194,8 +197,10 @@ static float3 shadowTransmittance(
         GpuMaterial mat = materials[matIdx];
 
         if (mat.type == kMatGlass) {
-            // Glass transmits with base color tint
-            T *= float3(mat.baseColor.x, mat.baseColor.y, mat.baseColor.z);
+            // Attenuate by transmission weight, not baseColor.
+            // baseColor is the diffuse reflectance — black for pure glass — which
+            // would zero out all shadow rays and make objects inside appear black.
+            T *= mat.transmission;
             if (max(T.x, max(T.y, T.z)) < 1e-4f) return float3(0);
 
             // Advance past this surface
@@ -382,6 +387,7 @@ kernel void shade(
     // Path tracing loop
     float3 throughput = float3(1.0f);
     float3 L          = float3(0.0f);
+    uint   glassDepth = 0;  // separate counter so glass doesn't exhaust bounce budget
 
     intersector<triangle_data, instancing> isect;
     isect.accept_any_intersection(false);
@@ -419,9 +425,11 @@ kernel void shade(
         // Index offset for this mesh (in elements, not bytes)
         uint idxOff = meshIndexOffsets[meshID] / 1;  // already element offset
 
-        float3 n = interpolateNormal(primID, bary, normals, indices, idxOff);
+        float3 geomN = interpolateNormal(primID, bary, normals, indices, idxOff);
 
-        // Flip normal if back-face
+        // geomN is the unflipped mesh normal — used by glass to detect entry vs exit.
+        // n is flipped to always face the incoming ray for diffuse/specular shading.
+        float3 n = geomN;
         if (dot(-r.direction, n) < 0.0f) n = -n;
 
         // Material lookup
@@ -461,10 +469,10 @@ kernel void shade(
         float3 bsdfF;
 
         if (mat.type == kMatGlass) {
-            // Smooth dielectric: exact Fresnel split between reflect and refract.
-            // Determine if we are entering or exiting by checking ray vs normal.
-            bool entering = dot(-r.direction, n) > 0.0f;
-            float3 faceN  = entering ? n : -n;         // normal pointing toward ray origin
+            // Use geomN (unflipped) to detect entry vs exit — n was already flipped
+            // to face the ray so it cannot distinguish entry from exit.
+            bool entering = dot(r.direction, geomN) < 0.0f;  // ray opposes outward normal → entering
+            float3 faceN  = entering ? geomN : -geomN;       // points toward ray origin
             float  eta    = entering ? (1.0f / mat.specularIOR) : mat.specularIOR;
 
             float cosI = dot(-r.direction, faceN);
@@ -485,14 +493,20 @@ kernel void shade(
                     r.origin = hitPos - faceN * 1e-4f;  // offset to inside surface
                 }
             }
-            // Delta BSDF: f/pdf = 1 (throughput unchanged, tinted by base_color for colored glass)
-            bsdfF   = baseColor;
+            // Delta BSDF: f/pdf = 1, throughput unchanged.
+            // baseColor is the diffuse reflectance (often 0.5 grey for OslMaterial),
+            // not a glass tint — using it here would darken everything behind glass.
+            bsdfF   = float3(1.0f);
             bsdfPdf = 1.0f;
             r.direction    = normalize(wi);
             r.min_distance = 1e-4f;
             r.max_distance = 1e10f;
-            // throughput already updated below; skip the cosI check for delta
             throughput *= bsdfF;
+            // Glass hits don't count against bounce budget — refracting through a
+            // dome's two surfaces plus any interior bounces would exhaust maxDepth
+            // before the background is ever reached.  Use a separate glass limiter.
+            if (++glassDepth >= 16) break;
+            bounce = (bounce > 0u) ? bounce - 1u : 0u;
             continue;
 
         } else if (mat.type == kMatGGX && mat.roughness < 0.95f) {
