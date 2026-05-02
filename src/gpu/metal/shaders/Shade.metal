@@ -353,7 +353,7 @@ kernel void shade(
     const device uint32_t*                  triMeshIDs    [[ buffer(8) ]],
     const device uint32_t*                  meshVertexOffsets [[ buffer(9) ]],
     const device uint32_t*                  meshIndexOffsets  [[ buffer(10) ]],
-    constant  uint&                         sampleIndex   [[ buffer(11) ]],
+    constant  GpuSampleBatch&               batch         [[ buffer(11) ]],
     instance_acceleration_structure         accelStruct   [[ buffer(12) ]],
     texture2d<float, access::sample>        envTexture    [[ texture(0) ]],
     uint2                                   gid           [[ thread_position_in_grid ]])
@@ -365,36 +365,43 @@ kernel void shade(
     // accum is tile-sized; use local coordinates for the write index
     uint pixelIdx = gid.y * cam.tileWidth + gid.x;
 
-    // Per-sample RNG seed — use global pixel position so tiles at different
-    // screen positions produce different noise patterns.
     uint globalPixelIdx = py * cam.imageWidth + px;
-    uint rng = pcg(pcg(globalPixelIdx) ^ (sampleIndex * 2654435761u));
-
-    // Generate camera ray
-    float jx = rand01(rng);
-    float jy = rand01(rng);
-
-    float u = (float(px) + jx) / float(cam.imageWidth);
-    float v = (float(cam.imageHeight - 1 - py) + jy) / float(cam.imageHeight);
 
     float3 origin = float3(cam.origin.x, cam.origin.y, cam.origin.z);
     float3 horiz  = float3(cam.horizontal.x, cam.horizontal.y, cam.horizontal.z);
     float3 vert   = float3(cam.vertical.x,   cam.vertical.y,   cam.vertical.z);
     float3 ll     = float3(cam.lowerLeft.x,  cam.lowerLeft.y,  cam.lowerLeft.z);
 
-    ray r;
-    r.origin       = origin;
-    r.direction    = normalize(ll + u * horiz + v * vert - origin);
-    r.min_distance = 1e-4f;
-    r.max_distance = 1e10f;
-
-    // Path tracing loop
-    float3 throughput = float3(1.0f);
-    float3 L          = float3(0.0f);
-    uint   glassDepth = 0;  // separate counter so glass doesn't exhaust bounce budget
-
     intersector<triangle_data, instancing> isect;
     isect.accept_any_intersection(false);
+
+    // Local accumulators — written once after the whole batch
+    float3 batchL      = float3(0.0f);
+    float  batchLumSq  = 0.0f;
+
+    for (uint s = 0; s < batch.batchSize; ++s) {
+        uint sampleIndex = batch.sampleStart + s;
+
+        // Per-sample RNG seed decorrelated by pixel and sample index
+        uint rng = pcg(pcg(globalPixelIdx) ^ (sampleIndex * 2654435761u));
+
+        // Generate camera ray
+        float jx = rand01(rng);
+        float jy = rand01(rng);
+
+        float u = (float(px) + jx) / float(cam.imageWidth);
+        float v = (float(cam.imageHeight - 1 - py) + jy) / float(cam.imageHeight);
+
+        ray r;
+        r.origin       = origin;
+        r.direction    = normalize(ll + u * horiz + v * vert - origin);
+        r.min_distance = 1e-4f;
+        r.max_distance = 1e10f;
+
+        // Path tracing loop
+        float3 throughput = float3(1.0f);
+        float3 L          = float3(0.0f);
+        uint   glassDepth = 0;
 
     for (uint bounce = 0; bounce <= cam.maxDepth; ++bounce) {
 
@@ -567,14 +574,20 @@ kernel void shade(
         r.direction    = wi;
         r.min_distance = 1e-4f;
         r.max_distance = 1e10f;
-    }
+    }  // end bounce loop
 
-    // Accumulate (per-sample; host averages after all samples)
-    float lum = 0.2126f * L.x + 0.7152f * L.y + 0.0722f * L.z;
+        // Accumulate this sample into batch locals
+        batchL += L;
+        float lum = 0.2126f * L.x + 0.7152f * L.y + 0.0722f * L.z;
+        batchLumSq += lum * lum;
+
+    }  // end sample batch loop
+
+    // Single write to accum buffer for the entire batch
     device GpuAccumPixel& px_out = accum[pixelIdx];
-    px_out.r        += L.x;
-    px_out.g        += L.y;
-    px_out.b        += L.z;
-    px_out.weight   += 1.0f;
-    px_out.sumLumSq += lum * lum;
+    px_out.r        += batchL.x;
+    px_out.g        += batchL.y;
+    px_out.b        += batchL.z;
+    px_out.weight   += float(batch.batchSize);
+    px_out.sumLumSq += batchLumSq;
 }

@@ -467,13 +467,16 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     uint32_t numMatsVal   = m_impl->numMaterials;
     id<MTLBuffer> numLightsMTL = [dev newBufferWithBytes:&numLightsVal length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
     id<MTLBuffer> numMatsMTL   = [dev newBufferWithBytes:&numMatsVal   length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
-    id<MTLBuffer> sampleIdxMTL = [dev newBufferWithLength:sizeof(uint32_t) options:MTLResourceStorageModeShared];
 
     id<MTLAccelerationStructure> tlas = (__bridge id<MTLAccelerationStructure>)m_impl->accel->tlas();
     id<MTLTexture> envTex = m_impl->envTexture ? m_impl->envTexture : m_impl->fallbackEnvTex;
 
-    // Merge interval: update the film every N samples so the progressive
-    // preview watcher sees incremental updates during the base pass.
+    // Samples per kernel launch.  Each thread traces kBatchSize full paths
+    // before writing to the accum buffer, amortising command-buffer overhead.
+    // 4 is a good starting point: meaningfully reduces round-trips without
+    // exhausting the register file on Apple Silicon.
+    constexpr uint32_t kBatchSize    = 4;
+    // Flush to film every kMergeInterval dispatches (= kMergeInterval*kBatchSize samples)
     constexpr uint32_t kMergeInterval = 4;
 
     auto flushToFilm = [&]() {
@@ -490,8 +493,18 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
         film.mergeTile(tb);
     };
 
-    for (uint32_t s = 0; s < sampleCount; ++s) {
-        *(uint32_t*)[sampleIdxMTL contents] = sampleStart + s;
+    id<MTLBuffer> batchMTL = [dev newBufferWithLength:sizeof(GpuSampleBatch)
+                                              options:MTLResourceStorageModeShared];
+
+    MTLSize threadsPerGrid        = MTLSizeMake(filmWidth, filmHeight, 1);
+    MTLSize threadsPerThreadgroup = MTLSizeMake(8, 8, 1);
+
+    uint32_t dispatches = 0;
+    for (uint32_t s = 0; s < sampleCount; s += kBatchSize) {
+        GpuSampleBatch sb;
+        sb.sampleStart = sampleStart + s;
+        sb.batchSize   = std::min(kBatchSize, sampleCount - s);
+        memcpy([batchMTL contents], &sb, sizeof(sb));
 
         id<MTLCommandBuffer>         cmdBuf = [cq commandBuffer];
         id<MTLComputeCommandEncoder> enc    = [cmdBuf computeCommandEncoder];
@@ -507,14 +520,12 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
         [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->triMeshIDBuffer()        offset:0 atIndex:8];
         [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->meshVertexOffsetBuffer() offset:0 atIndex:9];
         [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->meshIndexOffsetBuffer()  offset:0 atIndex:10];
-        [enc setBuffer:sampleIdxMTL  offset:0 atIndex:11];
+        [enc setBuffer:batchMTL      offset:0 atIndex:11];
         [enc setAccelerationStructure:tlas atBufferIndex:12];
         [enc setTexture:envTex atIndex:0];
         [enc useResource:tlas usage:MTLResourceUsageRead];
         for (void* blasVoid : m_impl->accel->blasHandles())
             [enc useResource:(__bridge id<MTLAccelerationStructure>)blasVoid usage:MTLResourceUsageRead];
-        MTLSize threadsPerGrid        = MTLSizeMake(filmWidth, filmHeight, 1);
-        MTLSize threadsPerThreadgroup = MTLSizeMake(8, 8, 1);
         [enc dispatchThreads:threadsPerGrid threadsPerThreadgroup:threadsPerThreadgroup];
         [enc endEncoding];
         [cmdBuf commit];
@@ -525,8 +536,7 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
             return false;
         }
 
-        // Progressive update — flush every kMergeInterval samples
-        if ((s + 1) % kMergeInterval == 0)
+        if ((++dispatches) % kMergeInterval == 0)
             flushToFilm();
     }
 

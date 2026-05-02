@@ -140,4 +140,14 @@ struct GpuAccumPixel {
     float sumLumSq;  // sum(luminance(sample)^2) — needed for variance-based adaptive sampling
 };
 
+// ---------------------------------------------------------------------------
+// GpuSampleBatch — passed to the shade kernel instead of a bare sampleIndex.
+// The kernel traces batchSize samples per thread and accumulates them locally,
+// amortising command-buffer overhead across multiple samples per launch.
+// ---------------------------------------------------------------------------
+struct GpuSampleBatch {
+    uint32_t sampleStart;
+    uint32_t batchSize;
+};
+
 #endif // ANACAPA_SHARED_TYPES_H
