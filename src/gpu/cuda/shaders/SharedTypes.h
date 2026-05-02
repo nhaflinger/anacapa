@@ -142,4 +142,14 @@ struct BvhNode {
     uint32_t  triCount;
 };
 
+// ---------------------------------------------------------------------------
+// GpuSampleBatch — passed to the shade kernel instead of a bare sampleIndex.
+// The kernel traces batchSize samples per thread and accumulates them locally,
+// amortising launch overhead across multiple samples per dispatch.
+// ---------------------------------------------------------------------------
+struct GpuSampleBatch {
+    uint32_t sampleStart;
+    uint32_t batchSize;
+};
+
 #endif // ANACAPA_CUDA_SHARED_TYPES_H

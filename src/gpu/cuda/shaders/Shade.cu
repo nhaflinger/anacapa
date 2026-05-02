@@ -452,7 +452,7 @@ void shade(LaunchParams params)
 
     uint32_t pixelIdx       = ty * params.cam.tileWidth + tx;
     uint32_t globalPixelIdx = py * params.cam.imageWidth + px;
-    uint32_t nSamples  = params.cam.samplesPerPixel;
+    uint32_t nSamples  = params.sampleBatch.batchSize;
 
     float3 origin = make3(params.cam.origin);
     float3 horiz  = make3(params.cam.horizontal);
@@ -463,7 +463,7 @@ void shade(LaunchParams params)
 
     for (uint32_t s = 0; s < nSamples; ++s) {
 
-    uint32_t rng = pcg(pcg(globalPixelIdx) ^ ((params.sampleIndex + s) * 2654435761u));
+    uint32_t rng = pcg(pcg(globalPixelIdx) ^ ((params.sampleBatch.sampleStart + s) * 2654435761u));
 
     // Camera ray
     float jx = rand01(rng);

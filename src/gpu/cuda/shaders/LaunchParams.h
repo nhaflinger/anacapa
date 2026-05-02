@@ -21,6 +21,6 @@ struct LaunchParams {
     const float*             positions;       // device ptr — packed float3 vertex positions
     const BvhNode*           bvh;            // device ptr — flat BVH node array
     const uint32_t*          triIndices;     // device ptr — BVH-reordered triangle indices
-    uint32_t                 sampleIndex;
+    GpuSampleBatch           sampleBatch;
     cudaTextureObject_t      envTexture;      // 0 = no texture (use envLe fallback)
 };

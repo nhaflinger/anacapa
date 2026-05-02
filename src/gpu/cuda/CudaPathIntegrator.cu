@@ -368,7 +368,8 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.positions         = reinterpret_cast<const float*>(accel->positionBuffer());
     p.bvh               = reinterpret_cast<const BvhNode*>(accel->bvhBuffer());
     p.triIndices        = reinterpret_cast<const uint32_t*>(accel->triIndexBuffer());
-    p.sampleIndex       = sampleStart;
+    p.sampleBatch.sampleStart = sampleStart;
+    p.sampleBatch.batchSize   = sampleCount;
     p.envTexture        = envTex;
 }
 
@@ -394,9 +395,11 @@ bool CudaPathIntegrator::renderFrame(const SceneView& scene,
     dim3 block(16, 16, 1);
     dim3 grid((filmWidth + 15) / 16, (filmHeight + 15) / 16, 1);
 
-    // One kernel per sample — keeps dispatches short to avoid GPU watchdog.
-    // Flush to film every kMergeInterval samples for progressive preview.
-    constexpr uint32_t kMergeInterval = 4;
+    // Dispatch kBatchSize samples per kernel — each thread traces the full batch
+    // and accumulates locally before writing to the accum buffer, amortising
+    // launch and sync overhead across multiple samples per dispatch.
+    constexpr uint32_t kBatchSize    = 4;
+    constexpr uint32_t kMergeInterval = 4;  // flush to film every N dispatches
 
     auto flushToFilm = [&]() {
         std::vector<GpuAccumPixel> h_accum;
@@ -413,12 +416,14 @@ bool CudaPathIntegrator::renderFrame(const SceneView& scene,
         film.mergeTile(tb);
     };
 
-    for (uint32_t s = 0; s < sampleCount; ++s) {
+    uint32_t dispatches = 0;
+    for (uint32_t s = 0; s < sampleCount; s += kBatchSize) {
+        uint32_t thisBatch = std::min(kBatchSize, sampleCount - s);
         LaunchParams params{};
         m_impl->fillLaunchParams(params, scene,
             filmWidth, filmHeight,
             0, 0, filmWidth, filmHeight,
-            sampleStart + s, 1,
+            sampleStart + s, thisBatch,
             d_accum.ptr());
         shade<<<grid, block, 0, stream>>>(params);
         CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -429,7 +434,7 @@ bool CudaPathIntegrator::renderFrame(const SceneView& scene,
             return false;
         }
 
-        if ((s + 1) % kMergeInterval == 0)
+        if ((++dispatches) % kMergeInterval == 0)
             flushToFilm();
     }
 
