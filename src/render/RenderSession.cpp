@@ -486,6 +486,10 @@ void RenderSession::render() {
         if (auto* mp = dynamic_cast<MetalPathIntegrator*>(m_integrator.get()))
             mp->clearAccum();
 #endif
+#ifdef ANACAPA_ENABLE_CUDA
+        if (auto* cp = dynamic_cast<CudaPathIntegrator*>(m_integrator.get()))
+            cp->clearAccum();
+#endif
         bool gpuDone = m_integrator->renderFrame(
             m_scene,
             m_settings.imageWidth, m_settings.imageHeight,
@@ -508,6 +512,10 @@ void RenderSession::render() {
 #ifdef ANACAPA_ENABLE_METAL
         if (auto* mp = dynamic_cast<MetalPathIntegrator*>(m_integrator.get()))
             mp->clearAccum();
+#endif
+#ifdef ANACAPA_ENABLE_CUDA
+        if (auto* cp = dynamic_cast<CudaPathIntegrator*>(m_integrator.get()))
+            cp->clearAccum();
 #endif
         bool baseGpuDone = m_integrator->renderFrame(
             m_scene,

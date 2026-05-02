@@ -169,6 +169,13 @@ struct CudaPathIntegrator::Impl {
     CudaBuffer<GpuMaterial>  d_materials;
     CudaBuffer<GpuLight>     d_lights;
 
+    // Persistent full-frame accumulation buffer.
+    // Reused across renderFrame() calls so samples accumulate without
+    // re-allocation. clearAccum() zeros it when the scene/camera changes.
+    CudaBuffer<GpuAccumPixel> d_accum;
+    uint32_t                  accumWidth  = 0;
+    uint32_t                  accumHeight = 0;
+
     cudaArray_t         envArray   = nullptr;
     cudaTextureObject_t envTex     = 0;
     Vec3f               envRot[3]  = {{1,0,0},{0,1,0},{0,0,1}};
@@ -182,6 +189,17 @@ struct CudaPathIntegrator::Impl {
     ~Impl() {
         if (envTex)   cudaDestroyTextureObject(envTex);
         if (envArray) cudaFreeArray(envArray);
+    }
+
+    void ensureAccum(uint32_t w, uint32_t h) {
+        if (d_accum.isValid() && accumWidth == w && accumHeight == h) return;
+        d_accum     = CudaBuffer<GpuAccumPixel>(w * h);
+        d_accum.zero();
+        accumWidth  = w;
+        accumHeight = h;
+    }
+    void clearAccum() {
+        if (d_accum.isValid()) d_accum.zero();
     }
 
     void fillLaunchParams(LaunchParams& p, const SceneView& scene,
@@ -210,6 +228,10 @@ CudaPathIntegrator::~CudaPathIntegrator() = default;
 
 bool CudaPathIntegrator::isValid() const {
     return m_impl->ctx && m_impl->ctx->isValid();
+}
+
+void CudaPathIntegrator::clearAccum() {
+    m_impl->clearAccum();
 }
 
 // ---------------------------------------------------------------------------
@@ -364,8 +386,10 @@ bool CudaPathIntegrator::renderFrame(const SceneView& scene,
 
     cudaStream_t stream = static_cast<cudaStream_t>(m_impl->ctx->cuStream());
 
-    CudaBuffer<GpuAccumPixel> d_accum(filmWidth * filmHeight);
-    d_accum.zero();
+    // Use the persistent accum buffer — accumulates across calls.
+    // clearAccum() should be called when starting a fresh render (new scene/camera).
+    m_impl->ensureAccum(filmWidth, filmHeight);
+    CudaBuffer<GpuAccumPixel>& d_accum = m_impl->d_accum;
 
     dim3 block(16, 16, 1);
     dim3 grid((filmWidth + 15) / 16, (filmHeight + 15) / 16, 1);
