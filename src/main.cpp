@@ -72,8 +72,8 @@ int main(int argc, char** argv) {
        ->default_val(0.f);
 
     app.add_flag("--interactive", settings.interactive,
-                 "Use GPU (Metal) backend for fast preview renders — "
-                 "lower quality, much faster (requires ANACAPA_ENABLE_METAL)");
+                 "Use GPU (Metal|CUDA) backend for fast preview renders — "
+                 "lower quality, much faster (requires ANACAPA_ENABLE_METAL|ANACAPA_ENABLE_CUDA)");
 
     app.add_flag("--override-lights", settings.overrideLights,
                  "Replace all scene lights with a single white directional light "

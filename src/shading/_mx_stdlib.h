@@ -1008,6 +1008,19 @@ void mx_normalmap_float(vector value, float normal_scale, vector N, vector T, ve
     mx_normalmap_vector2(value, vector2(normal_scale, normal_scale), N, T, B, result);
 }
 
+// --- NG_checkerboard_color3 ---
+// Expanded inline from MaterialX stdlib_ng.mtlx NG_checkerboard_color3.
+// Inputs match ND_checkerboard_color3: color1, color2, uvtiling, uvoffset, texcoord.
+void NG_checkerboard_color3(color color1, color color2,
+                             vector2 uvtiling, vector2 uvoffset,
+                             vector2 texcoord, output color out)
+{
+    float u = texcoord[0] * uvtiling[0] + uvoffset[0];
+    float v = texcoord[1] * uvtiling[1] + uvoffset[1];
+    float checker = mod(floor(u) + floor(v), 2.0);
+    out = mix(color1, color2, checker);
+}
+
 // --- mx_premult_color4.osl ---
 void mx_premult_color4(color4 in, output color4 result)
 {

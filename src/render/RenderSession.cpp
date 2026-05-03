@@ -630,7 +630,7 @@ void RenderSession::render() {
         if (!m_film->writePNG(m_settings.pngPath, m_settings.exposure))
             spdlog::error("Failed to write PNG {}", m_settings.pngPath);
         else
-            spdlog::info("Written (tonemapped): {}", m_settings.pngPath);
+            spdlog::info("Written: {}", m_settings.pngPath);
     }
 }
 

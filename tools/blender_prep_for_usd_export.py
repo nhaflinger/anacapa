@@ -197,6 +197,7 @@ def convert_to_mesh() -> Tuple[int, List[str]]:
 
     # Snapshot name+type before the loop — convert() can invalidate any
     # object reference, including ones later in the same iteration.
+    vl_objects = set(bpy.context.view_layer.objects)
     candidates = [(obj.name, obj.type) for obj in bpy.context.scene.objects]
 
     for obj_name, obj_type in candidates:
@@ -206,7 +207,31 @@ def convert_to_mesh() -> Tuple[int, List[str]]:
             if obj is None:
                 log(f"  '{obj_name}' already removed (converted as part of another object).")
                 continue
+            if obj not in vl_objects:
+                log(f"  Skipping '{obj_name}' — not in active View Layer.")
+                continue
             try:
+                # For curves/NURBS, promote preview resolution to render resolution
+                # before converting so the mesh gets the intended tessellation detail.
+                if obj_type in ('CURVE', 'SURFACE') and obj.data is not None:
+                    curve = obj.data
+                    # resolution_u controls preview; render_resolution_u = 0 means
+                    # "use resolution_u". Force them equal so convert() uses render detail.
+                    if hasattr(curve, 'render_resolution_u') and curve.render_resolution_u > 0:
+                        curve.resolution_u = curve.render_resolution_u
+                    for spline in getattr(curve, 'splines', []):
+                        if hasattr(spline, 'render_resolution_u') and spline.render_resolution_u > 0:
+                            spline.resolution_u = spline.render_resolution_u
+                    # Enforce a minimum tessellation quality.  A resolution_u of 2
+                    # (common when artists set a low preview value) produces visibly
+                    # faceted or straight-line geometry after mesh conversion.
+                    MIN_CURVE_RES = 24
+                    if curve.resolution_u < MIN_CURVE_RES:
+                        log(f"  Bumping '{obj_name}' resolution_u: {curve.resolution_u} → {MIN_CURVE_RES}")
+                        curve.resolution_u = MIN_CURVE_RES
+                    for spline in getattr(curve, 'splines', []):
+                        if hasattr(spline, 'resolution_u') and spline.resolution_u < MIN_CURVE_RES:
+                            spline.resolution_u = MIN_CURVE_RES
                 select_only(obj)
                 bpy.ops.object.convert(target='MESH')
                 log(f"Converted '{obj_name}' ({obj_type} → MESH).")
@@ -245,10 +270,17 @@ def apply_modifiers() -> Tuple[int, List[str]]:
     applied = 0
     warnings: List[str] = []
 
+    vl_objects = set(bpy.context.view_layer.objects)
+
     for obj in list(bpy.context.scene.objects):
         if obj.type != 'MESH':
             continue
         if not obj.modifiers:
+            continue
+        # Objects not in the active View Layer cannot be selected — skip them.
+        # This happens with objects inside disabled/excluded collections.
+        if obj not in vl_objects:
+            log(f"  Skipping '{obj.name}' — not in active View Layer.")
             continue
 
         # Shape keys block most modifier applications — warn and skip
@@ -295,22 +327,40 @@ def apply_modifiers() -> Tuple[int, List[str]]:
 # ---------------------------------------------------------------------------
 
 def apply_transforms() -> int:
-    """Apply scale (and optionally rotation/location) to all mesh objects."""
-    count = 0
+    """Apply scale (and optionally rotation/location) to all mesh objects.
+
+    Selects all eligible objects at once and calls transform_apply once —
+    much faster than per-object calls when the scene has thousands of objects.
+    """
+    vl_objects = set(bpy.context.view_layer.objects)
+
+    # Make mesh data single-user where needed, collect eligible objects
+    eligible = []
     for obj in bpy.context.scene.objects:
         if obj.type != 'MESH':
             continue
-        # Make mesh data single-user — transform_apply aborts on shared data blocks
+        if obj not in vl_objects:
+            continue
         if obj.data.users > 1:
             obj.data = obj.data.copy()
-        select_only(obj)
-        bpy.ops.object.transform_apply(
-            location=APPLY_LOCATION,
-            rotation=APPLY_ROTATION,
-            scale=True,
-        )
-        count += 1
+        eligible.append(obj)
 
+    if not eligible:
+        log("No mesh objects to apply transforms on.")
+        return 0
+
+    # Batch-select all eligible objects and apply in one call
+    deselect_all()
+    for obj in eligible:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = eligible[0]
+    bpy.ops.object.transform_apply(
+        location=APPLY_LOCATION,
+        rotation=APPLY_ROTATION,
+        scale=True,
+    )
+
+    count = len(eligible)
     log(f"Applied transforms on {count} mesh object(s) "
         f"(scale=True, rotation={APPLY_ROTATION}, location={APPLY_LOCATION}).")
     return count
@@ -1299,6 +1349,21 @@ def main():
     )
     parser.add_argument("output",
                         help="Output USD file path (e.g. scene.usda or scene.usdc)")
+    parser.add_argument("--sky-texture", default="",
+                        help="Path to equirectangular sky/environment image to use as "
+                             "the DomeLight texture (overrides whatever Blender exports). "
+                             "Use this when the scene has a sky mesh instead of a World HDRI.")
+    parser.add_argument("--sun-intensity", type=float, default=0.0,
+                        help="Add a DistantLight sun to the exported USD with this intensity. "
+                             "0 (default) = no sun added.")
+    parser.add_argument("--sun-angle", type=float, default=0.53,
+                        help="Angular diameter of the sun disk in degrees (default 0.53 = real sun).")
+    parser.add_argument("--sun-color", default="1.0,0.95,0.8",
+                        help="Sun color as R,G,B floats in [0,1] (default '1.0,0.95,0.8').")
+    parser.add_argument("--sun-elevation", type=float, default=45.0,
+                        help="Sun elevation above the horizon in degrees (default 45).")
+    parser.add_argument("--sun-azimuth", type=float, default=135.0,
+                        help="Sun azimuth in degrees, 0=+Z, 90=+X (default 135).")
     args = parser.parse_args(script_args)
 
     out_path = os.path.abspath(args.output)
@@ -1340,6 +1405,34 @@ def main():
         if os.path.exists(alt):
             print(f"  (file found at {alt} instead — path was resolved relative to blend file)")
     print("=" * 60)
+
+    # -----------------------------------------------------------------------
+    # Patch DomeLight texture: if Blender exported a near-black solid-color EXR
+    # as the DomeLight, replace it with --sky-texture (if given) or search the
+    # World shader for a sky/environment image.
+    # -----------------------------------------------------------------------
+    if os.path.exists(out_path):
+        _patch_dome_light_texture(out_path, out_dir,
+                                  explicit_sky=args.sky_texture)
+
+    # -----------------------------------------------------------------------
+    # Add sun DistantLight if requested
+    # -----------------------------------------------------------------------
+    if os.path.exists(out_path) and args.sun_intensity > 0.0:
+        try:
+            sun_color = tuple(float(x) for x in args.sun_color.split(","))
+            if len(sun_color) != 3:
+                raise ValueError("--sun-color must be three comma-separated floats")
+        except Exception as e:
+            print(f"  [sun] Bad --sun-color value '{args.sun_color}': {e} — skipping sun.")
+            sun_color = None
+        if sun_color is not None:
+            _add_sun_light(out_path,
+                           intensity=args.sun_intensity,
+                           angle=args.sun_angle,
+                           color_rgb=sun_color,
+                           elevation_deg=args.sun_elevation,
+                           azimuth_deg=args.sun_azimuth)
 
     # -----------------------------------------------------------------------
     # Inject ND_image_* nodes into OpenPBR subgraphs that are missing textures
@@ -1800,6 +1893,7 @@ class _MtlxBuilder:
         """Wire a float input from a socket."""
         out = self._get_input_output(bl_socket)
         if out:
+            out = self._to_float(out)  # coerce color3/vector3 → float via luminance
             return out, None
         try:
             return None, float(bl_socket.default_value)
@@ -1975,8 +2069,14 @@ class _MtlxBuilder:
 
         return node.addOutput('out', 'surfaceshader')
 
-    def _tx_image(self, n):
-        """Image Texture → ND_image_color3 or ND_image_float."""
+    def _tx_image(self, n, force_color3=False):
+        """Image Texture → ND_image_color3 or ND_image_float.
+
+        force_color3=True forces a color3 node regardless of Blender's colorspace
+        setting.  Use this for normal map images: they are always 3-channel RGB
+        even when the colorspace is set to 'Non-Color' (which only means 'do not
+        apply sRGB→linear decode', not 'the image is single-channel').
+        """
         import os
         import shutil
         img = n.image
@@ -2029,7 +2129,9 @@ class _MtlxBuilder:
         filepath = os.path.abspath(dest)
 
         is_color = (img.colorspace_settings.name not in ('Non-Color', 'Raw', 'Linear'))
-        mx_type = 'color3' if is_color else 'float'
+        # force_color3: always emit a color3 node (needed for normal maps which are
+        # stored as Non-Color in Blender but are still 3-channel RGB images).
+        mx_type = 'color3' if (is_color or force_color3) else 'float'
         node_id = 'image'
 
         mx_node = self._ng.addNode(node_id, self._uid('img'), mx_type)
@@ -2038,6 +2140,8 @@ class _MtlxBuilder:
         # Set colorspace so the OSL texture() call applies sRGB→linear for color maps.
         # Without this, img2_file_colorspace="" and OIIO returns raw sRGB values
         # which are used as if they were linear — producing washed-out colors.
+        # Note: force_color3 images (normal maps) intentionally keep no colorspace
+        # attribute — the image is linear and must NOT be sRGB-decoded.
         if is_color:
             file_inp.setAttribute('colorspace', 'srgb_texture')
 
@@ -2600,17 +2704,55 @@ class _MtlxBuilder:
         return add_n.addOutput('out', 'color3')
 
     def _tx_normal_map(self, n):
-        """Normal Map → ND_normalmap."""
-        col_out, col_c = self._socket_color3(n.inputs.get('Color'), (0.5,0.5,1.0))
+        """Normal Map → ND_normalmap_float.
+        The normalmap nodedef requires 'in' as vector3 (not color3), so we
+        decode the image color3 via extract+combine3 to get a vector3.
+        The mx_normalmap_float OSL function does the 0-1→(-1..1) decode
+        internally, so we pass raw encoded values unchanged.
+
+        Normal map images are stored as 'Non-Color' in Blender (no sRGB decode),
+        which makes _tx_image emit a 'float' (single-channel) image node.  But
+        normal maps are always 3-channel RGB, so we must force color3 loading.
+        If _socket_color3 returns a float output, we re-create the image as
+        color3 using _tx_image(force_color3=True)."""
+        color_sock = n.inputs.get('Color')
+        col_out, col_c = self._socket_color3(color_sock, (0.5, 0.5, 1.0))
+
+        # If the image node was emitted as float (Non-Color colorspace), its output
+        # type is 'float' but we need 'color3' for the R/G/B channel extraction.
+        if col_out is not None and col_out.getType() == 'float':
+            if color_sock and color_sock.links:
+                src_node = color_sock.links[0].from_node
+                if src_node.type == 'TEX_IMAGE':
+                    col_out = self._tx_image(src_node, force_color3=True)
         strength = float(n.inputs['Strength'].default_value) \
                    if 'Strength' in n.inputs else 1.0
 
-        nm_n = self._ng.addNode('normalmap', self._uid('nmap'), 'vector3')
-        c_inp = nm_n.addInput('in', 'color3')
+        # Decode color3 → vector3 via extract(R,G,B) + combine3
         if col_out:
-            self._connect(c_inp, col_out)
+            ex_r = self._ng.addNode('extract', self._uid('nmex'), 'float')
+            self._connect(ex_r.addInput('in', 'color3'), col_out)
+            ex_r.addInput('index', 'integer').setValue(0)
+            ex_g = self._ng.addNode('extract', self._uid('nmex'), 'float')
+            self._connect(ex_g.addInput('in', 'color3'), col_out)
+            ex_g.addInput('index', 'integer').setValue(1)
+            ex_b = self._ng.addNode('extract', self._uid('nmex'), 'float')
+            self._connect(ex_b.addInput('in', 'color3'), col_out)
+            ex_b.addInput('index', 'integer').setValue(2)
+            comb = self._ng.addNode('combine3', self._uid('nmcomb'), 'vector3')
+            comb.addInput('in1', 'float').setNodeName(ex_r.getName())
+            comb.addInput('in2', 'float').setNodeName(ex_g.getName())
+            comb.addInput('in3', 'float').setNodeName(ex_b.getName())
+            vec_out = comb.addOutput('out', 'vector3')
         else:
-            c_inp.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
+            vec_out = None
+
+        nm_n = self._ng.addNode('normalmap', self._uid('nmap'), 'vector3')
+        v_inp = nm_n.addInput('in', 'vector3')
+        if vec_out:
+            self._connect(v_inp, vec_out)
+        else:
+            v_inp.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
         nm_n.addInput('scale', 'float').setValue(strength)
         return nm_n.addOutput('out', 'vector3')
 
@@ -3493,6 +3635,188 @@ void NG_place2d_vector2(
 
     print(f"  [osl gen] Generated {osl_exported} OSL shader(s)"
           + (f", {osl_errors} error(s)." if osl_errors else "."))
+
+
+# ---------------------------------------------------------------------------
+# Sun DistantLight injector
+# ---------------------------------------------------------------------------
+def _add_sun_light(usd_path, intensity=3.0, angle=0.53,
+                   color_rgb=(1.0, 0.95, 0.8),
+                   elevation_deg=45.0, azimuth_deg=135.0):
+    """
+    Append a DistantLight prim named '/World/sun' to the exported USD.
+
+    Direction convention
+    ────────────────────
+    A USD DistantLight emits along -Z in its local frame.  We rotate it so
+    that the light comes *from* the direction described by elevation/azimuth:
+
+        rotateX = -elevation_deg   (tilts up from the horizon; negative because
+                                    we're rotating the -Z emission axis upward)
+        rotateY = azimuth_deg      (compass heading, 0 = +Z, 90 = +X)
+        rotateZ = 0
+
+    This matches the manual patch we applied earlier:
+        elevation=44.71, azimuth=135 → rotateXYZ = (-44.71, 135, 0)
+    """
+    try:
+        from pxr import Usd, UsdLux, Sdf, Gf, Vt
+    except ImportError:
+        print("  [sun] pxr not available — cannot add DistantLight.")
+        return
+
+    stage = Usd.Stage.Open(usd_path)
+    if not stage:
+        print(f"  [sun] Could not open stage '{usd_path}'.")
+        return
+
+    # Find or create a /World scope to park the light in
+    world_path = Sdf.Path("/World")
+    world_prim = stage.GetPrimAtPath(world_path)
+    if not world_prim or not world_prim.IsValid():
+        world_prim = stage.DefinePrim(world_path, "Xform")
+
+    sun_path = world_path.AppendChild("sun")
+    # Remove any existing sun so we can recreate cleanly
+    existing = stage.GetPrimAtPath(sun_path)
+    if existing and existing.IsValid():
+        stage.RemovePrim(sun_path)
+
+    sun = UsdLux.DistantLight.Define(stage, sun_path)
+
+    # Intensity / angle / color
+    sun.CreateIntensityAttr().Set(float(intensity))
+    sun.CreateAngleAttr().Set(float(angle))
+    r, g, b = color_rgb
+    sun.CreateColorAttr().Set(Gf.Vec3f(float(r), float(g), float(b)))
+
+    # Orientation: rotateXYZ applied as a single xformOp
+    rot_x = -float(elevation_deg)
+    rot_y = float(azimuth_deg)
+    rot_z = 0.0
+
+    prim = sun.GetPrim()
+    rot_attr = prim.CreateAttribute(
+        "xformOp:rotateXYZ", Sdf.ValueTypeNames.Float3, False)
+    rot_attr.Set(Gf.Vec3f(rot_x, rot_y, rot_z))
+
+    order_attr = prim.CreateAttribute(
+        "xformOpOrder", Sdf.ValueTypeNames.TokenArray, False)
+    order_attr.Set(Vt.TokenArray(["xformOp:rotateXYZ"]))
+
+    stage.Save()
+    print(f"  [sun] Added DistantLight '/World/sun' "
+          f"(intensity={intensity}, angle={angle}, "
+          f"elevation={elevation_deg}°, azimuth={azimuth_deg}°)")
+
+
+# ---------------------------------------------------------------------------
+# DomeLight texture patcher
+# ---------------------------------------------------------------------------
+def _patch_dome_light_texture(usd_path, out_dir, explicit_sky=""):
+    """
+    Blender's USD exporter sometimes writes a near-black solid-color EXR as
+    the DomeLight texture when the World shader has no proper HDRI (e.g. the
+    sky is a mesh sphere, not a World background image node).
+
+    This function:
+      1. Inspects the exported USD for a DomeLight with a suspiciously dark
+         (average luminance < 0.05) solid-color texture.
+      2. If explicit_sky is provided, uses that image directly.
+         Otherwise, searches the World shader node tree for a TEX_ENVIRONMENT
+         or TEX_IMAGE node that looks like a sky/environment image.
+      3. Copies the image to the textures/ dir and rewrites the DomeLight
+         texture path in the USD.
+    """
+    try:
+        import bpy
+        import shutil
+        from pxr import Usd, UsdLux, Sdf
+    except ImportError:
+        return
+
+    stage = Usd.Stage.Open(usd_path)
+    if not stage:
+        return
+
+    tex_dir = os.path.join(out_dir, "textures")
+    os.makedirs(tex_dir, exist_ok=True)
+
+    patched = False
+    for prim in stage.Traverse():
+        if not prim.IsA(UsdLux.DomeLight):
+            continue
+        dome = UsdLux.DomeLight(prim)
+        ap_attr = dome.GetTextureFileAttr()
+        if not ap_attr:
+            continue
+        ap = ap_attr.Get()
+        if not ap:
+            continue
+        tex_path = ap.resolvedPath or ap.path
+
+        # Check if the texture is a near-black solid-color swatch
+        # (Blender names these color_RRGGBB.exr)
+        is_black_swatch = False
+        fname = os.path.basename(tex_path)
+        if fname.startswith('color_') and fname.endswith('.exr'):
+            # Parse hex color from filename: color_RRGGBB.exr
+            try:
+                hex_col = fname[6:12]
+                r = int(hex_col[0:2], 16) / 255.0
+                g = int(hex_col[2:4], 16) / 255.0
+                b = int(hex_col[4:6], 16) / 255.0
+                lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                if lum < 0.05:
+                    is_black_swatch = True
+                    print(f"  [dome patch] DomeLight '{prim.GetPath()}' has near-black "
+                          f"texture '{fname}' (lum={lum:.3f}) — searching World shader...")
+            except Exception:
+                pass
+
+        if not is_black_swatch:
+            continue
+
+        # Use explicit --sky-texture if provided, otherwise search World shaders
+        sky_image_path = None
+        if explicit_sky and os.path.exists(explicit_sky):
+            sky_image_path = os.path.abspath(explicit_sky)
+            print(f"  [dome patch] Using explicit sky texture: '{sky_image_path}'")
+        else:
+            # Search World shader node trees for a sky/environment image
+            for world in bpy.data.worlds:
+                if not world.use_nodes:
+                    continue
+                for node in world.node_tree.nodes:
+                    if node.type in ('TEX_ENVIRONMENT', 'TEX_SKY', 'TEX_IMAGE'):
+                        img = getattr(node, 'image', None)
+                        if img and img.filepath:
+                            fpath = bpy.path.abspath(img.filepath)
+                            if os.path.exists(fpath):
+                                sky_image_path = fpath
+                                break
+                if sky_image_path:
+                    break
+
+        if not sky_image_path:
+            print(f"  [dome patch] No sky image found — DomeLight stays dark. "
+                  f"Re-export with --sky-texture <path> to fix.")
+            continue
+
+        # Copy sky image to textures/
+        sky_fname = os.path.basename(sky_image_path)
+        dst = os.path.join(tex_dir, sky_fname)
+        if not os.path.exists(dst):
+            shutil.copy2(sky_image_path, dst)
+
+        # Rewrite the DomeLight texture path (relative to USD)
+        rel_path = f"./textures/{sky_fname}"
+        ap_attr.Set(Sdf.AssetPath(rel_path))
+        print(f"  [dome patch] Rewrote DomeLight texture → '{rel_path}'")
+        patched = True
+
+    if patched:
+        stage.Save()
 
 
 # ---------------------------------------------------------------------------
