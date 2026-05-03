@@ -170,7 +170,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 | `-d, --depth` | `8` | Maximum number of light bounces (path depth). Lower values are faster but will miss indirect lighting and caustics through glass |
 | `-t, --threads` | `0` (auto) | Thread count; 0 = hardware concurrency |
 | `--tile-size` | `64` | Tile size in pixels |
-| `--integrator` | `bdpt` | `bdpt` or `path` |
+| `--integrator` | `path` | `bdpt` or `path` |
 | `--firefly-clamp` | `10` | BDPT: max luminance per strategy contribution; suppresses bright outliers. `0` = off |
 | `--light-angle` | `0` | Angular radius for directional lights in degrees. Turns hard point sources into soft area lights with penumbras. `0` = hard shadows, `0.27` = sun, `2–5` = soft |
 | `--adaptive` | off | Enable adaptive sampling: base pass + extra samples concentrated on high-variance tiles |

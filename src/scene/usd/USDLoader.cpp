@@ -577,7 +577,24 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
             TfToken("userProperties:blender:data_name"));
         if (nameAttr) nameAttr.Get(&blenderName);
 
+        // MaterialX createValidName() replaces any character that isn't
+        // alphanumeric or underscore with '_', so "Material.001" becomes
+        // "Material_001".  The blender_prep_for_usd_export.py script uses this
+        // when naming .mtlx → .oso files, but the USD blender:data_name
+        // retains the original Blender name with dots.  Try the sanitized form
+        // as a fallback so both "Material.001" and "Material_001" resolve.
+        auto sanitizeName = [](const std::string& s) {
+            std::string r = s;
+            for (char& c : r)
+                if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_')
+                    c = '_';
+            return r;
+        };
+        std::string blenderNameSanitized = sanitizeName(blenderName);
+
         auto osl = tryOsl(blenderName);
+        if (!osl && blenderNameSanitized != blenderName)
+            osl = tryOsl(blenderNameSanitized);
         if (!osl) osl = tryOsl(mat.GetPrim().GetName().GetString());
         if (osl) return osl;
     }
@@ -1095,10 +1112,17 @@ static Camera buildCamera(const UsdPrim& prim,
 
     // Thin lens parameters — read fStop and focusDistance if authored.
     // fStop is dimensionless; aperture radius (in world units) = focalLength / (2 * fStop).
-    // USD focalLength is in tenths of a world unit (scene units / 10) by convention,
-    // so we convert: focalLen_world = focalLen / 10.
-    // focusDistance is already in scene units.
-    // If either is absent or zero, fall back to pinhole (no DoF).
+    //
+    // USD focalLength is stored in "tenths of scene unit" (= scene_unit * 0.1) per the
+    // UsdGeomCamera spec.  We read the raw attribute here rather than using GfCamera's
+    // GetFocalLength(), because some pxr versions (≥23.x) convert the stored value to
+    // millimetres internally; using that mm value with a /10 divisor would give a focal
+    // length in mm/10 = centimetres, not scene units — producing a wildly wrong aperture
+    // radius and hence extreme/incorrect depth-of-field blur.
+    //
+    // Raw path: raw_focalLength * 0.1  →  scene units  (e.g. 0.13 * 0.1 = 0.013 m for a
+    // 13 mm lens in a metre-scale scene).  focusDistance is already in scene units.
+    // If either fStop or focusDistance is absent or zero, fall back to pinhole (no DoF).
     float apertureRadius = 0.f;
     float focalDistance  = 0.f;
 
@@ -1106,24 +1130,34 @@ static Camera buildCamera(const UsdPrim& prim,
     usdCam.GetFStopAttr().Get(&fStop, UsdTimeCode::Default());
     usdCam.GetFocusDistanceAttr().Get(&focalDistance, UsdTimeCode::Default());
 
+    // Always read the raw focal length attribute (tenths of scene unit → scene unit).
+    // Stored on the Camera struct so the --fstop CLI override can compute a correct
+    // apertureRadius even when the USD camera itself has no fStop authored.
+    float rawFocalLen = 0.f;
+    usdCam.GetFocalLengthAttr().Get(&rawFocalLen, UsdTimeCode::Default());
+    float focalLen_world = rawFocalLen * 0.1f;  // tenths of scene unit → scene unit
+
     if (fStop > 0.f && focalDistance > 0.f) {
-        float focalLen_world = focalLen / 10.f;   // USD tenths → scene units
         apertureRadius = focalLen_world / (2.f * fStop);
         spdlog::info("USDLoader: camera '{}' origin=({:.2f},{:.2f},{:.2f}) fov={:.1f}° "
                      "fStop={:.1f} focusDist={:.3f} apertureR={:.4f}",
                      prim.GetPath().GetString(),
                      origin.x, origin.y, origin.z, vfovDeg,
                      fStop, focalDistance, apertureRadius);
-        return Camera::makeThinLens(origin, target, up, vfovDeg,
-                                    filmWidth, filmHeight,
-                                    apertureRadius, focalDistance);
+        Camera cam = Camera::makeThinLens(origin, target, up, vfovDeg,
+                                          filmWidth, filmHeight,
+                                          apertureRadius, focalDistance);
+        cam.focalLength = focalLen_world;
+        return cam;
     }
 
     spdlog::info("USDLoader: camera '{}' origin=({:.2f},{:.2f},{:.2f}) fov={:.1f}° (pinhole)",
                  prim.GetPath().GetString(),
                  origin.x, origin.y, origin.z, vfovDeg);
 
-    return Camera::makePinhole(origin, target, up, vfovDeg, filmWidth, filmHeight);
+    Camera cam = Camera::makePinhole(origin, target, up, vfovDeg, filmWidth, filmHeight);
+    cam.focalLength = focalLen_world;
+    return cam;
 }
 
 // ---------------------------------------------------------------------------

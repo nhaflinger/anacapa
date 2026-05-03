@@ -95,15 +95,18 @@ void RenderSession::loadScene() {
         if (m_settings.fStop > 0.f && m_settings.focusDistance > 0.f
                 && m_scene.camera) {
             Camera& cam = *m_scene.camera;
-            // apertureRadius derived from focal length embedded in the camera
-            // frustum: focal length ≈ 0.5 * |vertical| / tan(vfov/2).
-            // Simpler: just store as-is; the caller supplied physical values.
-            float focalLen_approx = cam.vertical.length() * 0.5f;
-            cam.apertureRadius = focalLen_approx / (2.f * m_settings.fStop);
+            // Use the physical focal length stored on the camera (set by USDLoader
+            // from the raw USD focalLength attribute in scene units).  Fall back to
+            // a frustum-derived approximation only if the camera has no stored value
+            // (e.g. a synthetic auto-camera with no USD backing).
+            float focalLen = (cam.focalLength > 0.f)
+                             ? cam.focalLength
+                             : cam.vertical.length() * 0.5f;  // fallback: frustum half-height at unit depth
+            cam.apertureRadius = focalLen / (2.f * m_settings.fStop);
             cam.focalDistance  = m_settings.focusDistance;
-            spdlog::info("DoF override: fStop={:.1f} focusDist={:.3f} apertureR={:.4f}",
+            spdlog::info("DoF override: fStop={:.1f} focusDist={:.3f} focalLen={:.4f} apertureR={:.4f}",
                          m_settings.fStop, m_settings.focusDistance,
-                         cam.apertureRadius);
+                         focalLen, cam.apertureRadius);
         }
 
         // ---- Motion blur shutter -------------------------------------------

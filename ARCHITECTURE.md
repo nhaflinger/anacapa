@@ -40,7 +40,7 @@ Key flags:
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--integrator {path\|bdpt}` | `bdpt` | Integrator selection |
+| `--integrator {path\|bdpt}` | `path` | Integrator selection |
 | `--spp` | 64 | Samples per pixel |
 | `--depth` | 8 | Max path depth |
 | `--scene` | — | USD/USDA/USDC file |

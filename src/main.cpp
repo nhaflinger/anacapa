@@ -24,8 +24,8 @@ int main(int argc, char** argv) {
 
     std::string integratorName = "path";
     app.add_option("--integrator", integratorName,
-                   "Integrator: bdpt (default) or path")
-       ->default_val("bdpt");
+                   "Integrator: path (default) or bdpt")
+       ->default_val("path");
 
     app.add_option("--firefly-clamp", settings.fireflyClamp,
                    "BDPT: max luminance per strategy contribution (0=off, default=10)")

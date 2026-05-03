@@ -38,6 +38,7 @@ struct Camera {
     // Thin lens parameters — both zero means pinhole (no DoF)
     float apertureRadius = 0.f;  // Half the aperture diameter in world units
     float focalDistance  = 0.f;  // Distance from origin to the focal plane
+    float focalLength    = 0.f;  // Physical focal length in world units (metres for metre-scale scenes)
 
     // Motion blur shutter interval in normalized [0, 1] time.
     // shutterOpen == shutterClose (both 0) means no motion blur —

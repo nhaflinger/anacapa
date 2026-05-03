@@ -144,7 +144,9 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
         }
 
         BSDFSample bs = mat->sample(ctx, wo, sampler.get2D(), sampler.get1D());
-        if (!bs.isValid()) break;
+        if (!bs.isValid()) {
+            break;
+        }
 
         specularBounce = bs.isDelta();
         beta *= bs.f / bs.pdf;
