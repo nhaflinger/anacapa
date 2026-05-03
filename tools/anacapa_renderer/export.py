@@ -1,34 +1,63 @@
 """
 Shared export helpers: USD scene export and anacapa command assembly.
+
+A single cached USD file is maintained in bpy.app.tempdir.
+The dirty tracker determines whether a full re-export is needed:
+
+  geometry/material change  → run prep + full export
+  transform-only change     → skip prep, re-export USD (fast)
+  nothing changed           → reuse cached USD entirely
+
+This avoids re-running the expensive prep script (modifier baking,
+Glass BSDF conversion, etc.) when only transforms or camera changed.
 """
 
 import bpy
 import os
 import importlib.util
+import shutil
 
 # ---------------------------------------------------------------------------
-# Scene dirty tracking
-#
-# _scene_dirty starts True so the first render always exports.
-# depsgraph_update_post sets it True whenever anything changes.
-# _suppress_dirty temporarily blocks the handler during prep (which modifies
-# the scene itself and would otherwise immediately re-dirty the flag).
+# Persistent state — stored in bpy.app.driver_namespace so it survives
+# module reloads within a Blender session.
 # ---------------------------------------------------------------------------
-_scene_dirty     = True
-_suppress_dirty  = False
-_cached_usd_path = None   # path to last successfully exported USD
+_NS = "anacapa_export_state"
+
+def _state():
+    if _NS not in bpy.app.driver_namespace:
+        bpy.app.driver_namespace[_NS] = {
+            "dirty_scene":     True,
+            "dirty_transform": True,
+            "suppress_dirty":  False,
+            "cached_usd_path": None,
+        }
+    return bpy.app.driver_namespace[_NS]
 
 
 @bpy.app.handlers.persistent
 def _on_depsgraph_update(scene, depsgraph):
-    global _scene_dirty
-    if not _suppress_dirty:
-        _scene_dirty = True
+    s = _state()
+    if s["suppress_dirty"]:
+        return
+    for update in depsgraph.updates:
+        if isinstance(update.id, bpy.types.Material):
+            s["dirty_scene"] = True
+        elif isinstance(update.id, bpy.types.Object):
+            obj = update.id
+            if update.is_updated_geometry:
+                s["dirty_scene"] = True
+            if update.is_updated_shading and obj.type == 'MESH':
+                s["dirty_scene"] = True
+            if update.is_updated_transform:
+                s["dirty_transform"] = True
+        elif isinstance(update.id, bpy.types.World):
+            s["dirty_scene"] = True
 
 
-def mark_dirty():
-    global _scene_dirty
-    _scene_dirty = True
+def mark_all_dirty():
+    s = _state()
+    s["dirty_scene"]     = True
+    s["dirty_transform"] = True
 
 
 def register_dirty_handler():
@@ -46,7 +75,6 @@ def unregister_dirty_handler():
 # ---------------------------------------------------------------------------
 
 def _load_prep_module():
-    """Load blender_prep_for_usd_export.py as a module (cached after first call)."""
     if _load_prep_module._mod is not None:
         return _load_prep_module._mod
     script_path = os.path.join(os.path.dirname(__file__),
@@ -71,39 +99,48 @@ def get_executable(context):
     return prefs.executable_path
 
 
-def export_usd(filepath, context, run_prep=True):
-    """
-    Optionally run scene prep, export USD, then run USD post-processing.
-    Skips prep + export entirely if the scene has not changed since the last
-    export and a cached USD already exists.
-    """
-    global _scene_dirty, _suppress_dirty, _cached_usd_path
+def _usd_export(filepath, context, **kwargs):
+    window = context.window_manager.windows[0]
+    with context.temp_override(window=window):
+        bpy.ops.wm.usd_export(filepath=filepath, **kwargs)
 
-    # If nothing changed and we have a cached USD, reuse it
-    if not _scene_dirty and _cached_usd_path and os.path.exists(_cached_usd_path):
-        if filepath != _cached_usd_path:
-            import shutil
-            shutil.copy2(_cached_usd_path, filepath)
+
+def export_usd(usd_path, context, run_prep=True):
+    """
+    Export the scene to a single USD file.
+    Skips prep when only transforms changed.
+    Skips export entirely when nothing changed.
+    """
+    s = _state()
+
+    # Nothing changed — reuse cached USD
+    cached = s["cached_usd_path"]
+    if not s["dirty_scene"] and not s["dirty_transform"] \
+            and cached and os.path.exists(cached):
+        if usd_path != cached:
+            shutil.copy2(cached, usd_path)
         print("[Anacapa] Scene unchanged — reusing cached USD")
         return
 
     prep = _load_prep_module() if run_prep else None
-    bake_dir = os.path.dirname(filepath)
 
-    if prep is not None:
-        _suppress_dirty = True
-        try:
-            prep.prepare_scene(bake_dir=bake_dir)
-        except Exception as e:
-            print(f"[Anacapa] Scene prep warning: {e}")
-        finally:
-            _suppress_dirty = False
+    # suppress_dirty should already be set by the caller (operator).
+    # We set it here too as a safety net in case export_usd is called directly.
+    was_suppressed = s["suppress_dirty"]
+    s["suppress_dirty"] = True
+    try:
+        if s["dirty_scene"] and prep is not None:
+            print("[Anacapa] Running scene prep…")
+            bake_dir = os.path.dirname(usd_path)
+            try:
+                prep.prepare_scene(bake_dir=bake_dir)
+            except Exception as e:
+                print(f"[Anacapa] Scene prep warning: {e}")
+        elif not s["dirty_scene"] and s["dirty_transform"]:
+            print("[Anacapa] Transform-only change — skipping prep")
 
-    window = context.window_manager.windows[0]
-    with context.temp_override(window=window):
-        bpy.ops.wm.usd_export(
-            filepath=filepath,
-            export_animation=False,
+        _usd_export(usd_path, context,
+            export_animation=True,
             export_hair=False,
             export_uvmaps=True,
             export_normals=True,
@@ -115,21 +152,23 @@ def export_usd(filepath, context, run_prep=True):
             overwrite_textures=False,
         )
 
-    if prep is not None:
-        try:
-            prep.post_process_usd(filepath)
-        except Exception as e:
-            print(f"[Anacapa] USD post-process warning: {e}")
+        if prep is not None and s["dirty_scene"]:
+            try:
+                prep.post_process_usd(usd_path)
+            except Exception as e:
+                print(f"[Anacapa] USD post-process warning: {e}")
 
-    _scene_dirty     = False
-    _cached_usd_path = filepath
+        s["dirty_scene"]     = False
+        s["dirty_transform"] = False
+        s["cached_usd_path"] = usd_path
+
+    finally:
+        # Only clear suppress if we set it (don't clear if caller set it)
+        if not was_suppressed:
+            s["suppress_dirty"] = False
 
 
 def build_command(executable, usd_path, settings, width, height, output_path):
-    """
-    Assemble the anacapa CLI command as a list of strings.
-    Returns (cmd_list, png_path_or_None).
-    """
     cmd = [
         executable,
         "--scene",  usd_path,

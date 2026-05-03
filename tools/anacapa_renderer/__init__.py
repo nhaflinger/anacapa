@@ -28,6 +28,7 @@ if "bpy" in dir():
     importlib.reload(properties)
     importlib.reload(export)
     export._load_prep_module._mod = None   # invalidate prep module cache
+    export.mark_all_dirty()                # force full re-export after reload
     importlib.reload(engine)
     importlib.reload(operators)
     importlib.reload(ui)

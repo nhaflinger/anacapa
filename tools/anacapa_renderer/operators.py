@@ -31,11 +31,14 @@ class ANACAPA_OT_render(bpy.types.Operator):
         width    = int(scene.render.resolution_x * scale)
         height   = int(scene.render.resolution_y * scale)
 
-        tmp_dir  = tempfile.mkdtemp(prefix="anacapa_")
+        tmp_dir  = os.path.join(bpy.app.tempdir, "anacapa_render")
+        os.makedirs(tmp_dir, exist_ok=True)
         usd_path = os.path.join(bpy.app.tempdir, "anacapa_scene_cache.usdc")
 
         # --- Export USD ---
         self.report({'INFO'}, "Exporting USD…")
+        from . import export as export_mod
+        export_mod._state()["suppress_dirty"] = True
         try:
             export_usd(usd_path, context)
         except Exception as e:
@@ -96,6 +99,11 @@ class ANACAPA_OT_render(bpy.types.Operator):
         ANACAPA_OT_render._log_queue    = log_queue
         ANACAPA_OT_render._reader       = reader
 
+        # Suppress dirty tracking while anacapa is running so Blender's
+        # post-render internal updates don't re-dirty the scene flags.
+        from . import export as export_mod
+        export_mod._state()["suppress_dirty"] = True
+
         wm = context.window_manager
         ANACAPA_OT_render._timer = wm.event_timer_add(0.5, window=context.window)
         wm.modal_handler_add(self)
@@ -138,7 +146,6 @@ class ANACAPA_OT_render(bpy.types.Operator):
 
         if ret != 0:
             self.report({'WARNING'}, f"Anacapa exited with code {ret}")
-            shutil.rmtree(ANACAPA_OT_render._tmp_dir or "", ignore_errors=True)
             return {'CANCELLED'}
 
         return self._load_result(context)
@@ -173,6 +180,12 @@ class ANACAPA_OT_render(bpy.types.Operator):
             wm.event_timer_remove(ANACAPA_OT_render._timer)
             ANACAPA_OT_render._timer = None
         context.workspace.status_text_set(None)
+        # Re-enable dirty tracking after a short delay so Blender's own
+        # post-render depsgraph updates flush through without dirtying our flags.
+        def _reenable():
+            from . import export as export_mod
+            export_mod._state()["suppress_dirty"] = False
+        bpy.app.timers.register(_reenable, first_interval=2.0)
 
     def _load_result(self, context):
         output_path  = ANACAPA_OT_render._output_path
@@ -181,10 +194,9 @@ class ANACAPA_OT_render(bpy.types.Operator):
 
         if not output_path or not os.path.exists(output_path):
             self.report({'ERROR'}, f"No EXR at {output_path}")
-            shutil.rmtree(tmp_dir or "", ignore_errors=True)
             return {'CANCELLED'}
 
-        # Persist the EXR
+        # Persist the EXR alongside the render temp dir
         persist_path = os.path.join(bpy.app.tempdir, "anacapa_last_render.exr")
         shutil.copy2(output_path, persist_path)
 
@@ -193,9 +205,6 @@ class ANACAPA_OT_render(bpy.types.Operator):
             preview_path = ANACAPA_OT_render._preview_path
             if preview_path and os.path.exists(preview_path):
                 shutil.copy2(preview_path, bpy.path.abspath(settings.png_path))
-
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        ANACAPA_OT_render._tmp_dir = None
 
         # Remove preview image; replace with final EXR
         preview_img = ANACAPA_OT_render._preview_img
