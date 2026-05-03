@@ -4300,6 +4300,54 @@ def _extract_materialx_sidecar(usd_path):
     print("=" * 60)
 
 
+# ---------------------------------------------------------------------------
+# Public API — callable from the Blender addon without command-line parsing
+# ---------------------------------------------------------------------------
+
+def prepare_scene(bake_dir="."):
+    """
+    Run all scene preparation steps in-place on the current Blender scene.
+    Call this before exporting USD.  The caller is responsible for pushing/
+    restoring an undo state if the scene modifications should not be permanent.
+
+    bake_dir — directory where baked texture images will be saved.
+    """
+    if bpy.context.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+    realize_instances()
+    realize_particle_instances()
+    convert_to_mesh()
+    apply_modifiers()
+    apply_transforms()
+    bake_unsupported_nodes(bake_dir)
+    convert_glass_materials()
+    strip_unsupported_custom_props()
+    if REMOVE_RENDER_HIDDEN:
+        remove_render_hidden()
+
+
+def post_process_usd(usd_path, sky_texture=""):
+    """
+    Run USD post-processing steps after Blender's USD exporter has written
+    the file.  Patches the DomeLight texture, injects MaterialX textures,
+    exports per-material .mtlx files, and writes the JSON sidecar.
+
+    usd_path    — absolute path to the exported .usdc/.usda file.
+    sky_texture — optional path to an equirectangular HDRI to use as the
+                  DomeLight texture instead of whatever Blender exported.
+    """
+    if not os.path.exists(usd_path):
+        return
+
+    out_dir = os.path.dirname(usd_path)
+    _patch_dome_light_texture(usd_path, out_dir, explicit_sky=sky_texture)
+    _inject_materialx_textures(usd_path)
+    mtlx_dir = os.path.join(out_dir, "materials")
+    _export_materialx_graphs(mtlx_dir)
+    _extract_materialx_sidecar(usd_path)
+
+
 if __name__ == "__main__":
     try:
         main()
