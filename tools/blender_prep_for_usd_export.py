@@ -44,6 +44,7 @@ What requires manual attention (printed as warnings)
 """
 
 import bpy
+import hashlib
 import os
 import traceback
 from typing import List, Tuple
@@ -474,23 +475,34 @@ def _load_pixels_rgba(img) -> list:
     return pixels
 
 
+def _hash_image_and_nodes(src_img, node_chain_desc: str) -> str:
+    """
+    Compute a short hash that uniquely identifies a bake operation:
+      - source image file path + mtime (or packed data checksum)
+      - description of the node chain being baked (type + parameters)
+    Returns an 8-char hex string.
+    """
+    h = hashlib.sha1()
+    # Source image identity
+    filepath = bpy.path.abspath(src_img.filepath) if src_img.filepath else ""
+    h.update(filepath.encode())
+    if filepath and os.path.exists(filepath):
+        h.update(str(os.path.getmtime(filepath)).encode())
+    elif src_img.packed_file:
+        h.update(src_img.packed_file.data)
+    # Node chain description (type names + key parameter values)
+    h.update(node_chain_desc.encode())
+    return h.hexdigest()[:8]
+
+
 def _save_baked_image(src_img, pixels_rgba: list, suffix: str,
-                      out_dir: str) -> str:
+                      out_dir: str, node_chain_desc: str = "") -> str:
     """
     Create a new Blender Image with modified pixels and save it to disk.
     Always saves into out_dir (next to the USD file) so we never try to
     write into read-only locations like BlenderKit's asset cache.
     Returns the absolute file path of the saved image.
     """
-    w, h = src_img.size
-    baked = bpy.data.images.new(
-        name=src_img.name + suffix,
-        width=w, height=h,
-        alpha=True, float_buffer=src_img.is_float
-    )
-    baked.pixels[:] = pixels_rgba
-    baked.update()
-
     # Derive a filename from the original image name, sanitised for the filesystem.
     src_basename = os.path.splitext(os.path.basename(
         bpy.path.abspath(src_img.filepath) or src_img.name
@@ -499,7 +511,26 @@ def _save_baked_image(src_img, pixels_rgba: list, suffix: str,
                             for c in src_basename)
     textures_dir = os.path.join(out_dir, "textures")
     os.makedirs(textures_dir, exist_ok=True)
-    save_path = os.path.join(textures_dir, safe_basename + suffix + ".png")
+
+    # Check cache: if a baked file with matching hash already exists, reuse it.
+    if node_chain_desc:
+        bake_hash = _hash_image_and_nodes(src_img, node_chain_desc)
+        cached_path = os.path.join(textures_dir,
+                                   safe_basename + suffix + f"_{bake_hash}.png")
+        if os.path.exists(cached_path):
+            return cached_path
+        save_path = cached_path
+    else:
+        save_path = os.path.join(textures_dir, safe_basename + suffix + ".png")
+
+    w, h = src_img.size
+    baked = bpy.data.images.new(
+        name=src_img.name + suffix,
+        width=w, height=h,
+        alpha=True, float_buffer=src_img.is_float
+    )
+    baked.pixels[:] = pixels_rgba
+    baked.update()
 
     baked.filepath_raw = save_path
     baked.file_format = 'PNG'
@@ -886,7 +917,8 @@ def bake_unsupported_nodes(out_dir: str) -> Tuple[int, List[str]]:
                     continue
 
                 try:
-                    save_path = _save_baked_image(bump_src, norm_pixels, '_baked_NormalFromBump', out_dir)
+                    save_path = _save_baked_image(bump_src, norm_pixels, '_baked_NormalFromBump', out_dir,
+                                                  node_chain_desc=f"BUMP strength={strength_val:.3f}")
                 except Exception as e:
                     warnings.append(f"Material '{mat.name}': BUMP bake save failed: {e}")
                     continue
@@ -994,7 +1026,8 @@ def bake_unsupported_nodes(out_dir: str) -> Tuple[int, List[str]]:
             # Save the baked texture
             suffix = "_baked_" + "_".join(applied_ops).replace('/', '_').replace('(', '').replace(')', '').replace(',', '').replace('=', '').replace('.', '')[:40]
             try:
-                save_path = _save_baked_image(src_img, pixels, suffix, out_dir)
+                save_path = _save_baked_image(src_img, pixels, suffix, out_dir,
+                                             node_chain_desc="|".join(applied_ops))
             except Exception as e:
                 warnings.append(
                     f"Material '{mat.name}': failed to save baked texture: {e}"
