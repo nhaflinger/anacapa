@@ -91,7 +91,8 @@ static bool subdivide(
     float& inoutBestT,
     int   depth,
     float& outTSeg,
-    Vec3f& outTangent)
+    Vec3f& outTangent,
+    float& outH)           // impact parameter: px/halfW ∈ [-1,1]
 {
     Vec3f cp0 = frame.project(P0);
     Vec3f cp1 = frame.project(P1);
@@ -143,6 +144,7 @@ static bool subdivide(
         inoutBestT = tRay;
         outTSeg    = tOffset + tLine * tScale;
         outTangent = tang;
+        outH       = (halfW > 1e-8f) ? std::clamp(px / halfW, -1.f + 1e-5f, 1.f - 1e-5f) : 0.f;
         return true;
     }
 
@@ -155,20 +157,23 @@ static bool subdivide(
     bool hit = false;
     float tmpTSeg = 0.f;
     Vec3f tmpTang;
+    float tmpH = 0.f;
 
     if (subdivide(frame, L0, L1, L2, L3, halfW0, halfWMid,
                   tOffset, tScaleH,
-                  ray_tMin, inoutBestT, depth - 1, tmpTSeg, tmpTang)) {
+                  ray_tMin, inoutBestT, depth - 1, tmpTSeg, tmpTang, tmpH)) {
         outTSeg    = tmpTSeg;
         outTangent = tmpTang;
+        outH       = tmpH;
         hit = true;
     }
 
     if (subdivide(frame, R0, R1, R2, R3, halfWMid, halfW3,
                   tOffset + tScaleH, tScaleH,
-                  ray_tMin, inoutBestT, depth - 1, tmpTSeg, tmpTang)) {
+                  ray_tMin, inoutBestT, depth - 1, tmpTSeg, tmpTang, tmpH)) {
         outTSeg    = tmpTSeg;
         outTangent = tmpTang;
+        outH       = tmpH;
         hit = true;
     }
 
@@ -205,12 +210,13 @@ static bool intersectOneSegment(
 
     float tSeg = 0.f;
     Vec3f tang;
+    float h = 0.f;
 
     if (!subdivide(frame, P0, P1, P2, P3,
                    halfW0, halfW3,
                    v0, v3 - v0,
                    ray.tMin, inoutBestT, MAX_DEPTH,
-                   tSeg, tang))
+                   tSeg, tang, h))
         return false;
 
     Vec3f hitPoint = ray.at(inoutBestT);
@@ -229,6 +235,7 @@ static bool intersectOneSegment(
     si.primID   = segIdx;
     si.strandID = strandID;
     si.isCurve  = true;
+    si.h        = h;
     si.color    = strand.color;
     return true;
 }
@@ -420,6 +427,7 @@ TraceResult CurveBrute::trace(const Ray& ray) const {
             uint32_t end = node.left_or_prim + node.primCount();
             for (uint32_t i = node.left_or_prim; i < end; ++i) {
                 const SegRef& r = m_segRefs[i];
+                if (r.strandIdx == ray.skipStrandID) continue;  // self-intersection avoidance
                 SurfaceInteraction curveHit;
                 if (intersectOneSegment(frame, ray,
                                         m_curvePool.strand(r.strandIdx),
@@ -459,6 +467,7 @@ bool CurveBrute::occluded(const Ray& ray) const {
             uint32_t end = node.left_or_prim + node.primCount();
             for (uint32_t i = node.left_or_prim; i < end; ++i) {
                 const SegRef& r = m_segRefs[i];
+                if (r.strandIdx == ray.skipStrandID) continue;  // self-intersection avoidance
                 float t = ray.tMax;
                 SurfaceInteraction dummy;
                 if (intersectOneSegment(frame, ray,

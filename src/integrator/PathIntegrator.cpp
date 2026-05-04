@@ -151,7 +151,8 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
         specularBounce = bs.isDelta();
         beta *= bs.f / bs.pdf;
         r = spawnRay(si.p, si.n, bs.wi);
-        r.time = ray.time;  // freeze scene at the same moment for all bounces
+        r.time = ray.time;
+        r.skipStrandID = si.isCurve ? si.strandID : ~0u;  // skip own strand on next bounce
 
         if (bounce >= m_minDepth) {
             float q = 1.f - std::min(beta.maxComponent(), 0.95f);
@@ -181,13 +182,15 @@ Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
             if (!isBlack(be.f)) {
                 Ray shadowRay = spawnRayTo(si.p, si.n, si.p + ls.wi * ls.dist);
                 shadowRay.time = sceneTime;
+                shadowRay.skipStrandID = si.isCurve ? si.strandID : ~0u;
                 Spectrum Tr = shadowTransmittance(shadowRay, scene);
                 if (!isBlack(Tr)) {
                     float weight = ls.isDelta
                         ? 1.f
                         : powerHeuristic(1, ls.pdf, 1, be.pdf);
-                    // For hair/curves use sinθ_L (angle from fiber tangent) as
-                    // the effective cosine; for surfaces use the normal dot product.
+                    // For hair, use sinθ (angle from fiber tangent) not the ribbon normal dot.
+                    // The ribbon normal always faces the camera so absDot(wi, n) ≈ 0 for
+                    // most light directions, killing direct lighting entirely.
                     float cosI = si.isCurve
                         ? std::sqrt(std::max(0.f, 1.f - dot(ls.wi, ctx.t) * dot(ls.wi, ctx.t)))
                         : absDot(ls.wi, si.n);
@@ -214,6 +217,7 @@ Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
                 Ray shadowRay = spawnRay(si.p, si.ng, bs.wi);
                 shadowRay.tMax = 1e10f;
                 shadowRay.time = sceneTime;
+                shadowRay.skipStrandID = si.isCurve ? si.strandID : ~0u;
 
                 // Find the first non-transmissive surface (emitter or opaque blocker)
                 Spectrum Tr = {1.f, 1.f, 1.f};

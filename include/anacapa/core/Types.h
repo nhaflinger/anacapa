@@ -253,10 +253,11 @@ inline float luminance(Spectrum s) {
 struct Ray {
     Vec3f  origin;
     Vec3f  direction;   // Must be normalized
-    float  tMin  = 1e-4f;
-    float  tMax  = std::numeric_limits<float>::infinity();
-    uint32_t depth = 0;
-    float  time  = 0.f; // Normalized shutter time in [0, 1]; 0 = shutter open
+    float    tMin          = 1e-4f;
+    float    tMax          = std::numeric_limits<float>::infinity();
+    uint32_t depth         = 0;
+    float    time          = 0.f;    // Normalized shutter time in [0, 1]; 0 = shutter open
+    uint32_t skipStrandID  = ~0u;   // Hair strand to skip (self-intersection avoidance)
 
     Ray() = default;
     Ray(Vec3f o, Vec3f d, float tMin = 1e-4f, float tMax = std::numeric_limits<float>::infinity())

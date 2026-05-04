@@ -191,9 +191,9 @@ class MarschnerHairMaterial : public IMaterial {
 public:
     struct Params {
         float    eta     = 1.55f;  // IOR of the cortex (1.55 typical for human hair)
-        Spectrum sigma_a = { 0.40f, 0.65f, 1.35f }; // absorption (medium brown hair)
-        float    beta_m  = 0.30f;  // longitudinal roughness ∈ [0, 1]
-        float    beta_n  = 0.30f;  // azimuthal roughness    ∈ [0, 1]
+        Spectrum sigma_a = { 0.06f, 0.10f, 0.20f }; // absorption (medium brown)
+        float    beta_m  = 0.40f;  // longitudinal roughness ∈ [0, 1]
+        float    beta_n  = 0.60f;  // azimuthal roughness    ∈ [0, 1]
         float    alpha   = 2.f;    // cuticle scale tilt in degrees (typical 2–4°)
     };
 
@@ -237,14 +237,12 @@ public:
     BSDFEval evaluate(const ShadingContext& ctx,
                       Vec3f wo, Vec3f wi) const override
     {
-        return kajiyaKayEval(ctx, wo, wi);
-
         float sinThetaO, cosThetaO, sinThetaI, cosThetaI;
         hairLongitudinal(wo, ctx.t, sinThetaO, cosThetaO);
         hairLongitudinal(wi, ctx.t, sinThetaI, cosThetaI);
 
         float phi = hairPhi(wo, wi, ctx.t, sinThetaO, sinThetaI);
-        float h   = hairImpactParam(wo, ctx.t, ctx.n, sinThetaO);
+        float h   = ctx.h;
 
         Spectrum sigA = effectiveSigmaA(ctx);
         Spectrum f    = evalLobes(sinThetaO, cosThetaO, sinThetaI, cosThetaI, phi, h, sigA);
@@ -263,28 +261,10 @@ public:
     BSDFSample sample(const ShadingContext& ctx,
                       Vec3f wo, Vec2f u, float uComp) const override
     {
-        // Kajiya-Kay: cosine-sample around the ribbon normal
-        {
-            Vec3f knt, knbt;
-            buildOrthonormalBasis(ctx.n, knt, knbt);
-            float kphi  = kMH_2Pi * u.x;
-            float kcosT = std::sqrt(u.y);
-            float ksinT = std::sqrt(1.0f - u.y);
-            Vec3f kwi   = safeNormalize(knt*(ksinT*std::cos(kphi)) + knbt*(ksinT*std::sin(kphi)) + ctx.n*kcosT);
-            BSDFEval kev = kajiyaKayEval(ctx, wo, kwi);
-            BSDFSample kbs;
-            kbs.wi    = kwi;
-            kbs.f     = kev.f * kcosT;
-            kbs.pdf   = kcosT * kMH_InvPi;
-            kbs.flags = BSDFFlag_Diffuse | BSDFFlag_Reflection;
-            kbs.eta   = 1.0f;
-            return kbs;
-        }
-
         float sinThetaO, cosThetaO;
         hairLongitudinal(wo, ctx.t, sinThetaO, cosThetaO);
 
-        float h = hairImpactParam(wo, ctx.t, ctx.n, sinThetaO);
+        float h = ctx.h;
 
         // Lobe attenuations for lobe selection
         Spectrum sigA = effectiveSigmaA(ctx);
@@ -362,11 +342,12 @@ public:
                               phiActual, h, sigA);
         if (pd < 1e-8f) return {};
 
-        float cosSurf = std::abs(dot(wi, ctx.n));  // integrator's cosine factor
+        // Use cosThetaI (longitudinal cosine) not ribbon normal dot — same reason as estimateDirect.
+        float hairCos = cosThetaI_actual;
 
         BSDFSample bs;
         bs.wi    = wi;
-        bs.f     = f * cosSurf;    // convention: f includes |cos θᵢ|
+        bs.f     = f * hairCos;
         bs.pdf   = pd;
         bs.pdfRev = evalPdf(sinThetaI_actual, cosThetaI_actual,
                              sinThetaO, cosThetaO, -phiActual, h, sigA);
@@ -382,8 +363,7 @@ public:
         hairLongitudinal(wo, ctx.t, sinThetaO, cosThetaO);
         hairLongitudinal(wi, ctx.t, sinThetaI, cosThetaI);
         float phi = hairPhi(wo, wi, ctx.t, sinThetaO, sinThetaI);
-        float h   = hairImpactParam(wo, ctx.t, ctx.n, sinThetaO);
-        return evalPdf(sinThetaO, cosThetaO, sinThetaI, cosThetaI, phi, h, effectiveSigmaA(ctx));
+        return evalPdf(sinThetaO, cosThetaO, sinThetaI, cosThetaI, phi, ctx.h, effectiveSigmaA(ctx));
     }
 
 private:
@@ -495,7 +475,7 @@ private:
         // Using the identity: cos(θ_d) = sqrt((1 + cosO·cosI + sinO·sinI) / 2)
         float cosThetaD = std::sqrt(std::max(0.f,
             0.5f * (1.f + cosThetaO * cosThetaI + sinThetaO * sinThetaI)));
-        float denom = std::max(0.25f, cosThetaD * cosThetaD);
+        float denom = std::max(1e-5f, cosThetaD * cosThetaD);
 
         // Modified IOR and geometry
         float sin2ThetaO = 1.f - cosThetaO * cosThetaO;
