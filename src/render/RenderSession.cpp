@@ -216,7 +216,10 @@ void RenderSession::appendAlembicCurves_() {
     if (m_settings.curvesPath.empty()) return;
 
     AlembicCurveOptions opts;
-    opts.baseMaterialIndex = static_cast<uint32_t>(m_materials.size());
+    // baseMaterialIndex must be the index into scene.materials (the raw-pointer
+    // list indexed by si.meshID), not into m_materials (the owned-object list).
+    // The two sizes differ when the scene has more meshes than unique materials.
+    opts.baseMaterialIndex = static_cast<uint32_t>(m_scene.materials.size());
 
     // Snapshot size before loading so we know which materials were added.
     const size_t matsBefore = m_materials.size();

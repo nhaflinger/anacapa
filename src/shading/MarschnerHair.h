@@ -191,7 +191,7 @@ class MarschnerHairMaterial : public IMaterial {
 public:
     struct Params {
         float    eta     = 1.55f;  // IOR of the cortex (1.55 typical for human hair)
-        Spectrum sigma_a = { 0.84f, 1.39f, 2.74f }; // absorption (medium brown hair, PBRT v4)
+        Spectrum sigma_a = { 0.40f, 0.65f, 1.35f }; // absorption (medium brown hair)
         float    beta_m  = 0.30f;  // longitudinal roughness ∈ [0, 1]
         float    beta_n  = 0.30f;  // azimuthal roughness    ∈ [0, 1]
         float    alpha   = 2.f;    // cuticle scale tilt in degrees (typical 2–4°)
@@ -237,6 +237,8 @@ public:
     BSDFEval evaluate(const ShadingContext& ctx,
                       Vec3f wo, Vec3f wi) const override
     {
+        return kajiyaKayEval(ctx, wo, wi);
+
         float sinThetaO, cosThetaO, sinThetaI, cosThetaI;
         hairLongitudinal(wo, ctx.t, sinThetaO, cosThetaO);
         hairLongitudinal(wi, ctx.t, sinThetaI, cosThetaI);
@@ -261,6 +263,24 @@ public:
     BSDFSample sample(const ShadingContext& ctx,
                       Vec3f wo, Vec2f u, float uComp) const override
     {
+        // Kajiya-Kay: cosine-sample around the ribbon normal
+        {
+            Vec3f knt, knbt;
+            buildOrthonormalBasis(ctx.n, knt, knbt);
+            float kphi  = kMH_2Pi * u.x;
+            float kcosT = std::sqrt(u.y);
+            float ksinT = std::sqrt(1.0f - u.y);
+            Vec3f kwi   = safeNormalize(knt*(ksinT*std::cos(kphi)) + knbt*(ksinT*std::sin(kphi)) + ctx.n*kcosT);
+            BSDFEval kev = kajiyaKayEval(ctx, wo, kwi);
+            BSDFSample kbs;
+            kbs.wi    = kwi;
+            kbs.f     = kev.f * kcosT;
+            kbs.pdf   = kcosT * kMH_InvPi;
+            kbs.flags = BSDFFlag_Diffuse | BSDFFlag_Reflection;
+            kbs.eta   = 1.0f;
+            return kbs;
+        }
+
         float sinThetaO, cosThetaO;
         hairLongitudinal(wo, ctx.t, sinThetaO, cosThetaO);
 
@@ -368,6 +388,40 @@ public:
 
 private:
     // -----------------------------------------------------------------------
+    // Kajiya-Kay BSDF (temporary, while Marschner cosine convention is fixed)
+    // Diffuse: albedo/π  (integrator applies sinθ_L as the hair cosine factor)
+    // Specular: neutral highlight using cos(θ_L - θ_V) raised to a power
+    // -----------------------------------------------------------------------
+    BSDFEval kajiyaKayEval(const ShadingContext& ctx, Vec3f wo, Vec3f wi) const {
+        // Absorption-derived albedo via Beer-Lambert (1 chord at r=0.5)
+        Spectrum sigA = effectiveSigmaA(ctx);
+        Spectrum alb = {
+            std::exp(-sigA.x),
+            std::exp(-sigA.y),
+            std::exp(-sigA.z)
+        };
+
+        float dotTL = dot(ctx.t, wi);
+        float dotTV = dot(ctx.t, wo);
+        float sinTL = std::sqrt(std::max(0.f, 1.f - dotTL * dotTL));
+        float sinTV = std::sqrt(std::max(0.f, 1.f - dotTV * dotTV));
+
+        // Pure BSDF (no cosine — integrator applies hair cosine externally)
+        Spectrum f = alb * kMH_InvPi;
+
+        // Specular lobe: cos(θ_L − θ_V) = T·L * T·V + sinTL * sinTV
+        float spec = dotTL * dotTV + sinTL * sinTV;
+        if (spec > 0.f)
+            f = f + Spectrum{0.15f, 0.15f, 0.15f} * (std::pow(spec, 20.f) * kMH_InvPi);
+
+        float cosN = std::max(0.f, dot(wi, ctx.n));
+        BSDFEval e;
+        e.f   = f;
+        e.pdf = cosN * kMH_InvPi;
+        return e;
+    }
+
+    // -----------------------------------------------------------------------
     // Per-strand color → absorption coefficient
     // If ctx.color is non-white (< 0.999 on any channel), derive sigma_a from it.
     // Formula: sigma_a = -log(max(c, 0.001))  (Beer-Lambert inversion, scale=1)
@@ -441,7 +495,7 @@ private:
         // Using the identity: cos(θ_d) = sqrt((1 + cosO·cosI + sinO·sinI) / 2)
         float cosThetaD = std::sqrt(std::max(0.f,
             0.5f * (1.f + cosThetaO * cosThetaI + sinThetaO * sinThetaI)));
-        float denom = std::max(1e-5f, cosThetaD * cosThetaD);
+        float denom = std::max(0.25f, cosThetaD * cosThetaD);
 
         // Modified IOR and geometry
         float sin2ThetaO = 1.f - cosThetaO * cosThetaO;

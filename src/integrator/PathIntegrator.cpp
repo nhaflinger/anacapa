@@ -186,7 +186,11 @@ Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
                     float weight = ls.isDelta
                         ? 1.f
                         : powerHeuristic(1, ls.pdf, 1, be.pdf);
-                    float cosI = absDot(ls.wi, si.n);
+                    // For hair/curves use sinθ_L (angle from fiber tangent) as
+                    // the effective cosine; for surfaces use the normal dot product.
+                    float cosI = si.isCurve
+                        ? std::sqrt(std::max(0.f, 1.f - dot(ls.wi, ctx.t) * dot(ls.wi, ctx.t)))
+                        : absDot(ls.wi, si.n);
                     Ld += be.f * ls.Li * Tr * cosI * weight / ls.pdf;
                 }
             }
