@@ -622,15 +622,15 @@ All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable
 
 | Phase | Status | Description |
 |---|---|---|
-| 1 | Complete | CPU path tracer, custom BVH, Halton sampler, EXR output |
-| 2 | Complete | Bidirectional path tracing with MIS, alias-table light sampler |
-| 3 | Complete | Intel OIDN denoising, albedo/normal AOVs, multi-layer EXR |
-| 4 | Complete | OpenUSD scene loading (geometry, materials, lights, camera) |
-| 5 | Complete | GGX `standard_surface` BSDF, HDRI dome lights, depth of field |
-| 6 | Complete | Transformation motion blur (time-sampled USD xforms, temporal BVH, per-ray time) |
-| 7 | Complete | Metal backend (Apple Silicon), pure-CUDA backend (NVIDIA/Linux/WSL2) |
-| 8 | In Progress | MaterialX/OSL shading — OpenPBR terminal resolution, UsdPreviewSurface texture fallback, JSON sidecar extraction |
-| 9 | Complete | Hair and fur — Marschner BSDF, ray-ribbon intersection, Alembic loader, Blender addon integration |
+| 1 | Working | CPU path tracer, custom BVH, Halton sampler, EXR output |
+| 2 | Working | Bidirectional path tracing with MIS, alias-table light sampler |
+| 3 | Working | Intel OIDN denoising, albedo/normal AOVs, multi-layer EXR |
+| 4 | Working | OpenUSD scene loading (geometry, materials, lights, camera) |
+| 5 | Working | GGX `standard_surface` BSDF, HDRI dome lights, depth of field |
+| 6 | Working | Transformation motion blur (time-sampled USD xforms, temporal BVH, per-ray time) |
+| 7 | Working | Metal backend (Apple Silicon), pure-CUDA backend (NVIDIA/Linux/WSL2) |
+| 8 | Working | MaterialX/OSL shading — OpenPBR terminal resolution, UsdPreviewSurface texture fallback, JSON sidecar extraction |
+| 9 | In Progress | Hair and fur — Marschner BSDF, ray-ribbon intersection, Alembic loader, Blender addon integration |
 
 ## License
 
