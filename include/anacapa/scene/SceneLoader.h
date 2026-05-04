@@ -1,6 +1,7 @@
 #pragma once
 
 #include <anacapa/accel/GeometryPool.h>
+#include <anacapa/accel/CurvePool.h>
 #include <anacapa/integrator/IIntegrator.h>  // SceneView, Camera
 #include <anacapa/shading/IMaterial.h>
 #include <anacapa/shading/ILight.h>
@@ -19,6 +20,7 @@ namespace anacapa {
 struct LoadedScene {
     bool                                   valid = false; // false if stage failed to open
     GeometryPool                           geomPool;
+    CurvePool                              curvePool;     // hair/fur strands (empty for mesh-only scenes)
     SceneView                              sceneView;
     std::vector<std::unique_ptr<IMaterial>> materials;
     std::vector<std::unique_ptr<ILight>>   lights;

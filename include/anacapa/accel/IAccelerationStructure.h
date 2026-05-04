@@ -14,11 +14,16 @@ struct SurfaceInteraction {
     Vec3f    n;           // Shading normal (normalized)
     Vec3f    ng;          // Geometric normal (normalized)
     Vec3f    dpdu, dpdv;  // Partial derivatives (tangent frame)
+                          // For curves: dpdu = fiber/tangent direction along strand
     Vec2f    uv;          // Surface parameterization
+                          // For curves: uv.y = strand parameter v ∈ [0,1] (root→tip)
     float    t = 0.f;     // Ray parameter at hit
     uint32_t meshID     = ~0u;
-    uint32_t primID     = ~0u;  // Triangle index within mesh
+    uint32_t primID     = ~0u;  // Triangle index within mesh; segment index for curves
     uint32_t instanceID = ~0u;
+    uint32_t strandID   = ~0u;  // Index into CurvePool (curves only; ~0u for triangles)
+    bool     isCurve    = false; // True when the hit is a hair/curve primitive
+    Vec3f    color      = {1.f, 1.f, 1.f};  // per-strand color propagated from StrandDesc
 
     // Filled in by the scene after intersection, not by the BVH
     const void* material = nullptr;  // IMaterial* — void* avoids circular include

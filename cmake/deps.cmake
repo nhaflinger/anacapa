@@ -198,6 +198,19 @@ if(ANACAPA_ENABLE_VIEWER)
 endif()
 
 # ---------------------------------------------------------------------------
+# Alembic (optional — hair/curve loader)
+# Expected: brew install alembic
+# ---------------------------------------------------------------------------
+if(ANACAPA_ENABLE_ALEMBIC)
+    find_package(Alembic REQUIRED
+        PATHS "/opt/homebrew/Cellar/alembic/1.8.11/lib/cmake/Alembic"
+              "/opt/homebrew/lib/cmake/Alembic"
+              "/usr/local/lib/cmake/Alembic"
+        NO_DEFAULT_PATH)
+    message(STATUS "Alembic ${Alembic_VERSION} found")
+endif()
+
+# ---------------------------------------------------------------------------
 # Metal (optional — Phase 5, macOS only)
 # ---------------------------------------------------------------------------
 if(ANACAPA_ENABLE_METAL)

@@ -44,6 +44,8 @@ int main(int argc, char** argv) {
 
     app.add_option("--scene", settings.scenePath,
                    "USD/USDA/USDC scene file to load (requires ANACAPA_ENABLE_USD)");
+    app.add_option("--curves", settings.curvesPath,
+                   "Alembic .abc file containing hair/fur curves (requires ANACAPA_ENABLE_ALEMBIC)");
     app.add_option("--camera", settings.cameraPath,
                    "USD prim path of camera to use (e.g. /World/RenderCam). "
                    "If omitted, uses UsdRenderSettings.camera or first camera found.");

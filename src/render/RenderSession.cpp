@@ -1,5 +1,6 @@
 #include "RenderSession.h"
 #include "../accel/BVHBackend.h"
+#include "../accel/CurveBrute.h"
 #include "../integrator/PathIntegrator.h"
 #include "../integrator/BDPTIntegrator.h"
 #ifdef ANACAPA_ENABLE_METAL
@@ -16,6 +17,10 @@
 
 #ifdef ANACAPA_ENABLE_USD
 #  include "../scene/usd/USDLoader.h"
+#endif
+
+#ifdef ANACAPA_ENABLE_ALEMBIC
+#  include "../scene/alembic/AlembicLoader.h"
 #endif
 
 #include <spdlog/spdlog.h>
@@ -67,6 +72,7 @@ void RenderSession::loadScene() {
             std::exit(1);
         }
         m_geomPool           = std::move(loaded.geomPool);
+        m_curvePool          = std::move(loaded.curvePool);
         m_scene              = std::move(loaded.sceneView);
         m_camera             = std::move(loaded.camera);
         m_materials          = std::move(loaded.materials);
@@ -192,12 +198,46 @@ void RenderSession::loadScene() {
                          forward.x, forward.y, forward.z);
         }
 
+        appendAlembicCurves_();
         return;
     }
 #endif
     if (!m_settings.scenePath.empty())
         spdlog::warn("--scene requires ANACAPA_ENABLE_USD; falling back to Cornell box");
     buildCornellBox();
+    appendAlembicCurves_();
+}
+
+// ---------------------------------------------------------------------------
+// appendAlembicCurves_ — load hair/fur from an Alembic file (if requested)
+// ---------------------------------------------------------------------------
+void RenderSession::appendAlembicCurves_() {
+#ifdef ANACAPA_ENABLE_ALEMBIC
+    if (m_settings.curvesPath.empty()) return;
+
+    AlembicCurveOptions opts;
+    opts.baseMaterialIndex = static_cast<uint32_t>(m_materials.size());
+
+    // Snapshot size before loading so we know which materials were added.
+    const size_t matsBefore = m_materials.size();
+
+    bool ok = loadAlembicCurves(m_settings.curvesPath, opts,
+                                m_curvePool, m_materials);
+    if (!ok) {
+        spdlog::error("Failed to load Alembic curves from '{}'",
+                      m_settings.curvesPath);
+    }
+
+    // Mirror every newly-added material into SceneView::materials so the
+    // integrator can find them via si.meshID.  Without this the material index
+    // stored on each strand falls out of bounds → mat == nullptr → black hair.
+    for (size_t i = matsBefore; i < m_materials.size(); ++i)
+        m_scene.materials.push_back(m_materials[i].get());
+#else
+    if (!m_settings.curvesPath.empty())
+        spdlog::warn("--curves requires ANACAPA_ENABLE_ALEMBIC; ignoring '{}'",
+                     m_settings.curvesPath);
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -320,12 +360,14 @@ void RenderSession::buildCornellBox() {
 }
 
 // ---------------------------------------------------------------------------
-// Build BVH from the geometry pool
+// Build acceleration structure from the geometry and curve pools.
+// CurveBrute wraps the triangle BVH and adds brute-force curve intersection.
+// When m_curvePool is empty (mesh-only scenes) the curve loop costs nothing.
 // ---------------------------------------------------------------------------
 void RenderSession::buildAccelStructure() {
-    auto bvh = std::make_unique<BVHBackend>(m_geomPool);
-    bvh->commit();
-    m_accel = std::move(bvh);
+    auto accel = std::make_unique<CurveBrute>(m_geomPool, m_curvePool);
+    accel->commit();
+    m_accel = std::move(accel);
     m_scene.accel = m_accel.get();
 }
 

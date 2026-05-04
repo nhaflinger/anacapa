@@ -3,6 +3,7 @@
 #include <anacapa/film/Film.h>      // Film, DenoiseOptions
 #include <anacapa/integrator/IIntegrator.h>
 #include <anacapa/accel/GeometryPool.h>
+#include <anacapa/accel/CurvePool.h>
 #include <anacapa/accel/IAccelerationStructure.h>
 #include <anacapa/sampling/ISampler.h>
 #include <anacapa/shading/IMaterial.h>
@@ -26,6 +27,7 @@ struct RenderSettings {
     std::string    outputPath      = "out.exr";
     std::string    scenePath;              // empty → built-in Cornell box
     std::string    cameraPath;             // empty → auto-select from USD
+    std::string    curvesPath;             // Alembic .abc file for hair/fur (empty = none)
     std::string    envPath;                // HDRI dome light (empty = none)
     float          envIntensity    = 1.f;
 
@@ -75,9 +77,13 @@ private:
     void buildCornellBox();
     void buildAccelStructure();
     void scheduleTiles(std::vector<TileRequest>& tiles) const;
+    // Load Alembic curves into m_curvePool (no-op if curvesPath is empty or
+    // ANACAPA_ENABLE_ALEMBIC is not set)
+    void appendAlembicCurves_();
 
     RenderSettings                        m_settings;
     GeometryPool                          m_geomPool;
+    CurvePool                             m_curvePool;
     SceneView                             m_scene;
     std::optional<Camera>                 m_camera;   // set by USD loader if present
     std::unique_ptr<IAccelerationStructure> m_accel;

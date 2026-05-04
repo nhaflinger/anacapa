@@ -19,22 +19,32 @@ struct ShadingContext {
     Vec3f t;        // Primary tangent (dpdu direction, normalized)
     Vec3f bt;       // Bitangent = cross(n, t)
     Vec2f uv;       // Surface UV
+    Vec3f color = {1.f, 1.f, 1.f};  // per-strand color (curves); white for surfaces
 
     // Whether the ray hit the front face (dot(wo, ng) > 0)
     bool  frontFace = true;
 
     // Construct from a SurfaceInteraction + incoming ray direction
     ShadingContext(const SurfaceInteraction& si, Vec3f rayDir) {
-        p  = si.p;
-        ng = si.ng;
-        uv = si.uv;
+        p     = si.p;
+        ng    = si.ng;
+        uv    = si.uv;
+        color = si.color;
 
         frontFace = dot(-rayDir, ng) > 0.f;
         // Flip normals for consistent outward convention
         n  = frontFace ? si.n  : -si.n;
         ng = frontFace ? si.ng : -si.ng;
 
-        buildOrthonormalBasis(n, t, bt);
+        if (si.isCurve) {
+            // For hair/curves the fiber tangent is stored in dpdu.
+            // Use it directly so Marschner shading sees the correct fiber direction.
+            // bt is derived from n and t; n was set to the ribbon facing normal.
+            t  = si.dpdu;
+            bt = safeNormalize(cross(n, t));
+        } else {
+            buildOrthonormalBasis(n, t, bt);
+        }
     }
 
     // Transform a vector from world space to local shading frame

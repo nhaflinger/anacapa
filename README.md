@@ -10,6 +10,8 @@ Named after Anacapa Island, part of California's Channel Islands.
 - **Bidirectional path tracing (BDPT)** with multiple importance sampling and Veach MIS weights
 - **OpenUSD scene loading** — geometry, materials, lights, camera, and animated transforms from `.usda`/`.usdc` files
 - **Transformation motion blur** — multi-sample USD xformOps with piecewise-linear interpolation per ray; arbitrary number of time samples supported for curved blur streaks; shutter interval read automatically from the camera prim's `shutter:open`/`shutter:close`, falling back to stage `startTimeCode`/`endTimeCode`
+- **Hair and fur rendering** — RenderMan-style ray-ribbon intersection with recursive de Casteljau subdivision; Marschner 2003 BSDF (R/TT/TRT lobes, exact Fresnel, Beer's law absorption, PBRT v4 variance remapping)
+- **Alembic curve loader** — loads hair/fur strands from `.abc` files directly into the ray tracer; supports cubic Bézier, B-spline, Catmull-Rom, and linear curves with automatic basis conversion to endpoint-sharing Bézier
 - **Intel OIDN denoising** — AI denoiser with albedo and normal auxiliary buffers, enabled by default
 - **Custom SAH BVH** — surface area heuristic build with 12-bucket binning, Möller–Trumbore traversal; time-expanded bounds for animated meshes
 - **Custom thread pool** — tile-parallel rendering with `std::thread`, no external threading library
@@ -21,6 +23,7 @@ Named after Anacapa Island, part of California's Channel Islands.
 - **OSL shading language** — optional (`-DANACAPA_ENABLE_OSL=ON`)
 - **GPU-accelerated interactive rendering** — Metal backend (`--interactive`) for Apple Silicon (hardware ray tracing via `MTLAccelerationStructure`); pure-CUDA backend for NVIDIA GPUs (WSL2 and Linux)
 - **Progressive render viewer** — SDL2 + Dear ImGui live preview with 8 comparison slots and real-time color controls (exposure, contrast, saturation, temperature)
+- **Blender addon** — one-click render from Blender; exports USD + Alembic hair automatically, launches Anacapa, and loads the result back into Blender's image editor with a live progressive preview
 - **Zero compiled third-party dependencies** in the core renderer
 
 ## Dependencies
@@ -29,6 +32,7 @@ Named after Anacapa Island, part of California's Channel Islands.
 |---|---|---|
 | OpenImageIO | Yes | `brew install openimageio` |
 | OpenUSD | No (`-DANACAPA_ENABLE_USD=ON`) | Build from source — see below |
+| Alembic | No (`-DANACAPA_ENABLE_ALEMBIC=ON`, default ON) | `brew install alembic` |
 | OpenImageDenoise | Yes (all presets) | `brew install open-image-denoise` |
 | Open Shading Language | No (`-DANACAPA_ENABLE_OSL=ON`) | `brew install open-shading-language` |
 
@@ -45,7 +49,7 @@ CMake presets place compiled output in OS-specific subdirectories (`build/Darwin
 cmake --list-presets
 
 # Prerequisites (macOS) — OIDN is required by all presets
-brew install openimageio open-image-denoise
+brew install openimageio open-image-denoise alembic
 
 # Configure and build — macOS arm64
 cmake --preset macos-arm64
@@ -107,6 +111,11 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 ./build/Darwin/anacapa --scene scenes/cornell_box.usda \
   --interactive --width 800 --height 800 --spp 64 -o preview.exr
 
+# Render a character with USD geometry and Alembic hair/fur
+DYLD_LIBRARY_PATH=~/usd/lib \
+./build/Darwin/anacapa --scene scenes/character.usda \
+  --curves hair_sim.abc -o images/render.exr
+
 # Isolate material issues (replace all lights with a single white directional)
 ./build/Darwin/anacapa --scene scenes/cornell_box.usda \
   -o images/render.exr --override-lights
@@ -132,7 +141,8 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 
 # Full options
 ./build/Darwin/anacapa \
-  --scene            scenes/cornell_box.usda \
+  --scene            scenes/character.usda   \
+  --curves           hair_sim.abc            \
   --camera           /World/RenderCam        \
   --integrator       bdpt                    \
   --width            800                     \
@@ -176,6 +186,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 | `--adaptive` | off | Enable adaptive sampling: base pass + extra samples concentrated on high-variance tiles |
 | `--adaptive-base-spp` | `0` | Adaptive base-pass SPP (`0` = auto: `spp/4`, minimum 16) |
 | `--scene` | — | USD/USDA/USDC scene file |
+| `--curves` | — | Alembic `.abc` file containing hair/fur curves |
 | `--camera` | — | USD prim path of camera (e.g. `/World/RenderCam`) |
 | `--env` | — | Equirectangular HDRI environment map (EXR or HDR) |
 | `--env-intensity` | `1.0` | Intensity multiplier for the environment map |
@@ -211,6 +222,83 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 | Unknown / general | `bdpt` | Default; handles more scenarios well at the cost of slightly higher per-sample overhead |
 
 Both integrators support `--adaptive` sampling. As a rule of thumb: if your scene has difficult light transport (small lights, glass, deep indirection), prefer `bdpt`. If your scene is large and open with broad lighting, `path` is faster per sample and converges equally well.
+
+## Hair and Fur
+
+Hair and fur are rendered as cubic Bézier ribbon primitives using a RenderMan-style ray-ribbon intersection. Each strand is stored as a sequence of endpoint-sharing cubic Bézier segments; at render time the ribbon is subdivided recursively in ray space (de Casteljau, depth 6) until it can be approximated as a straight 2D line, then the closest point to the ray is tested against the interpolated half-width.
+
+Shading uses the **Marschner 2003** hair BSDF with three scattering lobes:
+
+| Lobe | Path | Description |
+|---|---|---|
+| R | Reflected | Single reflection off the cuticle surface |
+| TT | Transmitted–Transmitted | Light passing straight through the fiber |
+| TRT | Transmitted–Reflected–Transmitted | Internal reflection, produces the characteristic highlight |
+
+Each lobe uses a von Mises-Fisher longitudinal distribution (M_p), exact Fresnel attenuation with Beer's law absorption (A_p), and a trimmed logistic azimuthal distribution (N_p). Variance remapping and logistic scale follow the PBRT v4 curve-fits.
+
+Default parameters: η = 1.55 (glass-like cuticle), σ_a = (0.06, 0.10, 0.20) ACEScg (medium brown), β_m = β_n = 0.30 (moderately rough), α = 2° cuticle tilt.
+
+### Loading hair from Alembic
+
+Hair and fur strands are loaded from Alembic `.abc` files via `--curves`:
+
+```bash
+./build/Darwin/anacapa --scene character.usda --curves hair.abc -o render.exr
+```
+
+Supported curve bases and their automatic conversion to endpoint-sharing cubic Bézier:
+
+| Alembic basis | Conversion |
+|---|---|
+| `kBezierBasis` (cubic) | Used directly (assumes 3n+1 endpoint-sharing CVs) |
+| `kBsplineBasis` (cubic) | Converted via the standard B-spline → Bézier formula |
+| `kCatmullromBasis` (cubic) | Converted to Bézier (centripetal form) |
+| `kLinear` | Promoted to cubic Bézier with collinear inner CVs |
+
+Width channels (per-vertex, per-curve, or constant scope) are read automatically. All transforms in the parent hierarchy are accumulated and applied at load time.
+
+## Blender Addon
+
+The Anacapa Blender addon provides a fully integrated render pipeline — from Blender's Properties panel straight to a finished EXR in Blender's image editor, with no manual export steps.
+
+### Installation
+
+Copy the `anacapa_renderer/` folder to your Blender addons directory and enable it in Preferences → Add-ons. Set the path to the `anacapa` binary in the addon preferences.
+
+### Rendering from Blender
+
+1. Set the render engine to **Anacapa** in Properties → Render
+2. Configure sampling, integrator, lighting, and output in the Anacapa panels
+3. Click **Render** — the addon handles everything automatically:
+   - Hair/fur Curves objects and particle hair systems are exported to a temporary Alembic `.abc` file **first**, before any scene prep runs
+   - The scene (meshes, lights, materials, camera) is prepped and exported to a temporary USD file
+   - Anacapa is launched with `--scene … --curves …` assembled automatically
+   - A live progressive preview updates in Blender's Image Editor every 500 ms as tiles complete
+   - The final EXR is loaded when rendering finishes; press Escape to cancel mid-render
+
+The hair export always runs before USD prep. This matters because the prep script converts Curves objects to meshes for USD export — exporting hair first ensures the original strand geometry is captured.
+
+### Dirty tracking and caching
+
+The addon caches both the USD and Alembic exports separately and only re-exports when the scene has actually changed:
+
+| Change | Re-exports |
+|---|---|
+| Geometry or material change | USD + Alembic |
+| Hair/fur strand change | Alembic only |
+| Transform-only change | USD only |
+| No change | Reuses both cached files |
+
+### Export Scene operator
+
+**Properties → Render → Output → Export Scene for Anacapa** exports the USD and Alembic files to a location you choose and prints the full `anacapa` command to the system console. Use this to hand off a render to a farm or inspect the export without launching a render.
+
+### Known limitations
+
+- Hair material parameters (color, roughness, η) use the Marschner defaults for all strands. Per-object hair material overrides are not yet exposed in the UI.
+- Animated hair (simulated or cached) exports a single frame (the current frame). Animated hair sequences are not yet supported.
+- The GPU (`--interactive`) backend does not support hair rendering. Hair strands are silently absent in interactive mode.
 
 ## Motion Blur
 
@@ -437,7 +525,7 @@ The original `.blend` is never modified. The script exports directly to USD at t
 
 **Known limitations** (printed as warnings, require manual attention):
 
-- Particle hair / point cloud instances
+- Particle hair and Curves objects are exported separately to Alembic by the addon and do not need to pass through this script
 - Volume / VDB objects
 - Grease Pencil objects
 - Library-linked objects that cannot be made local
@@ -499,16 +587,20 @@ Each slot has independent adjustments applied via a GLSL shader — the source P
 ```
 include/anacapa/
   core/         Types (Vec3f, Ray, Spectrum, BBox3f), ArenaAllocator
-  accel/        IAccelerationStructure, GeometryPool (MeshDesc with MotionKey array)
+  accel/        IAccelerationStructure, GeometryPool (MeshDesc with MotionKey),
+                CurvePool (StrandDesc — cubic Bézier, endpoint-sharing)
   shading/      IMaterial, ILight, ShadingContext
   sampling/     ISampler, SamplerState
   film/         Film, TileBuffer, DenoiseOptions
   integrator/   IIntegrator, Camera (shutter interval), SceneView
-  scene/        SceneLoader (LoadedScene, shutter fields)
+  scene/        SceneLoader (LoadedScene, CurvePool, shutter fields)
 
 src/
-  accel/        BVHBackend — SAH BVH; time-expanded bounds across all motion keys + piecewise-linear interpolation at intersection
+  accel/        BVHBackend — SAH BVH; time-expanded bounds + piecewise-linear interpolation
+                CurveBrute — ribbon intersection (de Casteljau depth-6 subdivision in ray space)
   shading/      Lambertian, StandardSurface, EmissiveMaterial
+                MarschnerHair — Marschner 2003 R/TT/TRT lobes, vMF longitudinal,
+                                trimmed logistic azimuthal, exact Fresnel + Beer's law
   shading/lights/  AreaLight, DirectionalLight, DomeLight (HDRI)
   sampling/     PCGRng, HaltonSampler
   integrator/   PathIntegrator (reference), BDPTIntegrator
@@ -516,6 +608,7 @@ src/
   film/         Film — atomic accumulation, OIDN denoising, multi-layer EXR
   render/       ThreadPool, RenderSession — shutter wiring from scene or CLI
   scene/usd/    USDLoader — geometry, lights, materials, camera, animated transforms
+  scene/alembic/ AlembicLoader — ICurves traversal, basis conversion, world xform
   gpu/metal/    MetalContext, MetalAccelStructure, MetalPathIntegrator (macOS only)
 
 scenes/
@@ -537,6 +630,7 @@ All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable
 | 6 | Complete | Transformation motion blur (time-sampled USD xforms, temporal BVH, per-ray time) |
 | 7 | Complete | Metal backend (Apple Silicon), pure-CUDA backend (NVIDIA/Linux/WSL2) |
 | 8 | In Progress | MaterialX/OSL shading — OpenPBR terminal resolution, UsdPreviewSurface texture fallback, JSON sidecar extraction |
+| 9 | Complete | Hair and fur — Marschner BSDF, ray-ribbon intersection, Alembic loader, Blender addon integration |
 
 ## License
 
