@@ -21,6 +21,7 @@ struct ShadingContext {
     Vec2f uv;       // Surface UV
     Vec3f color   = {1.f, 1.f, 1.f};  // per-strand color (curves); white for surfaces
     float h       = 0.f;              // hair impact parameter ∈ (-1,1); 0 for surfaces
+    float strandV = 0.f;              // parametric position along strand ∈ [0,1] (root=0, tip=1); 0 for surfaces
     bool  isCurve = false;            // true when the hit is on a hair/curve primitive
 
     // Whether the ray hit the front face (dot(wo, ng) > 0)
@@ -33,6 +34,7 @@ struct ShadingContext {
         uv      = si.uv;
         color   = si.color;
         h       = si.h;
+        strandV = si.strandV;
         isCurve = si.isCurve;
 
         frontFace = dot(-rayDir, ng) > 0.f;

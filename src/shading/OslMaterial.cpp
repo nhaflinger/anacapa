@@ -231,7 +231,7 @@ public:
             return true;
         }
         if (name == h_hair_v && type == OSL::TypeFloat) {
-            *static_cast<float*>(val) = ctx->uv.y;
+            *static_cast<float*>(val) = ctx->strandV;
             return true;
         }
         if (name == h_hair_color && type == OSL::TypeColor) {
@@ -286,7 +286,7 @@ public:
             return true;
         }
         if (name == OSL::ustring("hair_v") && type == OSL::TypeFloat) {
-            *static_cast<float*>(val) = ctx->uv.y;
+            *static_cast<float*>(val) = ctx->strandV;
             return true;
         }
         if (name == OSL::ustring("hair_color") && type == OSL::TypeColor) {

@@ -30,7 +30,8 @@ struct StrandDesc {
     std::vector<float>     widths;         // per-CV diameter
     std::vector<MotionKey> motionKeys;     // empty = static
     uint32_t               materialIndex = 0;
-    Vec3f                  color = {1.f, 1.f, 1.f};  // per-strand RGB (linear); white = use material default
+    Vec3f                  color   = {1.f, 1.f, 1.f};  // per-strand RGB (linear); white = use material default
+    Vec2f                  rootUV  = {0.f, 0.f};        // UV on emitter mesh where strand was grown
 
     bool     hasMotion()   const { return !motionKeys.empty(); }
 

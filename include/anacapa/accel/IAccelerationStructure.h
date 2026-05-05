@@ -15,8 +15,9 @@ struct SurfaceInteraction {
     Vec3f    ng;          // Geometric normal (normalized)
     Vec3f    dpdu, dpdv;  // Partial derivatives (tangent frame)
                           // For curves: dpdu = fiber/tangent direction along strand
-    Vec2f    uv;          // Surface parameterization
-                          // For curves: uv.y = strand parameter v ∈ [0,1] (root→tip)
+    Vec2f    uv;          // Surface parameterization.
+                          // For curves: root UV on the emitter mesh (scalp position).
+    float    strandV = 0.f; // Curves only: parametric position along strand ∈ [0,1] (root=0, tip=1)
     float    t = 0.f;     // Ray parameter at hit
     uint32_t meshID     = ~0u;
     uint32_t primID     = ~0u;  // Triangle index within mesh; segment index for curves

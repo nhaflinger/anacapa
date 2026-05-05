@@ -229,7 +229,8 @@ static bool intersectOneSegment(
     si.ng       = normal;
     si.dpdu     = tang;
     si.dpdv     = cross(tang, normal);
-    si.uv       = { 0.f, tSeg };
+    si.uv       = strand.rootUV;   // root UV on emitter mesh (scalp position)
+    si.strandV  = tSeg;            // parametric position along strand (root=0, tip=1)
     si.t        = inoutBestT;
     si.meshID   = strand.materialIndex;
     si.primID   = segIdx;

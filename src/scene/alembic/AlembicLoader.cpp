@@ -217,21 +217,40 @@ static void processICurves(const Alembic::AbcGeom::ICurves&  curvesObj,
 
     // ---- per-strand color (AHAIR002 — optional) ----
     std::vector<Vec3f> strandColors;  // empty = no color data
+    // ---- per-strand root UV (AHAIR003 — optional) ----
+    std::vector<Vec2f> strandRootUVs; // empty = no UV data
     {
         using namespace Alembic::AbcGeom;
         ICompoundProperty arbParams = schema.getArbGeomParams();
-        if (arbParams.valid() && arbParams.getPropertyHeader("color")) {
-            IC3fGeomParam colorParam(arbParams, "color");
-            if (colorParam.valid()) {
-                IC3fGeomParam::Sample cs;
-                colorParam.getExpanded(cs);
-                if (cs.getVals() && cs.getVals()->size() == numCurves) {
-                    const Imath::C3f* cols = cs.getVals()->get();
-                    strandColors.resize(numCurves);
-                    for (size_t ci2 = 0; ci2 < numCurves; ++ci2)
-                        strandColors[ci2] = { cols[ci2].x, cols[ci2].y, cols[ci2].z };
-                    spdlog::info("AlembicLoader: loaded {} strand colors (first={:.3f},{:.3f},{:.3f})",
-                                 numCurves, cols[0].x, cols[0].y, cols[0].z);
+        if (arbParams.valid()) {
+            if (arbParams.getPropertyHeader("color")) {
+                IC3fGeomParam colorParam(arbParams, "color");
+                if (colorParam.valid()) {
+                    IC3fGeomParam::Sample cs;
+                    colorParam.getExpanded(cs);
+                    if (cs.getVals() && cs.getVals()->size() == numCurves) {
+                        const Imath::C3f* cols = cs.getVals()->get();
+                        strandColors.resize(numCurves);
+                        for (size_t ci2 = 0; ci2 < numCurves; ++ci2)
+                            strandColors[ci2] = { cols[ci2].x, cols[ci2].y, cols[ci2].z };
+                        spdlog::info("AlembicLoader: loaded {} strand colors (first={:.3f},{:.3f},{:.3f})",
+                                     numCurves, cols[0].x, cols[0].y, cols[0].z);
+                    }
+                }
+            }
+            if (arbParams.getPropertyHeader("UVs")) {
+                IV2fGeomParam uvParam(arbParams, "UVs");
+                if (uvParam.valid()) {
+                    IV2fGeomParam::Sample us;
+                    uvParam.getExpanded(us);
+                    if (us.getVals() && us.getVals()->size() == numCurves) {
+                        const Imath::V2f* uvs = us.getVals()->get();
+                        strandRootUVs.resize(numCurves);
+                        for (size_t ci2 = 0; ci2 < numCurves; ++ci2)
+                            strandRootUVs[ci2] = { uvs[ci2].x, uvs[ci2].y };
+                        spdlog::info("AlembicLoader: loaded {} strand root UVs (first={:.3f},{:.3f})",
+                                     numCurves, uvs[0].x, uvs[0].y);
+                    }
                 }
             }
         }
@@ -307,6 +326,8 @@ static void processICurves(const Alembic::AbcGeom::ICurves&  curvesObj,
         strand.materialIndex  = opts.baseMaterialIndex;
         if (!strandColors.empty())
             strand.color = strandColors[ci];
+        if (!strandRootUVs.empty())
+            strand.rootUV = strandRootUVs[ci];
         pool.addStrand(std::move(strand));
         ++strandsAdded;
 

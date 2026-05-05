@@ -24,6 +24,15 @@
  *       r f32, g f32, b f32   (linear sRGB strand color)
  *       per point: x f32, y f32, z f32, radius f32
  *
+ *   AHAIR003 — adds per-strand root UV:
+ *     magic[8]         "AHAIR003"
+ *     num_strands u32
+ *     per strand:
+ *       num_points u32
+ *       r f32, g f32, b f32   (linear sRGB strand color)
+ *       u f32, v f32          (root UV on emitter mesh — scalp position)
+ *       per point: x f32, y f32, z f32, radius f32
+ *
  * Usage:
  *   hair_export <input.hairbin> <output.abc> [--objects <counts.json>]
  *
@@ -87,7 +96,8 @@ struct StrandData {
     std::vector<Imath::V3f> points;      // all CVs, concatenated
     std::vector<int32_t>    counts;      // CVs per strand
     std::vector<float>      widths;      // all widths, concatenated
-    std::vector<Imath::C3f> colors;      // one per strand (empty if AHAIR001)
+    std::vector<Imath::C3f> colors;      // one per strand (empty if AHAIR001/002 without color)
+    std::vector<Imath::V2f> rootUVs;    // one per strand (empty if AHAIR001/002)
 };
 
 // ---------------------------------------------------------------------------
@@ -132,7 +142,7 @@ static void writeOCurves(OObject& parent,
     );
     schema.set(sample);
 
-    // Per-strand color (AHAIR002)
+    // Per-strand color (AHAIR002+)
     if (!data.colors.empty()) {
         const Imath::C3f* cols = data.colors.data() + strandStart;
         OC3fGeomParam colorParam(schema.getArbGeomParams(),
@@ -142,6 +152,18 @@ static void writeOCurves(OObject& parent,
             kUniformScope
         );
         colorParam.set(colorSamp);
+    }
+
+    // Per-strand root UV (AHAIR003) — UV on emitter mesh where strand was grown
+    if (!data.rootUVs.empty()) {
+        const Imath::V2f* uvs = data.rootUVs.data() + strandStart;
+        OV2fGeomParam uvParam(schema.getArbGeomParams(),
+                              "UVs", false, kUniformScope, 1);
+        OV2fGeomParam::Sample uvSamp(
+            V2fArraySample(uvs, strandCount),
+            kUniformScope
+        );
+        uvParam.set(uvSamp);
     }
 }
 
@@ -173,7 +195,11 @@ int main(int argc, char* argv[]) {
         fclose(f); return 1;
     }
     bool hasColor = false;
-    if (memcmp(magic, "AHAIR002", 8) == 0) {
+    bool hasRootUV = false;
+    if (memcmp(magic, "AHAIR003", 8) == 0) {
+        hasColor  = true;
+        hasRootUV = true;
+    } else if (memcmp(magic, "AHAIR002", 8) == 0) {
         hasColor = true;
     } else if (memcmp(magic, "AHAIR001", 8) != 0) {
         fprintf(stderr, "hair_export: invalid magic in '%s'\n", argv[1]);
@@ -190,7 +216,8 @@ int main(int argc, char* argv[]) {
     sd.points.reserve(numStrands * 32);
     sd.counts.reserve(numStrands);
     sd.widths.reserve(numStrands * 32);
-    if (hasColor) sd.colors.reserve(numStrands);
+    if (hasColor)  sd.colors.reserve(numStrands);
+    if (hasRootUV) sd.rootUVs.reserve(numStrands);
 
     for (uint32_t si = 0; si < numStrands; ++si) {
         uint32_t n;
@@ -207,6 +234,14 @@ int main(int argc, char* argv[]) {
                 fclose(f); return 1;
             }
             sd.colors.push_back({cr, cg, cb});
+        }
+        if (hasRootUV) {
+            float ru, rv;
+            if (!readF32(f, ru) || !readF32(f, rv)) {
+                fprintf(stderr, "hair_export: truncated root UV (strand %u)\n", si);
+                fclose(f); return 1;
+            }
+            sd.rootUVs.push_back({ru, rv});
         }
 
         for (uint32_t pi = 0; pi < n; ++pi) {
@@ -268,9 +303,10 @@ int main(int argc, char* argv[]) {
         // No per-object info — write everything as one "hair_curves" node.
         writeOCurves(top, "hair_curves", sd, 0,
                      static_cast<uint32_t>(sd.counts.size()));
-        printf("[hair_export] %u strands, %zu CVs%s → %s (single object)\n",
+        printf("[hair_export] %u strands, %zu CVs%s%s → %s (single object)\n",
                numStrands, sd.points.size(),
-               hasColor ? " (with color)" : "", argv[2]);
+               hasColor  ? " (with color)" : "",
+               hasRootUV ? " (with root UV)" : "", argv[2]);
     } else {
         uint32_t runningStrand = 0;
         for (const auto& obj : objects) {
@@ -283,9 +319,10 @@ int main(int argc, char* argv[]) {
                 "hair_export: warning: object counts sum to %u but binary has %u strands\n",
                 runningStrand, numStrands);
         }
-        printf("[hair_export] %u strands, %zu CVs%s → %s (%zu objects)\n",
+        printf("[hair_export] %u strands, %zu CVs%s%s → %s (%zu objects)\n",
                numStrands, sd.points.size(),
-               hasColor ? " (with color)" : "", argv[2], objects.size());
+               hasColor  ? " (with color)" : "",
+               hasRootUV ? " (with root UV)" : "", argv[2], objects.size());
     }
 
     return 0;
