@@ -24,6 +24,7 @@ Named after Anacapa Island, part of California's Channel Islands.
 - **GPU-accelerated interactive rendering** — Metal backend (`--interactive`) for Apple Silicon (hardware ray tracing via `MTLAccelerationStructure`); pure-CUDA backend for NVIDIA GPUs (WSL2 and Linux)
 - **Progressive render viewer** — SDL2 + Dear ImGui live preview with 8 comparison slots and real-time color controls (exposure, contrast, saturation, temperature)
 - **Blender addon** — one-click render from Blender; exports USD + Alembic hair automatically, launches Anacapa, and loads the result back into Blender's image editor with a live progressive preview
+- **Material assignment pipeline** — JSON sidecar file (`<scene>.matassign.json`) maps object names to shader parameters; written automatically by the Blender addon and hand-editable by TDs between renders with no re-export required; supports per-shot layered overrides via multiple `--matassign` files (later file wins)
 - **Zero compiled third-party dependencies** in the core renderer
 
 ## Dependencies
@@ -116,6 +117,21 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 ./build/Darwin/anacapa --scene scenes/character.usda \
   --curves hair_sim.abc -o images/render.exr
 
+# Apply material assignments from a JSON file (auto-discovered alongside --curves if present)
+DYLD_LIBRARY_PATH=~/usd/lib \
+./build/Darwin/anacapa --scene scenes/character.usda \
+  --curves hair_sim.abc \
+  --matassign scenes/caches/character/character.matassign.json \
+  -o images/render.exr
+
+# Layer a shot-specific override on top of the base material assignments
+DYLD_LIBRARY_PATH=~/usd/lib \
+./build/Darwin/anacapa --scene scenes/character.usda \
+  --curves hair_sim.abc \
+  --matassign scenes/caches/character/character.matassign.json \
+  --matassign shots/sh010/character_wet.matassign.json \
+  -o images/render.exr
+
 # Isolate material issues (replace all lights with a single white directional)
 ./build/Darwin/anacapa --scene scenes/cornell_box.usda \
   -o images/render.exr --override-lights
@@ -187,6 +203,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 | `--adaptive-base-spp` | `0` | Adaptive base-pass SPP (`0` = auto: `spp/4`, minimum 16) |
 | `--scene` | — | USD/USDA/USDC scene file |
 | `--curves` | — | Alembic `.abc` file containing hair/fur curves |
+| `--matassign` | — | Material assignment JSON file (repeatable; later files override earlier ones). `<abc>.matassign.json` is always auto-discovered alongside `--curves` |
 | `--camera` | — | USD prim path of camera (e.g. `/World/RenderCam`) |
 | `--env` | — | Equirectangular HDRI environment map (EXR or HDR) |
 | `--env-intensity` | `1.0` | Intensity multiplier for the environment map |
@@ -258,6 +275,69 @@ Supported curve bases and their automatic conversion to endpoint-sharing cubic B
 
 Width channels (per-vertex, per-curve, or constant scope) are read automatically. All transforms in the parent hierarchy are accumulated and applied at load time.
 
+### Material assignment
+
+Hair materials are specified via a JSON **matassign file** — a human-readable sidecar that maps Blender object names to Marschner shader parameters. This decouples material authoring from geometry export: a TD can adjust hair color or roughness between renders by editing one file, with no need to re-export from the DCC.
+
+The file is auto-discovered as `<abc>.matassign.json` alongside the Alembic file. Additional files can be layered on top with `--matassign` (repeatable; later files win by object name):
+
+```json
+{
+  "version": 1,
+  "exported_at": "2026-05-04T18:00:00Z",
+  "source_app": "Blender 5.1.0",
+  "source_file": "/path/to/project/scenes/character.blend",
+  "source_frame": 1,
+  "geometry_cache": "hair.0001.abc",
+  "notes": "",
+  "assignments": [
+    {
+      "object": "CyberpunkHair",
+      "comment": "from Blender material 'Hair.Blue'",
+      "material": {
+        "type": "marschner",
+        "sigma_a": [3.2, 1.8, 0.4],
+        "beta_m": 0.35,
+        "beta_n": 0.55,
+        "alpha": -2.0
+      }
+    },
+    {
+      "object": "Eyebrows",
+      "comment": "dark brown",
+      "material": {
+        "type": "marschner",
+        "sigma_a": [0.84, 1.10, 1.60],
+        "beta_m": 0.25,
+        "beta_n": 0.40,
+        "alpha": -2.0
+      }
+    }
+  ]
+}
+```
+
+**Marschner parameters:**
+
+| Parameter | Description |
+|---|---|
+| `sigma_a` | Absorption coefficient (RGB). Controls hair color via Beer-Lambert attenuation — higher values absorb more light, producing darker hair. Inverted from linear RGB as `sigma_a = -log(color)`. |
+| `beta_m` | Longitudinal roughness (0–1). Controls highlight spread along the fiber axis. Low = silky/fine, high = woolly/matte. |
+| `beta_n` | Azimuthal roughness (0–1). Controls highlight spread around the fiber circumference. Governs the breadth of TT (forward scatter) and TRT (inner highlight) lobes. Typically 1.5–2× `beta_m`. |
+| `alpha` | Cuticle scale tilt in degrees. Shifts specular highlights off-center relative to the light direction. Typically −2° to −4° for human hair (negative = toward root). |
+
+The Blender addon extracts these parameters automatically from the active Principled Hair BSDF on each object and writes them into the matassign file during export. The file is written to `scenes/caches/<blend_stem>/` alongside the Alembic cache and survives between Blender sessions.
+
+**Per-shot layering** — inspired by RenderMan's RIF architecture, matassign files are designed to be scripted. A base file contains the full character's assignments; a shot override file lists only the objects that differ:
+
+```bash
+# Base character materials + wet-look shot override
+anacapa --scene character.usda --curves hair.abc \
+  --matassign caches/character/character.matassign.json \
+  --matassign shots/sh010/wet_override.matassign.json \
+  -o render.exr
+```
+
 ## Blender Addon
 
 The Anacapa Blender addon provides a fully integrated render pipeline — from Blender's Properties panel straight to a finished EXR in Blender's image editor, with no manual export steps.
@@ -271,13 +351,16 @@ Copy the `anacapa_renderer/` folder to your Blender addons directory and enable 
 1. Set the render engine to **Anacapa** in Properties → Render
 2. Configure sampling, integrator, lighting, and output in the Anacapa panels
 3. Click **Render** — the addon handles everything automatically:
-   - Hair/fur Curves objects and particle hair systems are exported to a temporary Alembic `.abc` file **first**, before any scene prep runs
-   - The scene (meshes, lights, materials, camera) is prepped and exported to a temporary USD file
-   - Anacapa is launched with `--scene … --curves …` assembled automatically
+   - Hair/fur Curves objects are exported to an Alembic `.abc` file **first**, before any scene prep runs, writing to `scenes/caches/<blend_stem>/`
+   - Marschner shader parameters are extracted from each object's active material and written to `<blend_stem>.matassign.json` in the same cache directory
+   - The scene (meshes, lights, materials, camera) is prepped and exported to a USD file alongside the blend
+   - Anacapa is launched with `--scene … --curves … --matassign …` assembled automatically
    - A live progressive preview updates in Blender's Image Editor every 500 ms as tiles complete
    - The final EXR is loaded when rendering finishes; press Escape to cancel mid-render
 
 The hair export always runs before USD prep. This matters because the prep script converts Curves objects to meshes for USD export — exporting hair first ensures the original strand geometry is captured.
+
+All scene products (USD, Alembic, matassign.json) are written to stable project directories alongside the blend file, not to a temporary location. The `ANACAPA_CACHE_DIR` environment variable overrides the cache location for farm or shared NAS workflows.
 
 ### Dirty tracking and caching
 
@@ -296,7 +379,6 @@ The addon caches both the USD and Alembic exports separately and only re-exports
 
 ### Known limitations
 
-- Hair material parameters (color, roughness, η) use the Marschner defaults for all strands. Per-object hair material overrides are not yet exposed in the UI.
 - Animated hair (simulated or cached) exports a single frame (the current frame). Animated hair sequences are not yet supported.
 - The GPU (`--interactive`) backend does not support hair rendering. Hair strands are silently absent in interactive mode.
 
@@ -608,7 +690,8 @@ src/
   film/         Film — atomic accumulation, OIDN denoising, multi-layer EXR
   render/       ThreadPool, RenderSession — shutter wiring from scene or CLI
   scene/usd/    USDLoader — geometry, lights, materials, camera, animated transforms
-  scene/alembic/ AlembicLoader — ICurves traversal, basis conversion, world xform
+  scene/alembic/ AlembicLoader — ICurves traversal, basis conversion, world xform, AlembicObjectRange
+  scene/        MatAssignLoader — JSON matassign parser; loadMatAssign(), mergeMatAssign(), buildMaterial()
   gpu/metal/    MetalContext, MetalAccelStructure, MetalPathIntegrator (macOS only)
 
 scenes/
@@ -630,7 +713,7 @@ All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable
 | 6 | Working | Transformation motion blur (time-sampled USD xforms, temporal BVH, per-ray time) |
 | 7 | Working | Metal backend (Apple Silicon), pure-CUDA backend (NVIDIA/Linux/WSL2) |
 | 8 | Working | MaterialX/OSL shading — OpenPBR terminal resolution, UsdPreviewSurface texture fallback, JSON sidecar extraction |
-| 9 | In Progress | Hair and fur — Marschner BSDF, ray-ribbon intersection, Alembic loader, Blender addon integration |
+| 9 | Working | Hair and fur — Marschner BSDF, ray-ribbon intersection, Alembic loader, Blender addon integration, matassign pipeline |
 
 ## License
 
