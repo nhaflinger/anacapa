@@ -12,7 +12,7 @@
 
 #ifdef ANACAPA_ENABLE_OSL
 
-#include <anacapa/shading/OslMaterial.h>
+#include "shading/OslMaterial.h"
 #include <cstdio>
 #include <string>
 

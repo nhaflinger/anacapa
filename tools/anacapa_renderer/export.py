@@ -243,9 +243,7 @@ def export_hair_abc(abc_path, context):
     guide_py = abc_path.replace(".abc", "_guide.py")
 
     # Shared strand-writing body used by both helpers (template, no depsgraph line)
-    # Format: AHAIR002 — per strand: num_points u32, r g b f32×3, then n*(x y z radius f32×4)
-    # NOTE: AHAIR003 (with root UV) requires a rebuilt hair_export binary.  Revert to
-    # AHAIR002 here until the C++ project is rebuilt with AHAIR003 support.
+    # Format: AHAIR003 — per strand: num_points u32, r g b f32×3, u v f32×2, then n*(x y z radius f32×4)
     _STRAND_BODY = """\
         pos_attr = curves_data.attributes.get("position")
         if pos_attr is None:
@@ -323,6 +321,24 @@ def export_hair_abc(abc_path, context):
         if curve_colors is None:
             print(f"[hair_color] '{name}' no color attribute found — using white")
 
+        # Read per-strand root UV from surface_uv_coordinate (CURVE domain, float2)
+        # This is the UV on the emitter mesh where each strand was grown.
+        curve_root_uvs = None
+        uv_attr = curves_data.attributes.get("surface_uv_coordinate")
+        if uv_attr is not None and uv_attr.domain == "CURVE":
+            raw_uv = [0.0] * (num_curves * 2)
+            try:
+                uv_attr.data.foreach_get("vector", raw_uv)
+                curve_root_uvs = [(raw_uv[ci*2], raw_uv[ci*2+1]) for ci in range(num_curves)]
+                n_samp = min(3, num_curves)
+                samps  = [f"({curve_root_uvs[i][0]:.3f},{curve_root_uvs[i][1]:.3f})"
+                          for i in range(n_samp)]
+                print(f"[hair_uv] '{name}' root UVs loaded, samples={samps}")
+            except Exception as e:
+                print(f"[hair_uv] '{name}' failed to read surface_uv_coordinate: {e}")
+        if curve_root_uvs is None:
+            print(f"[hair_uv] '{name}' no surface_uv_coordinate — root UV will be (0,0)")
+
         obj_strand_count = 0
         for ci in range(num_curves):
             start = offsets[ci]
@@ -331,8 +347,10 @@ def export_hair_abc(abc_path, context):
             if n < 2:
                 continue
             cr, cg, cb = curve_colors[ci] if curve_colors else (1.0, 1.0, 1.0)
+            ru, rv     = curve_root_uvs[ci] if curve_root_uvs else (0.0, 0.0)
             fh.write(struct.pack("<I", n))
             fh.write(struct.pack("<fff", cr, cg, cb))
+            fh.write(struct.pack("<ff",  ru, rv))
             for pi in range(start, end):
                 lx = positions[pi * 3]
                 ly = positions[pi * 3 + 1]
@@ -366,7 +384,7 @@ depsgraph = bpy.context.evaluated_depsgraph_get()
 total_strands = 0
 strand_counts = {{}}
 with open(bin_path, "wb") as fh:
-    fh.write(b"AHAIR002")
+    fh.write(b"AHAIR003")
     count_offset = fh.tell()
     fh.write(b"\\x00\\x00\\x00\\x00")
 
@@ -411,7 +429,7 @@ bpy.context.scene.frame_set(frame)
 total_strands = 0
 strand_counts = {{}}
 with open(bin_path, "wb") as fh:
-    fh.write(b"AHAIR002")
+    fh.write(b"AHAIR003")
     count_offset = fh.tell()
     fh.write(b"\\x00\\x00\\x00\\x00")
 

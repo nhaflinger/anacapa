@@ -159,6 +159,7 @@ if(ANACAPA_ENABLE_OSL)
     # Build-time OSL shader compiler (wraps anacapa's oslCompileShader API).
     add_executable(osl_compile src/tools/osl_compile.cpp)
     target_link_libraries(osl_compile PRIVATE anacapa_lib)
+    target_include_directories(osl_compile PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
     # Compile hand-authored shaders from src/shaders/ → scenes/materials/.
     # The output .oso is committed to the repo so OSL-disabled builds can still
