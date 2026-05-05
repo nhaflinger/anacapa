@@ -144,6 +144,20 @@ struct OslMxAnisotropicVdfParams {
     float       anisotropy;
 };
 
+// marschner_hair(sigma_a, beta_m, beta_n, alpha, eta)  [anacapa custom]
+// sigma_a : absorption coefficient (linear, not artist color)
+// beta_m  : longitudinal roughness ∈ [0,1]
+// beta_n  : azimuthal roughness ∈ [0,1]
+// alpha   : cuticle tilt in degrees (typically -2 to -4)
+// eta     : index of refraction (typically 1.55)
+struct OslMarschnerParams {
+    OSL::Color3 sigma_a;
+    float       beta_m;
+    float       beta_n;
+    float       alpha;
+    float       eta;
+};
+
 // ===========================================================================
 // Closure IDs (renderer-assigned — must be unique positive integers)
 // ===========================================================================
@@ -170,6 +184,7 @@ enum OslClosureId : int {
     OSL_CID_MX_LAYER            = 19,
     OSL_CID_MX_SUBSURFACE       = 20,
     OSL_CID_MX_ANISOTROPIC_VDF  = 21,
+    OSL_CID_MARSCHNER_HAIR      = 22,  // anacapa custom hair closure
 };
 
 // ===========================================================================
@@ -431,6 +446,15 @@ static void registerOslClosures(OSL::ShadingSystem* sys) {
         CLOSURE_COLOR_PARAM(OslMxAnisotropicVdfParams, extinction),
         CLOSURE_FLOAT_PARAM(OslMxAnisotropicVdfParams, anisotropy),
         CLOSURE_FINISH_PARAM(OslMxAnisotropicVdfParams) });
+
+    // anacapa custom — Marschner hair BSDF with explicit absorption coefficient
+    reg("marschner_hair", OSL_CID_MARSCHNER_HAIR, {
+        CLOSURE_COLOR_PARAM(OslMarschnerParams, sigma_a),
+        CLOSURE_FLOAT_PARAM(OslMarschnerParams, beta_m),
+        CLOSURE_FLOAT_PARAM(OslMarschnerParams, beta_n),
+        CLOSURE_FLOAT_PARAM(OslMarschnerParams, alpha),
+        CLOSURE_FLOAT_PARAM(OslMarschnerParams, eta),
+        CLOSURE_FINISH_PARAM(OslMarschnerParams) });
 }
 
 // ===========================================================================
@@ -502,6 +526,7 @@ struct OslLobe {
         GGXBoth,       // GGX reflection + transmission (dielectric)
         Transparent,   // straight-through (alpha cut-out)
         Emission,      // emitted radiance (contributes to Le only)
+        MarschnerHair, // Marschner R/TT/TRT — dispatches to C++ implementation
     } kind;
 
     Spectrum weight   = {};       // accumulated path weight
@@ -514,6 +539,15 @@ struct OslLobe {
     float    ior        = 1.5f;
     Spectrum albedo     = {0.8f, 0.8f, 0.8f};   // diffuse albedo
     Spectrum emittance  = {};
+
+    // MarschnerHair kind only: params for the C++ Marschner implementation
+    struct MarschnerParams {
+        Spectrum sigma_a = {0.06f, 0.10f, 0.20f};
+        float    beta_m  = 0.30f;
+        float    beta_n  = 0.60f;
+        float    alpha   = -2.f;
+        float    eta     = 1.55f;
+    } marschner;
 };
 
 // Schlick generalized Fresnel: f0 + (f90-f0)*(1-cos)^exp
@@ -770,6 +804,20 @@ static void collectLobes(const OSL::ClosureColor* c,
             lobe.kind   = OslLobe::Kind::Diffuse;
             lobe.albedo = w * Spectrum{p->albedo[0], p->albedo[1], p->albedo[2]};
             lobe.weight = lobe.albedo;
+            out.push_back(lobe);
+            break;
+        }
+        // ---- anacapa custom: Marschner hair ----
+        case OSL_CID_MARSCHNER_HAIR: {
+            const auto* p = cur->as_comp()->as<OslMarschnerParams>();
+            OslLobe lobe;
+            lobe.kind   = OslLobe::Kind::MarschnerHair;
+            lobe.weight = w;
+            lobe.marschner.sigma_a = { p->sigma_a[0], p->sigma_a[1], p->sigma_a[2] };
+            lobe.marschner.beta_m  = p->beta_m;
+            lobe.marschner.beta_n  = p->beta_n;
+            lobe.marschner.alpha   = p->alpha;
+            lobe.marschner.eta     = p->eta;
             out.push_back(lobe);
             break;
         }
@@ -1093,6 +1141,17 @@ public:
         return Le;
     }
 
+    // Build a MarschnerHairMaterial from lobe params (used for dispatch below).
+    static MarschnerHairMaterial marschnerFromLobe(const OslLobe& lobe) {
+        MarschnerHairMaterial::Params p;
+        p.sigma_a = lobe.marschner.sigma_a;
+        p.beta_m  = lobe.marschner.beta_m;
+        p.beta_n  = lobe.marschner.beta_n;
+        p.alpha   = lobe.marschner.alpha;
+        p.eta     = lobe.marschner.eta;
+        return MarschnerHairMaterial(p);
+    }
+
     // ---------- sample ----------
     BSDFSample sample(const ShadingContext& ctx,
                       Vec3f wo, Vec2f u, float uComp) const override {
@@ -1123,6 +1182,12 @@ public:
                     ? std::min(0.9999f, (uComp * total - accumPrev)
                                / luminance(lobe.weight))
                     : 0.5f;
+
+                // Marschner: dispatch to the C++ hair implementation with full ctx
+                if (lobe.kind == OslLobe::Kind::MarschnerHair) {
+                    auto mat = marschnerFromLobe(lobe);
+                    return mat.sample(ctx, wo, u, uComp);
+                }
 
                 BSDFSample s = sampleLobe(lobe, woLocal, u, uFresnel);
                 if (!s.isValid()) return {};
@@ -1170,6 +1235,14 @@ public:
         for (auto& lobe : lobes) {
             if (lobe.kind == OslLobe::Kind::Emission) continue;
             float selPdf = total > 0.f ? luminance(lobe.weight) / total : 0.f;
+            if (lobe.kind == OslLobe::Kind::MarschnerHair) {
+                auto mat = marschnerFromLobe(lobe);
+                auto ev  = mat.evaluate(ctx, wo, wi);
+                result.f      = result.f + ev.f;
+                result.pdf    += ev.pdf * selPdf;
+                result.pdfRev += ev.pdfRev * selPdf;
+                continue;
+            }
             auto ev = evalLobe(lobe, woLocal, wiLocal);
             result.f      = result.f + ev.f;
             result.pdf    += ev.pdf * selPdf;
@@ -1377,6 +1450,8 @@ private:
             if (wi.z < 0.f)  // transmission direction
                 return {};  // GGX transmission eval is complex; skip for pdf
             return evalGGXReflLobe(lobe, wo, wi);
+        case OslLobe::Kind::MarschnerHair:
+            return {};  // handled in evaluate() via marschnerFromLobe — never reaches here
         default: return {};
         }
     }

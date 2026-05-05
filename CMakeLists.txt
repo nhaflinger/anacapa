@@ -155,6 +155,29 @@ if(ANACAPA_ENABLE_ALEMBIC)
     target_include_directories(hair_export PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 endif()
 
+if(ANACAPA_ENABLE_OSL)
+    # Build-time OSL shader compiler (wraps anacapa's oslCompileShader API).
+    add_executable(osl_compile src/tools/osl_compile.cpp)
+    target_link_libraries(osl_compile PRIVATE anacapa_lib)
+
+    # Compile hand-authored shaders from src/shaders/ → scenes/materials/.
+    # The output .oso is committed to the repo so OSL-disabled builds can still
+    # reference the shader by name without needing to recompile.
+    set(_shaders_src "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders")
+    set(_shaders_dst "${CMAKE_CURRENT_SOURCE_DIR}/scenes/materials")
+
+    set(_marschner_osl "${_shaders_src}/anacapa_marschner_hair.osl")
+    set(_marschner_oso "${_shaders_dst}/anacapa_marschner_hair.oso")
+
+    add_custom_command(
+        OUTPUT  "${_marschner_oso}"
+        COMMAND osl_compile "${_marschner_osl}" "${_marschner_oso}" "${_shaders_dst}"
+        DEPENDS osl_compile "${_marschner_osl}"
+        COMMENT "Compiling anacapa_marschner_hair.osl"
+    )
+    add_custom_target(anacapa_shaders ALL DEPENDS "${_marschner_oso}")
+endif()
+
 if(ANACAPA_ENABLE_VIEWER)
     # Compile Dear ImGui sources directly (it has no CMake build system)
     FetchContent_GetProperties(imgui SOURCE_DIR IMGUI_SOURCE_DIR)

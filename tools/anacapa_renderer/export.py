@@ -28,10 +28,25 @@ def _state():
         bpy.app.driver_namespace[_NS] = {
             "dirty_scene":     True,
             "dirty_transform": True,
+            "dirty_hair":      True,
             "suppress_dirty":  False,
             "cached_usd_path": None,
+            "cached_abc_path": None,
         }
-    return bpy.app.driver_namespace[_NS]
+    s = bpy.app.driver_namespace[_NS]
+    # Migrate state dicts created before dirty_hair was added
+    s.setdefault("dirty_hair",      True)
+    s.setdefault("cached_abc_path", None)
+    return s
+
+
+def _obj_has_hair(obj):
+    """True if obj is a Curves object or a mesh with a HAIR particle system."""
+    if obj.type == 'CURVES':
+        return True
+    if obj.type == 'MESH':
+        return any(ps.settings.type == 'HAIR' for ps in obj.particle_systems)
+    return False
 
 
 @bpy.app.handlers.persistent
@@ -46,10 +61,14 @@ def _on_depsgraph_update(scene, depsgraph):
             obj = update.id
             if update.is_updated_geometry:
                 s["dirty_scene"] = True
+                if _obj_has_hair(obj):
+                    s["dirty_hair"] = True
             if update.is_updated_shading and obj.type == 'MESH':
                 s["dirty_scene"] = True
             if update.is_updated_transform:
                 s["dirty_transform"] = True
+                if _obj_has_hair(obj):
+                    s["dirty_hair"] = True
         elif isinstance(update.id, bpy.types.World):
             s["dirty_scene"] = True
 
@@ -58,6 +77,7 @@ def mark_all_dirty():
     s = _state()
     s["dirty_scene"]     = True
     s["dirty_transform"] = True
+    s["dirty_hair"]      = True
 
 
 def register_dirty_handler():
@@ -97,6 +117,568 @@ _load_prep_module._mod = None
 def get_executable(context):
     prefs = context.preferences.addons[__package__].preferences
     return prefs.executable_path
+
+
+def get_scenes_dir(blend_path):
+    """The scenes directory — the directory that contains the blend file.
+
+    USD scene files, materials, and textures all live here:
+        scenes/
+          char.blend
+          char_scene.usdc
+          materials/
+          textures/
+          caches/
+            char/
+              hair.0001.abc
+              char.matassign.json
+    """
+    scenes_dir = os.path.dirname(os.path.abspath(blend_path))
+    os.makedirs(os.path.join(scenes_dir, "materials"), exist_ok=True)
+    os.makedirs(os.path.join(scenes_dir, "textures"),  exist_ok=True)
+    return scenes_dir
+
+
+def get_cache_dir(blend_path):
+    """Return (and create) the per-blend Alembic / matassign cache directory.
+
+    Resolution order:
+      1. $ANACAPA_CACHE_DIR/<blend_stem>/  — pipeline override (farm, NAS, etc.)
+      2. <scenes_dir>/caches/<blend_stem>/ — default, alongside the scene files
+    """
+    blend_stem   = os.path.splitext(os.path.basename(blend_path))[0]
+    env_override = os.environ.get("ANACAPA_CACHE_DIR", "").strip()
+    if env_override:
+        cache_dir = os.path.join(env_override, blend_stem)
+    else:
+        cache_dir = os.path.join(get_scenes_dir(blend_path), "caches", blend_stem)
+    os.makedirs(cache_dir, exist_ok=True)
+    return cache_dir
+
+
+# Keep the old name as an alias so any external code referencing it still works.
+get_project_dir = get_cache_dir
+
+
+def get_hair_objects(context):
+    """Return all renderable hair/curve objects in the scene.
+
+    Uses hide_render (the camera icon) rather than viewport visibility so that
+    objects temporarily hidden via hide_viewport — as this addon does to prevent
+    the Blender 5.1 hair-nodes crash during rendering — are still exported.
+    """
+    vl_objects = set(context.view_layer.objects)
+    objs = []
+    for obj in context.scene.objects:
+        if obj not in vl_objects:
+            continue
+        if obj.hide_render:
+            continue
+        if _obj_has_hair(obj):
+            objs.append(obj)
+    return objs
+
+
+def export_hair_abc(abc_path, context):
+    """
+    Export all visible hair/curve objects to an Alembic file.
+
+    Blender 5.1 crashes (SIGSEGV) on any in-process access to hair-nodes
+    Curves data — including obj.data.attributes, alembic_export, and
+    save_as_mainfile.  The only crash-safe strategy is to delegate ALL
+    Curves data access to a --background subprocess.  If that subprocess
+    also crashes, it only kills the child process and main Blender is
+    unaffected; hair is simply omitted from the render.
+
+    Requires the blend file to be saved (bpy.data.filepath must be set)
+    so the subprocess can open it.  The subprocess writes a compact binary
+    strand file; the standalone hair_export tool then converts it to .abc.
+
+    Skips the export entirely when dirty_hair is False (nothing changed).
+    """
+    import subprocess
+
+    s = _state()
+
+    cached = s["cached_abc_path"]
+    if not s["dirty_hair"] and cached and os.path.exists(cached):
+        if abc_path != cached:
+            shutil.copy2(cached, abc_path)
+        print("[Anacapa] Hair unchanged — reusing cached Alembic")
+        # Return both matassign layers so the caller can pass --matassign for each.
+        blend_path = bpy.data.filepath
+        if blend_path:
+            blend_stem    = os.path.splitext(os.path.basename(blend_path))[0]
+            proj          = get_project_dir(blend_path)
+            base_p     = os.path.join(proj, blend_stem + ".matassign.json")
+            override_p = os.path.join(proj, blend_stem + ".override.matassign.json")
+            paths = [p for p in (base_p, override_p) if os.path.exists(p)]
+            return paths if paths else None
+        return None
+
+    hair_objs = get_hair_objects(context)
+    if not hair_objs:
+        return None
+
+    # Locate hair_export tool — expected next to the anacapa executable
+    executable  = get_executable(context)
+    hair_export = os.path.join(os.path.dirname(executable), "hair_export")
+    if not os.path.exists(hair_export):
+        print(f"[Anacapa] hair_export not found at {hair_export} "
+              f"— rebuild with ANACAPA_ENABLE_ALEMBIC=ON")
+        return None
+
+    # A saved blend file is required so the subprocess can open it.
+    blend_path = bpy.data.filepath
+    if not blend_path:
+        print("[Anacapa] Hair export requires the blend file to be saved first. "
+              "Save the file (Ctrl+S) and render again.")
+        return None
+
+    hair_names  = [obj.name for obj in hair_objs]
+    frame       = context.scene.frame_current
+    bin_path    = abc_path.replace(".abc", ".hairbin")
+    counts_path = abc_path.replace(".abc", "_counts.json")
+    eval_py  = abc_path.replace(".abc", "_eval.py")
+    guide_py = abc_path.replace(".abc", "_guide.py")
+
+    # Shared strand-writing body used by both helpers (template, no depsgraph line)
+    # Format: AHAIR002 — per strand: num_points u32, r g b f32×3, then n*(x y z radius f32×4)
+    # NOTE: AHAIR003 (with root UV) requires a rebuilt hair_export binary.  Revert to
+    # AHAIR002 here until the C++ project is rebuilt with AHAIR003 support.
+    _STRAND_BODY = """\
+        pos_attr = curves_data.attributes.get("position")
+        if pos_attr is None:
+            print(f"[hair_read] '{name}' has no position attribute — skipped")
+            continue
+        rad_attr = curves_data.attributes.get("radius")
+
+        positions = [0.0] * (num_points_total * 3)
+        pos_attr.data.foreach_get("vector", positions)
+
+        radii = [0.005] * num_points_total
+        if rad_attr is not None:
+            try:
+                rad_attr.data.foreach_get("value", radii)
+            except Exception:
+                pass
+
+        sc = mw.to_scale()
+        radius_scale = (abs(sc.x) + abs(sc.y) + abs(sc.z)) / 3.0
+
+        offsets = [0] * (num_curves + 1)
+        try:
+            curves_data.curve_offset_data.foreach_get("value", offsets)
+        except Exception:
+            off = 0
+            for ci, curve in enumerate(curves_data.curves):
+                offsets[ci] = off
+                off += curve.points_length
+            offsets[num_curves] = off
+
+        # Read per-strand color from CURVE-domain attribute (try common names)
+        # Falls back to per-point domain using the first point's color, or white.
+        attr_summary = [(a.name, a.domain, a.data_type) for a in curves_data.attributes]
+        print(f"[hair_color] '{name}' attributes: {attr_summary}")
+        curve_colors = None  # list of (r, g, b) per curve index
+        for col_name in ("Col", "col", "color", "Color", "hair_color"):
+            col_attr = curves_data.attributes.get(col_name)
+            if col_attr is None:
+                continue
+            n_curves  = num_curves
+            n_points  = num_points_total
+            is_curve  = col_attr.domain == "CURVE"
+            is_point  = col_attr.domain == "POINT"
+            if not is_curve and not is_point:
+                continue
+            count = n_curves if is_curve else n_points
+            # BYTE_COLOR and FLOAT_COLOR both expose 4 floats (RGBA) via foreach_get("color")
+            raw = [1.0] * (count * 4)
+            try:
+                col_attr.data.foreach_get("color", raw)
+                if is_curve:
+                    curve_colors = [(raw[ci*4], raw[ci*4+1], raw[ci*4+2]) for ci in range(n_curves)]
+                else:
+                    curve_colors = [(raw[offsets[ci]*4], raw[offsets[ci]*4+1], raw[offsets[ci]*4+2])
+                                    for ci in range(n_curves)]
+            except Exception:
+                # Fallback: try vector (RGB without alpha)
+                try:
+                    raw3 = [1.0] * (count * 3)
+                    col_attr.data.foreach_get("vector", raw3)
+                    if is_curve:
+                        curve_colors = [(raw3[ci*3], raw3[ci*3+1], raw3[ci*3+2]) for ci in range(n_curves)]
+                    else:
+                        curve_colors = [(raw3[offsets[ci]*3], raw3[offsets[ci]*3+1], raw3[offsets[ci]*3+2])
+                                        for ci in range(n_curves)]
+                except Exception:
+                    pass
+            if curve_colors is not None:
+                n_samp = min(5, len(curve_colors))
+                step   = max(1, len(curve_colors) // n_samp)
+                samps  = [f"({curve_colors[i*step][0]:.3f},{curve_colors[i*step][1]:.3f},{curve_colors[i*step][2]:.3f})"
+                          for i in range(n_samp)]
+                print(f"[hair_color] '{name}' using attribute '{col_name}' ({col_attr.domain}/{col_attr.data_type}) samples={samps}")
+                break
+        if curve_colors is None:
+            print(f"[hair_color] '{name}' no color attribute found — using white")
+
+        obj_strand_count = 0
+        for ci in range(num_curves):
+            start = offsets[ci]
+            end   = offsets[ci + 1]
+            n     = end - start
+            if n < 2:
+                continue
+            cr, cg, cb = curve_colors[ci] if curve_colors else (1.0, 1.0, 1.0)
+            fh.write(struct.pack("<I", n))
+            fh.write(struct.pack("<fff", cr, cg, cb))
+            for pi in range(start, end):
+                lx = positions[pi * 3]
+                ly = positions[pi * 3 + 1]
+                lz = positions[pi * 3 + 2]
+                wp = mw @ Vector((lx, ly, lz))
+                r  = radii[pi] * radius_scale
+                fh.write(struct.pack("<ffff", wp.x, wp.z, -wp.y, r))
+            total_strands += 1
+            obj_strand_count += 1
+        strand_counts[name] = obj_strand_count
+"""
+
+    was_suppressed = s["suppress_dirty"]
+    s["suppress_dirty"] = True
+    try:
+        # ------------------------------------------------------------------
+        # 1a. Evaluated helper — attempts full hair density via
+        #     evaluated_get(depsgraph).  May crash (SIGSEGV) on Blender 5.1.
+        # ------------------------------------------------------------------
+        helper_eval = f"""\
+import bpy, struct, sys
+from mathutils import Vector
+
+hair_names = {hair_names!r}
+bin_path   = {bin_path!r}
+frame      = {frame!r}
+
+bpy.context.scene.frame_set(frame)
+depsgraph = bpy.context.evaluated_depsgraph_get()
+
+total_strands = 0
+strand_counts = {{}}
+with open(bin_path, "wb") as fh:
+    fh.write(b"AHAIR002")
+    count_offset = fh.tell()
+    fh.write(b"\\x00\\x00\\x00\\x00")
+
+    for name in hair_names:
+        obj_orig = bpy.data.objects.get(name)
+        if obj_orig is None or obj_orig.type != "CURVES":
+            continue
+        obj              = obj_orig.evaluated_get(depsgraph)
+        curves_data      = obj.data
+        mw               = obj.matrix_world
+        num_curves       = len(curves_data.curves)
+        num_points_total = len(curves_data.points)
+        if num_curves == 0 or num_points_total == 0:
+            continue
+{_STRAND_BODY}
+    fh.seek(count_offset)
+    fh.write(struct.pack("<I", total_strands))
+
+import json as _json
+counts_path = bin_path.replace(".hairbin", "_counts.json")
+with open(counts_path, "w") as _cfh:
+    _json.dump(strand_counts, _cfh)
+
+print(f"[hair_eval] {{total_strands}} strand(s) written to {{bin_path}}")
+sys.exit(0 if total_strands > 0 else 2)
+"""
+
+        # ------------------------------------------------------------------
+        # 1b. Guide helper — reads obj.data directly; no depsgraph eval.
+        #     Guide strands only (~3 k), but crash-safe on Blender 5.1.
+        # ------------------------------------------------------------------
+        helper_guide = f"""\
+import bpy, struct, sys
+from mathutils import Vector
+
+hair_names = {hair_names!r}
+bin_path   = {bin_path!r}
+frame      = {frame!r}
+
+bpy.context.scene.frame_set(frame)
+
+total_strands = 0
+strand_counts = {{}}
+with open(bin_path, "wb") as fh:
+    fh.write(b"AHAIR002")
+    count_offset = fh.tell()
+    fh.write(b"\\x00\\x00\\x00\\x00")
+
+    for name in hair_names:
+        obj = bpy.data.objects.get(name)
+        if obj is None or obj.type != "CURVES":
+            continue
+        curves_data      = obj.data
+        mw               = obj.matrix_world
+        num_curves       = len(curves_data.curves)
+        num_points_total = len(curves_data.points)
+        if num_curves == 0 or num_points_total == 0:
+            continue
+{_STRAND_BODY}
+    fh.seek(count_offset)
+    fh.write(struct.pack("<I", total_strands))
+
+import json as _json
+counts_path = bin_path.replace(".hairbin", "_counts.json")
+with open(counts_path, "w") as _cfh:
+    _json.dump(strand_counts, _cfh)
+
+print(f"[hair_guide] {{total_strands}} strand(s) written to {{bin_path}}")
+sys.exit(0 if total_strands > 0 else 2)
+"""
+
+        with open(eval_py,  "w") as fh:
+            fh.write(helper_eval)
+        with open(guide_py, "w") as fh:
+            fh.write(helper_guide)
+
+        # ------------------------------------------------------------------
+        # 1c. Collect material parameters from each hair object's active
+        #     material.  Written to a persistent .matassign.json after the
+        #     subprocess runs (strand counts needed for --objects).
+        # ------------------------------------------------------------------
+        import json
+        import math
+        import datetime
+
+        def _resolve_color_socket(sock):
+            """Walk a node tree to find the linear RGB value on a color socket."""
+            if sock is None:
+                return None
+            if not sock.links:
+                try:
+                    v = sock.default_value
+                    return (float(v[0]), float(v[1]), float(v[2]))
+                except Exception:
+                    return None
+            from_node = sock.links[0].from_node
+            if from_node.type == 'REROUTE':
+                return _resolve_color_socket(from_node.inputs[0])
+            if from_node.type == 'HUE_SAT':
+                return _resolve_color_socket(from_node.inputs.get('Color'))
+            if from_node.type == 'RGB':
+                try:
+                    v = from_node.outputs[0].default_value
+                    return (float(v[0]), float(v[1]), float(v[2]))
+                except Exception:
+                    return None
+            return None
+
+        def _get_marschner_params(mat):
+            """Extract Marschner hair params from the active material's node tree.
+            Returns a dict with sigma_a, beta_m, beta_n, alpha."""
+            # Defaults (medium brown human hair)
+            params = {"sigma_a": [0.06, 0.10, 0.20],
+                      "beta_m": 0.30, "beta_n": 0.45, "alpha": -2.0}
+            if not mat or not mat.use_nodes or not mat.node_tree:
+                return params
+            for node in mat.node_tree.nodes:
+                if node.type == 'BSDF_HAIR_PRINCIPLED':
+                    # Base color → sigma_a via Beer-Lambert inversion
+                    color = _resolve_color_socket(node.inputs.get('Color'))
+                    if color:
+                        params["sigma_a"] = [
+                            -math.log(max(c, 0.001)) for c in color]
+                    # Roughness → beta_m (longitudinal) and beta_n (azimuthal)
+                    rough_sock = node.inputs.get('Roughness')
+                    if rough_sock and not rough_sock.links:
+                        r = float(rough_sock.default_value)
+                        params["beta_m"] = max(0.05, min(r, 1.0))
+                        params["beta_n"] = max(0.05, min(r * 1.5, 1.0))
+                    # Tilt (radians in Blender) → alpha (degrees in anacapa)
+                    tilt_sock = node.inputs.get('Tilt')
+                    if tilt_sock and not tilt_sock.links:
+                        params["alpha"] = math.degrees(float(tilt_sock.default_value))
+                    return params
+                elif node.type == 'BSDF_PRINCIPLED':
+                    sock = node.inputs.get('Base Color')
+                    color = _resolve_color_socket(sock)
+                    if color:
+                        params["sigma_a"] = [
+                            -math.log(max(c, 0.001)) for c in color]
+                    return params
+            return params
+
+        # Per-object params list — indices match hair_objs order
+        obj_params = []
+        for obj in hair_objs:
+            mat = obj.active_material
+            p = _get_marschner_params(mat)
+            comment = f"from Blender material '{mat.name}'" if mat else "no material assigned"
+            obj_params.append({"obj": obj, "params": p, "comment": comment})
+            print(f"[Anacapa] '{obj.name}' sigma_a=({p['sigma_a'][0]:.3f},"
+                  f"{p['sigma_a'][1]:.3f},{p['sigma_a'][2]:.3f}) "
+                  f"beta_m={p['beta_m']:.2f} beta_n={p['beta_n']:.2f}")
+        # matassign.json is written after subprocess (needs strand counts)
+
+        # ------------------------------------------------------------------
+        # 2. Try evaluated subprocess first (full density).
+        #    A SIGSEGV produces returncode != 0; fall through to guide.
+        # ------------------------------------------------------------------
+        print(f"[Anacapa] Reading {len(hair_objs)} hair object(s) "
+              f"via background subprocess (evaluated)…")
+        result = subprocess.run(
+            [bpy.app.binary_path, "--background", blend_path,
+             "--python", eval_py],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+
+        for line in result.stdout.splitlines():
+            if ("[hair_eval]" in line or "[hair_color]" in line) and line.strip():
+                print(f"  {line.strip()}")
+
+        if result.returncode != 0 or not os.path.exists(bin_path):
+            if result.returncode != 0:
+                print(f"[Anacapa] Evaluated hair subprocess crashed (exit {result.returncode})"
+                      f" — falling back to guide hairs")
+            else:
+                print("[Anacapa] Evaluated hair produced no binary — falling back to guide hairs")
+
+            # ------------------------------------------------------------------
+            # 2b. Guide fallback — reads obj.data directly (crash-safe).
+            # ------------------------------------------------------------------
+            print(f"[Anacapa] Reading guide hairs via background subprocess…")
+            result = subprocess.run(
+                [bpy.app.binary_path, "--background", blend_path,
+                 "--python", guide_py],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+
+            for line in result.stdout.splitlines():
+                if ("[hair_guide]" in line or "[hair_color]" in line) and line.strip():
+                    print(f"  {line.strip()}")
+            if result.returncode != 0:
+                print(f"[Anacapa] Guide hair subprocess exited {result.returncode} "
+                      f"— rendering without hair")
+                return None
+            if not os.path.exists(bin_path):
+                print("[Anacapa] Guide hair produced no binary — rendering without hair")
+                return None
+
+        # ------------------------------------------------------------------
+        # 2c. Write persistent .matassign.json alongside the ABC.
+        #     Strand counts from subprocess are logged for diagnostics.
+        # ------------------------------------------------------------------
+        strand_counts = {}
+        if os.path.exists(counts_path):
+            try:
+                with open(counts_path) as _cf:
+                    strand_counts = json.load(_cf)
+            except Exception as e:
+                print(f"[Anacapa] Failed to read strand counts: {e}")
+
+        assignments = []
+        for entry in obj_params:
+            obj      = entry["obj"]
+            p        = entry["params"]
+            count    = strand_counts.get(obj.name, 0)
+            print(f"[Anacapa] '{obj.name}' → {count} strand(s)")
+            assignments.append({
+                "object":  obj.name,
+                "comment": entry["comment"],
+                "material": {
+                    "type":    "marschner",
+                    "sigma_a": [round(v, 5) for v in p["sigma_a"]],
+                    "beta_m":  round(p["beta_m"], 4),
+                    "beta_n":  round(p["beta_n"], 4),
+                    "alpha":   round(p["alpha"],  4),
+                },
+            })
+
+        matassign_data = {
+            "version":       1,
+            "exported_at":   datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source_app":    f"Blender {bpy.app.version_string}",
+            "source_file":   blend_path,
+            "source_frame":  frame,
+            "geometry_cache": os.path.basename(abc_path),
+            "notes":         "",
+            "assignments":   assignments,
+        }
+        # Write the Blender-generated matassign into the project cache directory.
+        # Two-layer system:
+        #   <stem>.base.matassign.json — Blender-owned; always overwritten on export.
+        #   <stem>.matassign.json      — User-owned; created from base on first export
+        #                                only, never overwritten.  TDs edit this file
+        #                                to override per-object materials without
+        #                                touching Blender.  The renderer receives both
+        #                                via --matassign (base first, user second) so
+        #                                user entries always win.
+        blend_stem     = os.path.splitext(os.path.basename(blend_path))[0]
+        project_dir    = get_project_dir(blend_path)
+        base_path     = os.path.join(project_dir, blend_stem + ".matassign.json")
+        override_path = os.path.join(project_dir, blend_stem + ".override.matassign.json")
+        with open(base_path, "w") as fh:
+            json.dump(matassign_data, fh, indent=2)
+        print(f"[Anacapa] Material assignments → {base_path}")
+        if not os.path.exists(override_path):
+            shutil.copy2(base_path, override_path)
+            print(f"[Anacapa] Created override layer → {override_path}")
+        matassign_paths = [base_path, override_path]
+
+        # ------------------------------------------------------------------
+        # 3. Convert binary → Alembic via hair_export.
+        #    This is our own standalone tool, completely safe.
+        # ------------------------------------------------------------------
+        cmd2 = [hair_export, bin_path, abc_path]
+        if os.path.exists(counts_path):
+            cmd2 += ["--objects", counts_path]
+        result2 = subprocess.run(
+            cmd2,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        for line in result2.stdout.splitlines():
+            if line.strip():
+                print(f"  [hair_export] {line}")
+        if result2.returncode != 0 or not os.path.exists(abc_path):
+            err = result2.stderr.strip()
+            print(f"[Anacapa] hair_export failed"
+                  + (f": {err}" if err else ""))
+            # If an old ABC cache is still on disk, the renderer will use it.
+            # Still return matassign_paths so current material settings are applied
+            # (matassign was already written above regardless of ABC outcome).
+            if os.path.exists(abc_path):
+                print(f"[Anacapa] Using stale ABC cache — rebuild to refresh geometry")
+                return matassign_paths
+            print(f"[Anacapa] No usable hair cache — rendering without hair")
+            return None
+
+    except subprocess.TimeoutExpired:
+        print("[Anacapa] Hair subprocess timed out — rendering without hair")
+        return None
+    except Exception as e:
+        print(f"[Anacapa] Hair export error: {e} — rendering without hair")
+        return None
+    finally:
+        for path in (eval_py, guide_py, bin_path, counts_path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        if not was_suppressed:
+            s["suppress_dirty"] = False
+
+    s["dirty_hair"]      = False
+    s["cached_abc_path"] = abc_path
+    print(f"[Anacapa] Hair exported → {abc_path}")
+    return matassign_paths
 
 
 def _usd_export(filepath, context, **kwargs):
@@ -168,7 +750,8 @@ def export_usd(usd_path, context, run_prep=True):
             s["suppress_dirty"] = False
 
 
-def build_command(executable, usd_path, settings, width, height, output_path):
+def build_command(executable, usd_path, settings, width, height, output_path,
+                  curves_path=None, matassign_paths=None):
     cmd = [
         executable,
         "--scene",  usd_path,
@@ -220,6 +803,14 @@ def build_command(executable, usd_path, settings, width, height, output_path):
 
     if settings.camera_path:
         cmd += ["--camera", settings.camera_path]
+
+    if curves_path:
+        cmd += ["--curves", curves_path]
+
+    if matassign_paths:
+        paths = [matassign_paths] if isinstance(matassign_paths, str) else matassign_paths
+        for p in paths:
+            cmd += ["--matassign", p]
 
     png_path = bpy.path.abspath(settings.png_path) if settings.png_path else None
     if png_path:

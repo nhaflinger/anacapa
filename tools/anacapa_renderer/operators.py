@@ -7,7 +7,7 @@ import shutil
 import threading
 import queue
 
-from .export import get_executable, export_usd, build_command
+from .export import get_executable, export_usd, build_command, get_scenes_dir, get_cache_dir
 
 
 class ANACAPA_OT_render(bpy.types.Operator):
@@ -15,29 +15,90 @@ class ANACAPA_OT_render(bpy.types.Operator):
     bl_idname = "anacapa.render"
     bl_label  = "Render"
 
-    _proc         = None
-    _timer        = None
-    _tmp_dir      = None
-    _output_path  = None
-    _preview_path = None
-    _preview_img  = None   # bpy.data.images entry for the live preview
-    _log_queue    = None
-    _reader       = None
+    _proc              = None
+    _timer             = None
+    _tmp_dir           = None
+    _output_path       = None
+    _preview_path      = None
+    _preview_img       = None   # bpy.data.images entry for the live preview
+    _log_queue         = None
+    _reader            = None
+    _hidden_for_render = []     # list of (name, original_hide_viewport) for CURVES objects
 
     def execute(self, context):
+        # Restore any CURVES objects left hidden by a previous render that
+        # crashed or was cancelled before _finish() could run.
+        for entry in ANACAPA_OT_render._hidden_for_render:
+            name, was_hidden = entry if isinstance(entry, tuple) else (entry, False)
+            obj = bpy.data.objects.get(name)
+            if obj:
+                obj.hide_viewport = was_hidden
+        ANACAPA_OT_render._hidden_for_render = []
+
         scene    = context.scene
         settings = scene.anacapa
         scale    = scene.render.resolution_percentage / 100.0
         width    = int(scene.render.resolution_x * scale)
         height   = int(scene.render.resolution_y * scale)
 
+        # Scene files, caches, and material assignments are project products and
+        # must live in a stable project directory.  Require the blend to be saved.
+        blend_path = bpy.data.filepath
+        if not blend_path:
+            self.report({'ERROR'},
+                        "Save the blend file before rendering — "
+                        "scene files and caches are written alongside it.")
+            return {'CANCELLED'}
+
+        blend_stem  = os.path.splitext(os.path.basename(blend_path))[0]
+        scenes_dir  = get_scenes_dir(blend_path)   # also creates materials/ textures/
+        cache_dir   = get_cache_dir(blend_path)
+
         tmp_dir  = os.path.join(bpy.app.tempdir, "anacapa_render")
         os.makedirs(tmp_dir, exist_ok=True)
-        usd_path = os.path.join(bpy.app.tempdir, "anacapa_scene_cache.usdc")
 
-        # --- Export USD ---
-        self.report({'INFO'}, "Exporting USD…")
+        usd_path = os.path.join(scenes_dir, blend_stem + "_scene.usdc")
+
         from . import export as export_mod
+
+        # --- Export hair to Alembic FIRST (before prep_scene converts/removes
+        #     Curves objects for the USD export) ---
+        abc_path        = None
+        matassign_paths = None
+        hair_objs = export_mod.get_hair_objects(context)
+        if hair_objs:
+            frame    = context.scene.frame_current
+            abc_path = os.path.join(cache_dir, f"hair.{frame:04d}.abc")
+            self.report({'INFO'}, f"Exporting {len(hair_objs)} hair object(s) to Alembic…")
+            try:
+                matassign_paths = export_mod.export_hair_abc(abc_path, context)
+            except Exception as e:
+                self.report({'WARNING'}, f"Hair export failed: {e}")
+                abc_path = None
+            if abc_path and not os.path.exists(abc_path):
+                self.report({'WARNING'}, "Hair export produced no file — rendering without hair")
+                abc_path        = None
+                matassign_paths = None
+
+        # --- Hide CURVES objects from the viewport before prep/USD export ---
+        # Blender 5.1 crashes (SIGSEGV in hair_nodes evaluation) when the
+        # viewport depsgraph evaluates visible CURVES objects while anacapa
+        # renders in the background.  Hiding them prevents that evaluation.
+        # They are restored in _finish() after the render completes.
+        # Hide ALL CURVES objects before USD export/render, recording their
+        # original hide_viewport state so _finish() can restore exactly.
+        hidden_for_render = []
+        for obj in context.scene.objects:
+            if obj.type == 'CURVES':
+                was_hidden = obj.hide_viewport
+                obj.hide_viewport = True
+                hidden_for_render.append((obj.name, was_hidden))
+        ANACAPA_OT_render._hidden_for_render = hidden_for_render
+        if hidden_for_render:
+            self.report({'INFO'}, f"Hidden {len(hidden_for_render)} hair object(s) for render")
+
+        # --- Export USD (runs prep_scene, which may convert/remove Curves) ---
+        self.report({'INFO'}, "Exporting USD…")
         export_mod._state()["suppress_dirty"] = True
         try:
             export_usd(usd_path, context)
@@ -56,7 +117,9 @@ class ANACAPA_OT_render(bpy.types.Operator):
         preview_path = os.path.join(tmp_dir, "preview.png")
         executable   = get_executable(context)
         cmd, _       = build_command(executable, usd_path, settings,
-                                     width, height, output_path)
+                                     width, height, output_path,
+                                     curves_path=abc_path,
+                                     matassign_paths=matassign_paths)
 
         # Always add progressive PNG preview (overrides settings.png_path for temp use)
         if "--png" not in cmd:
@@ -101,7 +164,6 @@ class ANACAPA_OT_render(bpy.types.Operator):
 
         # Suppress dirty tracking while anacapa is running so Blender's
         # post-render internal updates don't re-dirty the scene flags.
-        from . import export as export_mod
         export_mod._state()["suppress_dirty"] = True
 
         wm = context.window_manager
@@ -119,7 +181,7 @@ class ANACAPA_OT_render(bpy.types.Operator):
                 return {'CANCELLED'}
             return {'PASS_THROUGH'}
 
-        # Drain log queue, update status bar with latest line
+        # Drain log queue — echo to terminal and update status bar
         q = ANACAPA_OT_render._log_queue
         last_line = None
         while True:
@@ -128,6 +190,7 @@ class ANACAPA_OT_render(bpy.types.Operator):
                 if line is None:
                     break
                 last_line = line
+                print(f"  [anacapa] {line}")
             except queue.Empty:
                 break
         if last_line:
@@ -180,6 +243,14 @@ class ANACAPA_OT_render(bpy.types.Operator):
             wm.event_timer_remove(ANACAPA_OT_render._timer)
             ANACAPA_OT_render._timer = None
         context.workspace.status_text_set(None)
+
+        # Restore CURVES objects to their original viewport visibility
+        for name, was_hidden in ANACAPA_OT_render._hidden_for_render:
+            obj = bpy.data.objects.get(name)
+            if obj:
+                obj.hide_viewport = was_hidden
+        ANACAPA_OT_render._hidden_for_render = []
+
         # Re-enable dirty tracking after a short delay so Blender's own
         # post-render depsgraph updates flush through without dirtying our flags.
         def _reenable():
@@ -196,7 +267,7 @@ class ANACAPA_OT_render(bpy.types.Operator):
             self.report({'ERROR'}, f"No EXR at {output_path}")
             return {'CANCELLED'}
 
-        # Persist the EXR alongside the render temp dir
+        # Keep the EXR accessible after tmp_dir is cleaned up
         persist_path = os.path.join(bpy.app.tempdir, "anacapa_last_render.exr")
         shutil.copy2(output_path, persist_path)
 
@@ -260,6 +331,29 @@ class ANACAPA_OT_export_scene(bpy.types.Operator):
         output_path = os.path.splitext(usd_path)[0] + ".exr"
         executable  = get_executable(context)
 
+        # Export hair FIRST (before prep_scene converts/removes Curves objects)
+        from . import export as export_mod
+        abc_path        = None
+        matassign_paths = None
+        hair_objs = export_mod.get_hair_objects(context)
+        if hair_objs:
+            frame      = context.scene.frame_current
+            blend_path = bpy.data.filepath
+            if blend_path:
+                abc_path = os.path.join(get_cache_dir(blend_path), f"hair.{frame:04d}.abc")
+            else:
+                abc_path = os.path.splitext(usd_path)[0] + f"_hair.{frame:04d}.abc"
+            self.report({'INFO'}, f"Exporting {len(hair_objs)} hair object(s)…")
+            try:
+                matassign_paths = export_mod.export_hair_abc(abc_path, context)
+            except Exception as e:
+                self.report({'WARNING'}, f"Hair export failed: {e}")
+                abc_path = None
+            if abc_path and not os.path.exists(abc_path):
+                self.report({'WARNING'}, "Hair export produced no file — skipping curves")
+                abc_path        = None
+                matassign_paths = None
+
         self.report({'INFO'}, f"Exporting USD to {usd_path}…")
         try:
             export_usd(usd_path, context)
@@ -272,7 +366,9 @@ class ANACAPA_OT_export_scene(bpy.types.Operator):
             return {'CANCELLED'}
 
         cmd, _ = build_command(executable, usd_path, settings,
-                               width, height, output_path)
+                               width, height, output_path,
+                               curves_path=abc_path,
+                               matassign_paths=matassign_paths)
         cmd_str = shlex.join(cmd)
 
         print("\n" + "=" * 72)

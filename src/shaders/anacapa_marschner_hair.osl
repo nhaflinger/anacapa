@@ -1,0 +1,100 @@
+// anacapa_marschner_hair — texture-driven Marschner hair shader.
+//
+// Samples a color texture at the hair root UV (u, v) baked into the
+// AHAIR003 Alembic cache, converts the visible hair color to sigma_a via
+// Beer-Lambert inversion, and evaluates the Anacapa Marschner hair BSDF.
+//
+// Parameters
+// ----------
+// color_map   Color texture (sRGB).  Sampled at the strand's root UV —
+//             the emitter-mesh UV where the hair was grown, baked into
+//             the AHAIR003 Alembic cache by the Blender exporter.
+//             Represents the visible hair color the artist wants to see.
+// base_color  Fallback color used when color_map is empty or missing.
+// beta_m      Longitudinal (along-strand) roughness [0.01–1.0].
+//             Low values → silky/straight; high values → fluffy/curly.
+// beta_n      Azimuthal (around-strand) roughness [0.01–1.0].
+//             Controls the width of the TT and TRT lobes.
+// alpha       Cuticle tilt in degrees (typically –2 to –4 for human hair).
+//             Shifts the R highlight toward the root, TRT toward the tip.
+// eta         Index of refraction (1.55 for human hair; ~1.45 for fine/fair).
+//
+// Closure
+// -------
+// marschner_hair is a custom Anacapa closure (ID 22) registered in
+// OslMaterial.cpp and dispatched to C++ MarschnerHairMaterial.
+
+closure color marschner_hair(color sigma_a,
+                              float beta_m,
+                              float beta_n,
+                              float alpha,
+                              float eta) BUILTIN;
+
+shader anacapa_marschner_hair(
+    string color_map  = ""
+        [[ string widget = "filename",
+           string label  = "Color Map",
+           string help   = "Color texture map (sRGB). Sampled at the strand's "
+                           "root UV (u, v) — the emitter-mesh UV baked into "
+                           "AHAIR003 Alembic caches. Represents the visible "
+                           "hair color; converted to sigma_a internally." ]],
+
+    color  base_color = color(0.5, 0.3, 0.1)
+        [[ string label = "Base Color",
+           string help  = "Fallback color when no texture map is assigned." ]],
+
+    float  beta_m     = 0.30
+        [[ float  min   = 0.01,  float max = 1.0,
+           string label = "Longitudinal Roughness (beta_m)",
+           string help  = "Along-strand roughness. Low → silky; high → fluffy." ]],
+
+    float  beta_n     = 0.45
+        [[ float  min   = 0.01,  float max = 1.0,
+           string label = "Azimuthal Roughness (beta_n)",
+           string help  = "Around-strand roughness. Controls TT/TRT lobe width." ]],
+
+    float  alpha      = -2.0
+        [[ float  min   = -10.0, float max = 10.0,
+           string label = "Cuticle Tilt (alpha, degrees)",
+           string help  = "Cuticle tilt in degrees. Typically –2 to –4 for "
+                          "human hair. Shifts the R highlight toward the root "
+                          "and TRT toward the tip." ]],
+
+    float  eta        = 1.55
+        [[ float  min   = 1.0,   float max = 2.5,
+           string label = "IOR (eta)",
+           string help  = "Index of refraction. ~1.55 for human hair; "
+                          "~1.45 for fine or fair hair." ]],
+
+    output closure color out = 0
+)
+{
+    // u and v carry the root UV from the AHAIR003 Alembic cache.  For each
+    // strand they record the UV on the emitter mesh where the strand was
+    // procedurally grown (surface_uv_coordinate in Blender).  AlembicLoader
+    // stores them in StrandDesc.rootUV; CurveBrute copies them into
+    // SurfaceInteraction.uv at hit time; ShadingContext propagates them to
+    // the OSL shader globals u/v.
+    color hair_color = base_color;
+    if (color_map != "")
+        hair_color = (color) texture(color_map, u, v, "wrap", "periodic");
+
+    // Beer-Lambert inversion: sigma_a = -log(max(C, epsilon))
+    //
+    // The Marschner model uses sigma_a (absorption coefficient) internally,
+    // but artists think in terms of visible color.  This mapping converts:
+    //   • White (1.0) → sigma_a = 0.0   (no absorption, uncolored)
+    //   • Mid grey (~0.37) → sigma_a ≈ 1.0
+    //   • Black (→0) → sigma_a → ∞   (clipped at epsilon = 0.001)
+    //
+    // epsilon = 0.001 caps sigma_a at ~6.9, preventing numerical overflow
+    // for very dark colors while keeping the mapping perceptually smooth.
+    float eps = 0.001;
+    color sigma_a = color(
+        -log(max(comp(hair_color, 0), eps)),
+        -log(max(comp(hair_color, 1), eps)),
+        -log(max(comp(hair_color, 2), eps))
+    );
+
+    out = marschner_hair(sigma_a, beta_m, beta_n, alpha, eta);
+}
