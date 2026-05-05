@@ -38,10 +38,14 @@ struct AlembicCurveOptions {
 // Returns true if the archive was opened successfully (even if it has no
 // ICurves objects).  Returns false if the file could not be opened.
 // ---------------------------------------------------------------------------
+// outMaterialPath (optional): receives the "objectName:/Materials/Name;..."
+// encoded string attribute written by hair_export from the JSON sidecar.
+// Caller may pass nullptr to ignore it.
 bool loadAlembicCurves(const std::string&                        path,
                        const AlembicCurveOptions&                opts,
                        CurvePool&                                outPool,
-                       std::vector<std::unique_ptr<IMaterial>>&  outMaterials);
+                       std::vector<std::unique_ptr<IMaterial>>&  outMaterials,
+                       std::string*                              outMaterialPath = nullptr);
 
 } // namespace anacapa
 

@@ -402,30 +402,20 @@ private:
     }
 
     // -----------------------------------------------------------------------
-    // Per-strand color → absorption coefficient
-    // If ctx.color is non-white (< 0.999 on any channel), derive sigma_a from it.
-    // Formula: sigma_a = -log(max(c, 0.001))  (Beer-Lambert inversion, scale=1)
-    // White color (default) falls back to m_p.sigma_a for the material default.
+    // Per-strand color → absorption coefficient.
+    // ctx.color carries linear material base color written by the exporter.
+    // White (1,1,1) is the sentinel for "no color assigned" — fall back to
+    // m_p.sigma_a.  All other colors are treated as linear and inverted via
+    // Beer-Lambert: sigma_a = -log(max(c, 0.001)).
     // -----------------------------------------------------------------------
     Spectrum effectiveSigmaA(const ShadingContext& ctx) const {
         const Vec3f& c = ctx.color;
-        // White (1,1,1) is the default — no per-strand override assigned.
-        // Threshold at 0.98 to catch near-white values (e.g. 0.991) that are
-        // binary selection masks, not true hair color.
         if (c.x > 0.98f && c.y > 0.98f && c.z > 0.98f)
             return m_p.sigma_a;
-        // Blender BYTE_COLOR is sRGB — linearise before Beer-Lambert inversion.
-        auto toLinear = [](float s) { return std::pow(std::max(s, 0.0f), 2.2f); };
-        float lr = toLinear(c.x), lg = toLinear(c.y), lb = toLinear(c.z);
-        // Near-black (all channels < 0.01 linear) means an unpainted attribute
-        // (Blender default black).  Fall back to material default rather than
-        // rendering near-black hair.
-        if (lr < 0.01f && lg < 0.01f && lb < 0.01f)
-            return m_p.sigma_a;
         return {
-            -std::log(std::max(lr, 0.001f)),
-            -std::log(std::max(lg, 0.001f)),
-            -std::log(std::max(lb, 0.001f))
+            -std::log(std::max(c.x, 0.001f)),
+            -std::log(std::max(c.y, 0.001f)),
+            -std::log(std::max(c.z, 0.001f))
         };
     }
 

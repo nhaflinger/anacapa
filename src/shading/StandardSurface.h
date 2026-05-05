@@ -1,8 +1,10 @@
 #pragma once
 
 #include <anacapa/shading/IMaterial.h>
+#include "MarschnerHair.h"
 #include "Texture.h"
 #include <cmath>
+#include <cstdio>
 
 namespace anacapa {
 
@@ -157,6 +159,33 @@ public:
         m_coatAlpha2 = m_coatAlpha * m_coatAlpha;
         m_f0Dielectric = F0_fromIOR(m_p.specular_IOR);
         m_coatF0       = F0_fromIOR(1.5f);
+
+        // Build Marschner hair fallback for when ctx.isCurve == true.
+        // Used when this material is assigned to Alembic hair strands (via the
+        // USD materialPath sidecar) and the USD material resolved as OpenPBR
+        // rather than OslMaterial (e.g. no .oso file for unbound hair materials).
+        {
+            MarschnerHairMaterial::Params hp;
+            const Spectrum& bc = m_p.base_color.value;
+            float bcMax = std::max({bc.x, bc.y, bc.z});
+            float bcMin = std::min({bc.x, bc.y, bc.z});
+            if (bcMax - bcMin > 0.05f) {
+                hp.sigma_a = {
+                    -std::log(std::max(bc.x, 0.001f)),
+                    -std::log(std::max(bc.y, 0.001f)),
+                    -std::log(std::max(bc.z, 0.001f))
+                };
+            }
+            hp.beta_m = std::clamp(m_p.roughness.value, 0.20f, 0.80f);
+            hp.beta_n = std::clamp(m_p.roughness.value * 1.5f, 0.30f, 0.90f);
+            if (m_p.specular_IOR > 1.f) hp.eta = m_p.specular_IOR;
+            m_hairFallback = MarschnerHairMaterial(hp);
+            fprintf(stderr,
+                "[StandardSurface hair] baseColor=(%.3f,%.3f,%.3f) "
+                "chroma=%.3f sigma_a=(%.3f,%.3f,%.3f)\n",
+                bc.x, bc.y, bc.z, bcMax - bcMin,
+                hp.sigma_a.x, hp.sigma_a.y, hp.sigma_a.z);
+        }
     }
 
     bool isDelta() const override {
@@ -180,13 +209,15 @@ public:
         return f;
     }
 
-    Spectrum Le(const ShadingContext& ctx, Vec3f) const override {
+    Spectrum Le(const ShadingContext& ctx, Vec3f wo) const override {
+        if (ctx.isCurve) return m_hairFallback.Le(ctx, wo);
         if (m_p.emission > 0.f)
             return evalTOV(m_p.emission_color, ctx.uv) * m_p.emission;
         return {};
     }
 
     Spectrum reflectance(const ShadingContext& ctx) const override {
+        if (ctx.isCurve) return m_hairFallback.reflectance(ctx);
         Spectrum base_color = evalTOV(m_p.base_color, ctx.uv);
         float    metal      = evalTOV(m_p.metalness,  ctx.uv);
         float    spec       = evalTOV(m_p.specular,   ctx.uv);
@@ -230,6 +261,7 @@ public:
     // -----------------------------------------------------------------------
     BSDFSample sample(const ShadingContext& ctx,
                       Vec3f wo, Vec2f u, float uComponent) const override {
+        if (ctx.isCurve) return m_hairFallback.sample(ctx, wo, u, uComponent);
         ShadingContext sctx = applyNormalMap(ctx);
         Vec3f woLocal = sctx.toLocal(wo);
         if (woLocal.z <= 0.f) return {};   // backface — n is already flipped by ShadingContext
@@ -409,6 +441,7 @@ public:
     // -----------------------------------------------------------------------
     BSDFEval evaluate(const ShadingContext& ctx,
                        Vec3f wo, Vec3f wi) const override {
+        if (ctx.isCurve) return m_hairFallback.evaluate(ctx, wo, wi);
         Vec3f woLocal = ctx.toLocal(wo);
         Vec3f wiLocal = ctx.toLocal(wi);
 
@@ -505,6 +538,7 @@ public:
 
     float pdf(const ShadingContext& ctx,
               Vec3f wo, Vec3f wi) const override {
+        if (ctx.isCurve) return m_hairFallback.pdf(ctx, wo, wi);
         BSDFEval e = evaluate(ctx, wo, wi);
         return e.pdf;
     }
@@ -683,11 +717,12 @@ private:
         return result;
     }
 
-    Params   m_p;
-    float    m_alpha, m_alpha2;
-    float    m_coatAlpha, m_coatAlpha2;
-    float    m_f0Dielectric;
-    float    m_coatF0;
+    Params                m_p;
+    float                 m_alpha, m_alpha2;
+    float                 m_coatAlpha, m_coatAlpha2;
+    float                 m_f0Dielectric;
+    float                 m_coatF0;
+    MarschnerHairMaterial m_hairFallback{MarschnerHairMaterial::Params{}};
 };
 
 } // namespace anacapa

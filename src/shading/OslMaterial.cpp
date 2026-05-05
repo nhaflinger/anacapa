@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "OslMaterial.h"
+#include "MarschnerHair.h"
 
 #ifdef ANACAPA_ENABLE_OSL
 
@@ -965,6 +966,48 @@ public:
                 }
             }
         }
+
+        // Build the hair fallback from the probed OSL material parameters.
+        // Used when ctx.isCurve == true to delegate to physically correct
+        // Marschner hair shading instead of the normal-based GGX path.
+        {
+            MarschnerHairMaterial::Params hp;
+            // sigma_a from m_baseColor only when the probed color has genuine
+            // chroma (max - min > 0.05).  A grey probe (e.g. old metallic/conductor
+            // shaders where no diffuse lobe exists) means the color carries no
+            // useful hair information — keep the default medium-brown sigma_a.
+            // Once the scene is re-exported with _tx_bsdf_hair_principled, the
+            // new OSL shaders produce a diffuse lobe and m_baseColor will carry
+            // the actual Principled Hair BSDF Color input.
+            {
+                const Spectrum& bc = m_baseColor;
+                float bcMax = std::max({bc.x, bc.y, bc.z});
+                float bcMin = std::min({bc.x, bc.y, bc.z});
+                if (bcMax - bcMin > 0.05f) {
+                    // Colorful probe → derive sigma_a via Beer-Lambert inversion
+                    hp.sigma_a = {
+                        -std::log(std::max(bc.x, 0.001f)),
+                        -std::log(std::max(bc.y, 0.001f)),
+                        -std::log(std::max(bc.z, 0.001f))
+                    };
+                }
+                // else: grey/neutral probe → keep Params{} default sigma_a
+            }
+            // Longitudinal roughness from dominant GGX lobe roughness.
+            // beta_m ∈ [0.2, 0.8]; clamp to physically plausible range.
+            hp.beta_m = std::clamp(m_roughness, 0.20f, 0.80f);
+            // Azimuthal roughness slightly wider than longitudinal (typical hair).
+            hp.beta_n = std::clamp(m_roughness * 1.5f, 0.30f, 0.90f);
+            m_hairFallback = MarschnerHairMaterial(hp);
+            // Diagnostic: print probed base color and resulting sigma_a so we can
+            // verify the correct color is flowing through from the OSL shader.
+            fprintf(stderr,
+                "[OslMaterial hair] shader='%s' baseColor=(%.3f,%.3f,%.3f) "
+                "sigma_a=(%.3f,%.3f,%.3f)\n",
+                m_shaderName.c_str(),
+                m_baseColor.x, m_baseColor.y, m_baseColor.z,
+                hp.sigma_a.x, hp.sigma_a.y, hp.sigma_a.z);
+        }
     }
 
     bool     isDelta()  const override { return false; }
@@ -977,13 +1020,15 @@ public:
         return m_transmittanceTint;
     }
     // Cached base color for GPU/Metal preview (probed at construction).
-    Spectrum reflectance(const ShadingContext&) const override {
+    Spectrum reflectance(const ShadingContext& ctx) const override {
+        if (ctx.isCurve) return m_hairFallback.reflectance(ctx);
         return m_baseColor;
     }
     float    roughness() const override { return m_roughness; }
 
     // ---------- Le: emitted radiance ----------
     Spectrum Le(const ShadingContext& ctx, Vec3f wo) const override {
+        if (ctx.isCurve) return m_hairFallback.Le(ctx, wo);
         auto lobes = evalClosure(ctx, wo);
         Spectrum Le = {};
         for (auto& l : lobes)
@@ -995,6 +1040,7 @@ public:
     // ---------- sample ----------
     BSDFSample sample(const ShadingContext& ctx,
                       Vec3f wo, Vec2f u, float uComp) const override {
+        if (ctx.isCurve) return m_hairFallback.sample(ctx, wo, u, uComp);
         Vec3f woLocal = ctx.toLocal(wo);
         auto lobes = evalClosure(ctx, wo);
         mergeGGXPairs(lobes);
@@ -1053,6 +1099,7 @@ public:
     // ---------- evaluate ----------
     BSDFEval evaluate(const ShadingContext& ctx,
                        Vec3f wo, Vec3f wi) const override {
+        if (ctx.isCurve) return m_hairFallback.evaluate(ctx, wo, wi);
         Vec3f woLocal = ctx.toLocal(wo);
         Vec3f wiLocal = ctx.toLocal(wi);
         if (woLocal.z <= 0.f && wiLocal.z <= 0.f) return {};
@@ -1078,6 +1125,7 @@ public:
     }
 
     float pdf(const ShadingContext& ctx, Vec3f wo, Vec3f wi) const override {
+        if (ctx.isCurve) return m_hairFallback.pdf(ctx, wo, wi);
         return evaluate(ctx, wo, wi).pdf;
     }
 
@@ -1087,6 +1135,13 @@ private:
     Spectrum                    m_transmittanceTint = {};
     Spectrum                    m_baseColor         = {0.5f, 0.5f, 0.5f};
     float                       m_roughness         = 1.0f;  // from dominant GGX lobe, cached at ctor
+
+    // Fallback Marschner material used when ctx.isCurve == true.
+    // Constructed at OslMaterial init from the probed OSL closure parameters.
+    // Allows any USD/OSL material assigned to hair strands (via materialPath
+    // sidecar) to use physically correct Marschner hair shading rather than
+    // the normal-based GGX path (which is meaningless on ribbon/curve geometry).
+    MarschnerHairMaterial       m_hairFallback{MarschnerHairMaterial::Params{}};
 
     // Execute the shader and collect lobes.  Each call obtains its own
     // ShadingContext from the ShadingSystem (thread-safe).

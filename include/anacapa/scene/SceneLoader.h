@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace anacapa {
@@ -30,6 +31,11 @@ struct LoadedScene {
     // time code range and timeCodesPerSecond.  Both are 0 for static scenes.
     float shutterOpen  = 0.f;
     float shutterClose = 0.f;
+
+    // Maps USD prim path (e.g. "/Materials/PrincipledHair") to index in
+    // materials[].  Populated by USDLoader so RenderSession can assign
+    // USD materials to Alembic hair by path.
+    std::unordered_map<std::string, uint32_t> materialPathIndex;
 };
 
 } // namespace anacapa

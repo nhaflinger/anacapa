@@ -12,6 +12,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 
 namespace anacapa {
 
@@ -99,6 +100,10 @@ private:
     // Owned materials and lights (scene takes non-owning pointers)
     std::vector<std::unique_ptr<IMaterial>> m_materials;
     std::vector<std::unique_ptr<ILight>>    m_lights;
+
+    // USD prim path → m_materials index (populated from LoadedScene after USD load).
+    // Used to assign USD materials to Alembic hair strands by material path.
+    std::unordered_map<std::string, uint32_t> m_materialPathIndex;
 };
 
 } // namespace anacapa

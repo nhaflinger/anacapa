@@ -1827,6 +1827,26 @@ LoadedScene loadUSD(const std::string& path,
                  result.sceneView.lights.size(),
                  result.camera.has_value() ? "yes" : "none (using default)");
 
+    // Expose material path → index map for Alembic hair material assignment.
+    // Start with the mesh-bound materials already indexed above, then scan for
+    // any remaining UsdShadeMaterial prims that weren't bound to a mesh (e.g.
+    // hair materials assigned only via the Alembic sidecar, not to any geometry).
+    for (const UsdPrim& prim : stage->Traverse()) {
+        if (!prim.IsA<UsdShadeMaterial>()) continue;
+        std::string matPath = prim.GetPath().GetString();
+        if (matPathToIdx.count(matPath)) continue;  // already indexed
+        UsdShadeMaterial mat(prim);
+        uint32_t idx = static_cast<uint32_t>(result.materials.size());
+        auto m = resolveMaterial(mat, stageDir);
+        if (!m) continue;
+        result.materials.push_back(std::move(m));
+        matPathToIdx[matPath] = idx;
+        // Mirror into sceneView so the integrator can find it via meshID
+        result.sceneView.materials.push_back(result.materials.back().get());
+        spdlog::info("USDLoader: indexed unbound material '{}' (idx={})", matPath, idx);
+    }
+    result.materialPathIndex = matPathToIdx;
+
     return result;
 }
 

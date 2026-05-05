@@ -158,7 +158,8 @@ static void linearToBezier(const std::vector<Vec3f>& sp,
 // ---------------------------------------------------------------------------
 static void processICurves(const Alembic::AbcGeom::ICurves& curvesObj,
                             const AlembicCurveOptions&       opts,
-                            CurvePool&                       pool) {
+                            CurvePool&                       pool,
+                            std::string*                     outMaterialPath) {
     using namespace Alembic::AbcGeom;
 
     auto schema = curvesObj.getSchema();
@@ -232,6 +233,19 @@ static void processICurves(const Alembic::AbcGeom::ICurves& curvesObj,
                     spdlog::info("AlembicLoader: loaded {} strand colors (first={:.3f},{:.3f},{:.3f})",
                                  numCurves, cols[0].x, cols[0].y, cols[0].z);
                 }
+            }
+        }
+    }
+
+    // ---- material path (AHAIR002+ sidecar, optional) ----
+    if (outMaterialPath) {
+        using namespace Alembic::AbcGeom;
+        ICompoundProperty arbParams = schema.getArbGeomParams();
+        if (arbParams.valid() && arbParams.getPropertyHeader("materialPath")) {
+            Alembic::Abc::IStringProperty matProp(arbParams, "materialPath");
+            if (matProp.valid() && matProp.getNumSamples() > 0) {
+                *outMaterialPath = matProp.getValue();
+                spdlog::info("AlembicLoader: materialPath = '{}'", *outMaterialPath);
             }
         }
     }
@@ -315,15 +329,17 @@ static void processICurves(const Alembic::AbcGeom::ICurves& curvesObj,
 // ---------------------------------------------------------------------------
 static void traverse(const Alembic::AbcGeom::IObject& obj,
                      const AlembicCurveOptions&        opts,
-                     CurvePool&                        pool) {
+                     CurvePool&                        pool,
+                     std::string*                      outMaterialPath) {
     using namespace Alembic::AbcGeom;
 
     if (ICurves::matches(obj.getMetaData())) {
-        processICurves(ICurves(obj, Alembic::Abc::kWrapExisting), opts, pool);
+        processICurves(ICurves(obj, Alembic::Abc::kWrapExisting), opts, pool,
+                       outMaterialPath);
     }
 
     for (size_t i = 0; i < obj.getNumChildren(); ++i)
-        traverse(obj.getChild(i), opts, pool);
+        traverse(obj.getChild(i), opts, pool, outMaterialPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -332,7 +348,8 @@ static void traverse(const Alembic::AbcGeom::IObject& obj,
 bool loadAlembicCurves(const std::string&                        path,
                        const AlembicCurveOptions&                opts,
                        CurvePool&                                outPool,
-                       std::vector<std::unique_ptr<IMaterial>>&  outMaterials) {
+                       std::vector<std::unique_ptr<IMaterial>>&  outMaterials,
+                       std::string*                              outMaterialPath) {
     using namespace Alembic;
 
     AbcCoreFactory::IFactory factory;
@@ -349,7 +366,7 @@ bool loadAlembicCurves(const std::string&                        path,
                  coreType == AbcCoreFactory::IFactory::kOgawa ? "Ogawa" : "HDF5");
 
     size_t strandsBefore = outPool.numStrands();
-    traverse(archive.getTop(), opts, outPool);
+    traverse(archive.getTop(), opts, outPool, outMaterialPath);
     size_t strandsLoaded = outPool.numStrands() - strandsBefore;
 
     if (strandsLoaded == 0) {

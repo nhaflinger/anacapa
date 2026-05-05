@@ -22,7 +22,12 @@
  *       r f32, g f32, b f32   (linear sRGB strand color)
  *       per point: x f32, y f32, z f32, radius f32
  *
- * Usage: hair_export <input.hairbin> <output.abc>
+ * Usage: hair_export <input.hairbin> <output.abc> [--materials <materials.json>]
+ *
+ * If --materials is provided, the JSON file maps hair object names to their
+ * USD material paths (e.g. { "Hair": "/Materials/PrincipledHair" }).
+ * The material path is stored as a string attribute "materialPath" on the
+ * ICurves schema so the AlembicLoader can look it up in the USD scene.
  */
 
 #ifdef ANACAPA_ENABLE_ALEMBIC
@@ -33,6 +38,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 using namespace Alembic::AbcGeom;
@@ -59,10 +68,54 @@ static bool readF32(FILE* f, float& out) {
     return true;
 }
 
+// Minimal JSON string-map parser: reads { "key": "value", ... }
+// Only handles flat string-to-string maps (sufficient for material paths).
+static std::unordered_map<std::string, std::string> parseJsonStringMap(const std::string& path) {
+    std::unordered_map<std::string, std::string> result;
+    std::ifstream f(path);
+    if (!f.is_open()) return result;
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    std::string text = ss.str();
+
+    // Extract "key": "value" pairs
+    size_t pos = 0;
+    while (pos < text.size()) {
+        // Find next quoted key
+        size_t ks = text.find('"', pos);
+        if (ks == std::string::npos) break;
+        size_t ke = text.find('"', ks + 1);
+        if (ke == std::string::npos) break;
+        std::string key = text.substr(ks + 1, ke - ks - 1);
+
+        // Find colon then quoted value
+        size_t colon = text.find(':', ke + 1);
+        if (colon == std::string::npos) break;
+        size_t vs = text.find('"', colon + 1);
+        if (vs == std::string::npos) break;
+        size_t ve = text.find('"', vs + 1);
+        if (ve == std::string::npos) break;
+        std::string val = text.substr(vs + 1, ve - vs - 1);
+
+        result[key] = val;
+        pos = ve + 1;
+    }
+    return result;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: hair_export <input.hairbin> <output.abc>\n");
+        fprintf(stderr, "Usage: hair_export <input.hairbin> <output.abc> [--materials <materials.json>]\n");
         return 1;
+    }
+
+    // Parse optional --materials argument
+    std::string materialsJsonPath;
+    for (int i = 3; i < argc - 1; ++i) {
+        if (std::string(argv[i]) == "--materials") {
+            materialsJsonPath = argv[i + 1];
+            ++i;
+        }
     }
 
     FILE* f = fopen(argv[1], "rb");
@@ -173,6 +226,24 @@ int main(int argc, char* argv[]) {
             kUniformScope
         );
         colorParam.set(colorSamp);
+    }
+
+    // Write material paths from JSON sidecar as a string attribute "materialPath".
+    // Each entry is "objectName:usdPath" separated by semicolons so the loader
+    // can find the right material for each hair object.
+    if (!materialsJsonPath.empty()) {
+        auto matMap = parseJsonStringMap(materialsJsonPath);
+        if (!matMap.empty()) {
+            std::string encoded;
+            for (const auto& kv : matMap) {
+                if (!encoded.empty()) encoded += ";";
+                encoded += kv.first + ":" + kv.second;
+            }
+            OCompoundProperty arbParams = curves.getSchema().getArbGeomParams();
+            OStringProperty matProp(arbParams, "materialPath");
+            matProp.set(encoded);
+            printf("[hair_export] material paths: %s\n", encoded.c_str());
+        }
     }
 
     printf("[hair_export] %u strands, %zu CVs%s → %s\n",

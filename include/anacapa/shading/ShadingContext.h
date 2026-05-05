@@ -19,19 +19,21 @@ struct ShadingContext {
     Vec3f t;        // Primary tangent (dpdu direction, normalized)
     Vec3f bt;       // Bitangent = cross(n, t)
     Vec2f uv;       // Surface UV
-    Vec3f color = {1.f, 1.f, 1.f};  // per-strand color (curves); white for surfaces
-    float h     = 0.f;              // hair impact parameter ∈ (-1,1); 0 for surfaces
+    Vec3f color   = {1.f, 1.f, 1.f};  // per-strand color (curves); white for surfaces
+    float h       = 0.f;              // hair impact parameter ∈ (-1,1); 0 for surfaces
+    bool  isCurve = false;            // true when the hit is on a hair/curve primitive
 
     // Whether the ray hit the front face (dot(wo, ng) > 0)
     bool  frontFace = true;
 
     // Construct from a SurfaceInteraction + incoming ray direction
     ShadingContext(const SurfaceInteraction& si, Vec3f rayDir) {
-        p     = si.p;
-        ng    = si.ng;
-        uv    = si.uv;
-        color = si.color;
-        h     = si.h;
+        p       = si.p;
+        ng      = si.ng;
+        uv      = si.uv;
+        color   = si.color;
+        h       = si.h;
+        isCurve = si.isCurve;
 
         frontFace = dot(-rayDir, ng) > 0.f;
         // Flip normals for consistent outward convention

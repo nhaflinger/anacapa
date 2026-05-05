@@ -72,6 +72,13 @@ public:
     size_t            numStrands()           const { return m_strands.size(); }
     const std::vector<StrandDesc>& strands() const { return m_strands; }
 
+    // Update the material index for a range of strands.
+    // Used when the caller wants to override the index set during addStrand().
+    void setMaterialIndex(uint32_t fromStrand, uint32_t toStrand, uint32_t matIdx) {
+        for (uint32_t i = fromStrand; i < toStrand && i < m_strands.size(); ++i)
+            m_strands[i].materialIndex = matIdx;
+    }
+
 private:
     std::vector<StrandDesc> m_strands;
 };

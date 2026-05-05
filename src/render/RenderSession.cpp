@@ -11,6 +11,7 @@
 #endif
 #include "../sampling/HaltonSampler.h"
 #include "../shading/Lambertian.h"
+#include "../shading/MarschnerHair.h"
 #include "../shading/lights/AreaLight.h"
 #include "../shading/lights/DirectionalLight.h"
 #include "../shading/lights/DomeLight.h"
@@ -77,6 +78,7 @@ void RenderSession::loadScene() {
         m_camera             = std::move(loaded.camera);
         m_materials          = std::move(loaded.materials);
         m_lights             = std::move(loaded.lights);
+        m_materialPathIndex  = std::move(loaded.materialPathIndex);
         m_sceneShutterOpen   = loaded.shutterOpen;
         m_sceneShutterClose  = loaded.shutterClose;
         m_scene.camera = m_camera;
@@ -221,19 +223,26 @@ void RenderSession::appendAlembicCurves_() {
     // The two sizes differ when the scene has more meshes than unique materials.
     opts.baseMaterialIndex = static_cast<uint32_t>(m_scene.materials.size());
 
-    // Snapshot size before loading so we know which materials were added.
-    const size_t matsBefore = m_materials.size();
+    // Snapshot sizes before loading so we know which strands/materials were added.
+    const size_t strandsBefore = m_curvePool.numStrands();
+    const size_t matsBefore    = m_materials.size();
 
+    std::string outMaterialPath;
     bool ok = loadAlembicCurves(m_settings.curvesPath, opts,
-                                m_curvePool, m_materials);
+                                m_curvePool, m_materials, &outMaterialPath);
     if (!ok) {
         spdlog::error("Failed to load Alembic curves from '{}'",
                       m_settings.curvesPath);
+        return;
     }
 
-    // Mirror every newly-added material into SceneView::materials so the
-    // integrator can find them via si.meshID.  Without this the material index
-    // stored on each strand falls out of bounds → mat == nullptr → black hair.
+    // Per-strand color (written into AHAIR002 by the Blender exporter) drives
+    // sigma_a per strand via MarschnerHairMaterial::effectiveSigmaA(ctx).
+    // The AlembicLoader already created one default MarschnerHairMaterial;
+    // mirror it into scene.materials so strands can look it up via si.meshID.
+    if (!outMaterialPath.empty())
+        spdlog::info("appendAlembicCurves: sidecar='{}'", outMaterialPath);
+
     for (size_t i = matsBefore; i < m_materials.size(); ++i)
         m_scene.materials.push_back(m_materials[i].get());
 #else
