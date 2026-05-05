@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace anacapa {
 
@@ -29,6 +30,9 @@ struct RenderSettings {
     std::string    scenePath;              // empty → built-in Cornell box
     std::string    cameraPath;             // empty → auto-select from USD
     std::string    curvesPath;             // Alembic .abc file for hair/fur (empty = none)
+    // Material assignment files loaded in order; later entries override earlier ones.
+    // Auto-discovered <abc>.matassign.json is always loaded first (if present).
+    std::vector<std::string> matassignPaths;
     std::string    envPath;                // HDRI dome light (empty = none)
     float          envIntensity    = 1.f;
 

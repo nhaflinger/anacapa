@@ -18,7 +18,7 @@ class AnacapaAddonPreferences(bpy.types.AddonPreferences):
 class AnacapaRenderSettings(bpy.types.PropertyGroup):
     # GPU
     interactive: bpy.props.BoolProperty(
-        name="GPU (Interactive)",
+        name="GPU compute",
         description="Use Metal or CUDA GPU backend for fast preview renders "
                     "(requires ANACAPA_ENABLE_METAL or ANACAPA_ENABLE_CUDA)",
         default=False,

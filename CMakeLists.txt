@@ -150,7 +150,7 @@ endif()
 
 if(ANACAPA_ENABLE_ALEMBIC)
     add_executable(hair_export src/tools/hair_export.cpp)
-    target_link_libraries(hair_export PRIVATE Alembic::Alembic)
+    target_link_libraries(hair_export PRIVATE Alembic::Alembic nlohmann_json::nlohmann_json)
     target_compile_definitions(hair_export PRIVATE ANACAPA_ENABLE_ALEMBIC)
     target_include_directories(hair_export PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 endif()

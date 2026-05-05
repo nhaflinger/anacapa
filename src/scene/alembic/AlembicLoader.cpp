@@ -156,10 +156,10 @@ static void linearToBezier(const std::vector<Vec3f>& sp,
 // ---------------------------------------------------------------------------
 // Process a single ICurves object
 // ---------------------------------------------------------------------------
-static void processICurves(const Alembic::AbcGeom::ICurves& curvesObj,
-                            const AlembicCurveOptions&       opts,
-                            CurvePool&                       pool,
-                            std::string*                     outMaterialPath) {
+static void processICurves(const Alembic::AbcGeom::ICurves&  curvesObj,
+                            const AlembicCurveOptions&        opts,
+                            CurvePool&                        pool,
+                            std::vector<AlembicObjectRange>*  outRanges) {
     using namespace Alembic::AbcGeom;
 
     auto schema = curvesObj.getSchema();
@@ -237,18 +237,13 @@ static void processICurves(const Alembic::AbcGeom::ICurves& curvesObj,
         }
     }
 
-    // ---- material path (AHAIR002+ sidecar, optional) ----
-    if (outMaterialPath) {
-        using namespace Alembic::AbcGeom;
-        ICompoundProperty arbParams = schema.getArbGeomParams();
-        if (arbParams.valid() && arbParams.getPropertyHeader("materialPath")) {
-            Alembic::Abc::IStringProperty matProp(arbParams, "materialPath");
-            if (matProp.valid() && matProp.getNumSamples() > 0) {
-                *outMaterialPath = matProp.getValue();
-                spdlog::info("AlembicLoader: materialPath = '{}'", *outMaterialPath);
-            }
-        }
-    }
+    // Object name comes directly from the ICurves node name.
+    // hair_export writes one OCurves per Blender object, named after it.
+    // Falls back to the full Alembic path for archives not written by hair_export.
+    const std::string objectName = curvesObj.getName();
+
+    // Record pool size before adding any strands
+    const uint32_t poolOffsetBefore = static_cast<uint32_t>(pool.numStrands());
 
     // ---- iterate curves ----
     const Imath::V3f* pts      = positions->get();
@@ -322,6 +317,17 @@ static void processICurves(const Alembic::AbcGeom::ICurves& curvesObj,
         spdlog::info("AlembicLoader: '{}' → {} strands added, {} skipped",
                      curvesObj.getFullName(), strandsAdded, strandsSkipped);
     }
+
+    // Emit one AlembicObjectRange for this ICurves node.
+    if (outRanges && strandsAdded > 0) {
+        AlembicObjectRange r;
+        r.objectName  = objectName;
+        r.strandStart = poolOffsetBefore;
+        r.strandCount = static_cast<uint32_t>(strandsAdded);
+        spdlog::info("AlembicLoader: object '{}' → strands [{}, {})",
+                     r.objectName, r.strandStart, r.strandStart + r.strandCount);
+        outRanges->push_back(std::move(r));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -330,16 +336,16 @@ static void processICurves(const Alembic::AbcGeom::ICurves& curvesObj,
 static void traverse(const Alembic::AbcGeom::IObject& obj,
                      const AlembicCurveOptions&        opts,
                      CurvePool&                        pool,
-                     std::string*                      outMaterialPath) {
+                     std::vector<AlembicObjectRange>*  outRanges) {
     using namespace Alembic::AbcGeom;
 
     if (ICurves::matches(obj.getMetaData())) {
         processICurves(ICurves(obj, Alembic::Abc::kWrapExisting), opts, pool,
-                       outMaterialPath);
+                       outRanges);
     }
 
     for (size_t i = 0; i < obj.getNumChildren(); ++i)
-        traverse(obj.getChild(i), opts, pool, outMaterialPath);
+        traverse(obj.getChild(i), opts, pool, outRanges);
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +355,7 @@ bool loadAlembicCurves(const std::string&                        path,
                        const AlembicCurveOptions&                opts,
                        CurvePool&                                outPool,
                        std::vector<std::unique_ptr<IMaterial>>&  outMaterials,
-                       std::string*                              outMaterialPath) {
+                       std::vector<AlembicObjectRange>*          outRanges) {
     using namespace Alembic;
 
     AbcCoreFactory::IFactory factory;
@@ -366,7 +372,7 @@ bool loadAlembicCurves(const std::string&                        path,
                  coreType == AbcCoreFactory::IFactory::kOgawa ? "Ogawa" : "HDF5");
 
     size_t strandsBefore = outPool.numStrands();
-    traverse(archive.getTop(), opts, outPool, outMaterialPath);
+    traverse(archive.getTop(), opts, outPool, outRanges);
     size_t strandsLoaded = outPool.numStrands() - strandsBefore;
 
     if (strandsLoaded == 0) {

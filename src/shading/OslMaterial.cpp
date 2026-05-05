@@ -204,9 +204,41 @@ public:
         return false;
     }
 
-    bool get_attribute(OSL::ShaderGlobals*, bool,
-                       OSL::ustringhash, OSL::TypeDesc,
-                       OSL::ustringhash, void*) override {
+    bool get_attribute(OSL::ShaderGlobals* sg, bool /*deriv*/,
+                       OSL::ustringhash /*object*/, OSL::TypeDesc type,
+                       OSL::ustringhash name, void* val) override {
+        if (!sg || !sg->renderstate || !val) return false;
+        const ShadingContext* ctx =
+            static_cast<const ShadingContext*>(sg->renderstate);
+
+        static const OSL::ustringhash h_is_curve    (OSL::ustring("is_curve"));
+        static const OSL::ustringhash h_hair_h      (OSL::ustring("hair_h"));
+        static const OSL::ustringhash h_hair_tangent(OSL::ustring("hair_tangent"));
+        static const OSL::ustringhash h_hair_v      (OSL::ustring("hair_v"));
+        static const OSL::ustringhash h_hair_color  (OSL::ustring("hair_color"));
+
+        if (name == h_is_curve && type == OSL::TypeInt) {
+            *static_cast<int*>(val) = ctx->isCurve ? 1 : 0;
+            return true;
+        }
+        if (name == h_hair_h && type == OSL::TypeFloat) {
+            *static_cast<float*>(val) = ctx->h;
+            return true;
+        }
+        if (name == h_hair_tangent && type == OSL::TypeVector) {
+            *static_cast<OSL::Vec3*>(val) =
+                OSL::Vec3(ctx->t.x, ctx->t.y, ctx->t.z);
+            return true;
+        }
+        if (name == h_hair_v && type == OSL::TypeFloat) {
+            *static_cast<float*>(val) = ctx->uv.y;
+            return true;
+        }
+        if (name == h_hair_color && type == OSL::TypeColor) {
+            *static_cast<OSL::Color3*>(val) =
+                OSL::Color3(ctx->color.x, ctx->color.y, ctx->color.z);
+            return true;
+        }
         return false;
     }
 #else
@@ -233,9 +265,35 @@ public:
         return false;
     }
 
-    bool get_attribute(OSL::ShaderGlobals*, bool,
-                       OSL::ustring, OSL::TypeDesc,
-                       OSL::ustring, void*) override {
+    bool get_attribute(OSL::ShaderGlobals* sg, bool /*deriv*/,
+                       OSL::ustring /*object*/, OSL::TypeDesc type,
+                       OSL::ustring name, void* val) override {
+        if (!sg || !sg->renderstate || !val) return false;
+        const ShadingContext* ctx =
+            static_cast<const ShadingContext*>(sg->renderstate);
+
+        if (name == OSL::ustring("is_curve") && type == OSL::TypeInt) {
+            *static_cast<int*>(val) = ctx->isCurve ? 1 : 0;
+            return true;
+        }
+        if (name == OSL::ustring("hair_h") && type == OSL::TypeFloat) {
+            *static_cast<float*>(val) = ctx->h;
+            return true;
+        }
+        if (name == OSL::ustring("hair_tangent") && type == OSL::TypeVector) {
+            *static_cast<OSL::Vec3*>(val) =
+                OSL::Vec3(ctx->t.x, ctx->t.y, ctx->t.z);
+            return true;
+        }
+        if (name == OSL::ustring("hair_v") && type == OSL::TypeFloat) {
+            *static_cast<float*>(val) = ctx->uv.y;
+            return true;
+        }
+        if (name == OSL::ustring("hair_color") && type == OSL::TypeColor) {
+            *static_cast<OSL::Color3*>(val) =
+                OSL::Color3(ctx->color.x, ctx->color.y, ctx->color.z);
+            return true;
+        }
         return false;
     }
 #endif
@@ -1021,14 +1079,12 @@ public:
     }
     // Cached base color for GPU/Metal preview (probed at construction).
     Spectrum reflectance(const ShadingContext& ctx) const override {
-        if (ctx.isCurve) return m_hairFallback.reflectance(ctx);
         return m_baseColor;
     }
     float    roughness() const override { return m_roughness; }
 
     // ---------- Le: emitted radiance ----------
     Spectrum Le(const ShadingContext& ctx, Vec3f wo) const override {
-        if (ctx.isCurve) return m_hairFallback.Le(ctx, wo);
         auto lobes = evalClosure(ctx, wo);
         Spectrum Le = {};
         for (auto& l : lobes)
@@ -1040,7 +1096,6 @@ public:
     // ---------- sample ----------
     BSDFSample sample(const ShadingContext& ctx,
                       Vec3f wo, Vec2f u, float uComp) const override {
-        if (ctx.isCurve) return m_hairFallback.sample(ctx, wo, u, uComp);
         Vec3f woLocal = ctx.toLocal(wo);
         auto lobes = evalClosure(ctx, wo);
         mergeGGXPairs(lobes);
@@ -1099,7 +1154,6 @@ public:
     // ---------- evaluate ----------
     BSDFEval evaluate(const ShadingContext& ctx,
                        Vec3f wo, Vec3f wi) const override {
-        if (ctx.isCurve) return m_hairFallback.evaluate(ctx, wo, wi);
         Vec3f woLocal = ctx.toLocal(wo);
         Vec3f wiLocal = ctx.toLocal(wi);
         if (woLocal.z <= 0.f && wiLocal.z <= 0.f) return {};
@@ -1125,7 +1179,6 @@ public:
     }
 
     float pdf(const ShadingContext& ctx, Vec3f wo, Vec3f wi) const override {
-        if (ctx.isCurve) return m_hairFallback.pdf(ctx, wo, wi);
         return evaluate(ctx, wo, wi).pdf;
     }
 
@@ -1163,7 +1216,12 @@ private:
         // for back-face glass hits.  We handle the eta flip in collectLobes
         // via frontFace, so OSL doesn't need to know about backfacing.
         sg.backfacing = false;
-        sg.renderstate = &sg;  // required by OSL runtime
+        // Pass the ShadingContext so get_attribute can serve hair globals.
+        sg.renderstate = const_cast<ShadingContext*>(&ctx);
+        // dPdv carries the fiber tangent for curve hits; OSL hair shaders can
+        // read it directly or via getattribute("hair_tangent", ...).
+        if (ctx.isCurve)
+            sg.dPdv = OSL::Vec3(ctx.t.x, ctx.t.y, ctx.t.z);
 
         OSL::PerThreadInfo* ti = OslShadingSystem::instance().threadInfo();
         OSL::ShadingContext* oslCtx = s->get_context(ti);

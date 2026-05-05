@@ -22,11 +22,14 @@
 
 #ifdef ANACAPA_ENABLE_ALEMBIC
 #  include "../scene/alembic/AlembicLoader.h"
+#  include "../scene/MatAssignLoader.h"
 #endif
 
 #include <spdlog/spdlog.h>
 #include <cassert>
 #include <algorithm>
+#include <fstream>
+#include <unordered_map>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -218,33 +221,82 @@ void RenderSession::appendAlembicCurves_() {
     if (m_settings.curvesPath.empty()) return;
 
     AlembicCurveOptions opts;
-    // baseMaterialIndex must be the index into scene.materials (the raw-pointer
-    // list indexed by si.meshID), not into m_materials (the owned-object list).
-    // The two sizes differ when the scene has more meshes than unique materials.
+    // baseMaterialIndex: index into scene.materials (raw-pointer array indexed
+    // by si.meshID).  Used as fallback when a USD mat path lookup fails; the
+    // default MarschnerHairMaterial created by loadAlembicCurves is pushed at
+    // this position after the load.
     opts.baseMaterialIndex = static_cast<uint32_t>(m_scene.materials.size());
 
-    // Snapshot sizes before loading so we know which strands/materials were added.
-    const size_t strandsBefore = m_curvePool.numStrands();
-    const size_t matsBefore    = m_materials.size();
+    const size_t matsBefore = m_materials.size();
 
-    std::string outMaterialPath;
+    std::vector<AlembicObjectRange> outRanges;
     bool ok = loadAlembicCurves(m_settings.curvesPath, opts,
-                                m_curvePool, m_materials, &outMaterialPath);
+                                m_curvePool, m_materials, &outRanges);
     if (!ok) {
         spdlog::error("Failed to load Alembic curves from '{}'",
                       m_settings.curvesPath);
         return;
     }
 
-    // Per-strand color (written into AHAIR002 by the Blender exporter) drives
-    // sigma_a per strand via MarschnerHairMaterial::effectiveSigmaA(ctx).
-    // The AlembicLoader already created one default MarschnerHairMaterial;
-    // mirror it into scene.materials so strands can look it up via si.meshID.
-    if (!outMaterialPath.empty())
-        spdlog::info("appendAlembicCurves: sidecar='{}'", outMaterialPath);
-
+    // Mirror the default MarschnerHairMaterial into the raw-pointer list.
     for (size_t i = matsBefore; i < m_materials.size(); ++i)
         m_scene.materials.push_back(m_materials[i].get());
+
+    // --- Load material assignments ---
+    // Start with the auto-discovered sidecar (<abc>.matassign.json), then
+    // layer any explicitly requested --matassign files on top.
+    std::vector<MatAssignEntry> assignments;
+
+    // Auto-discover: replace .abc extension with .matassign.json
+    std::string autoPath = m_settings.curvesPath;
+    {
+        auto dot = autoPath.rfind('.');
+        if (dot != std::string::npos)
+            autoPath.replace(dot, std::string::npos, ".matassign.json");
+        else
+            autoPath += ".matassign.json";
+    }
+    if (std::ifstream(autoPath).good()) {
+        auto f = loadMatAssign(autoPath);
+        mergeMatAssign(assignments, f.assignments);
+    }
+
+    // Layer explicit --matassign files
+    for (const auto& path : m_settings.matassignPaths) {
+        auto f = loadMatAssign(path);
+        mergeMatAssign(assignments, f.assignments);
+    }
+
+    // Build a name → MatAssignEntry lookup for fast per-range matching
+    std::unordered_map<std::string, const MatAssignEntry*> assignMap;
+    for (const auto& e : assignments)
+        assignMap[e.objectName] = &e;
+
+    // Apply per-object material assignments to strand ranges
+    for (const auto& range : outRanges) {
+        auto it = assignMap.find(range.objectName);
+        if (it != assignMap.end()) {
+            const MatAssignEntry& entry = *it->second;
+            auto mat = buildMaterial(entry);
+            uint32_t matIdx = static_cast<uint32_t>(m_scene.materials.size());
+            m_scene.materials.push_back(mat.get());
+            m_materials.push_back(std::move(mat));
+            m_curvePool.setMaterialIndex(range.strandStart,
+                                         range.strandStart + range.strandCount,
+                                         matIdx);
+            spdlog::info("appendAlembicCurves: '{}' → matassign ({})",
+                         range.objectName,
+                         entry.type == MatAssignType::Marschner ? "marschner" :
+                         entry.type == MatAssignType::Usd       ? "usd"       : "osl");
+        } else {
+            spdlog::info("appendAlembicCurves: '{}' not in matassign → default hair",
+                         range.objectName);
+        }
+    }
+    if (outRanges.empty()) {
+        spdlog::info("appendAlembicCurves: no named objects found — "
+                     "all strands use default hair material");
+    }
 #else
     if (!m_settings.curvesPath.empty())
         spdlog::warn("--curves requires ANACAPA_ENABLE_ALEMBIC; ignoring '{}'",
