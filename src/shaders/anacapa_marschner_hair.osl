@@ -28,7 +28,7 @@ closure color marschner_hair(color sigma_a,
                               float beta_m,
                               float beta_n,
                               float alpha,
-                              float eta) BUILTIN;
+                              float eta) [[ int builtin = 1 ]];
 
 shader anacapa_marschner_hair(
     string color_map  = ""
@@ -91,9 +91,9 @@ shader anacapa_marschner_hair(
     // for very dark colors while keeping the mapping perceptually smooth.
     float eps = 0.001;
     color sigma_a = color(
-        -log(max(comp(hair_color, 0), eps)),
-        -log(max(comp(hair_color, 1), eps)),
-        -log(max(comp(hair_color, 2), eps))
+        -log(max(hair_color[0], eps)),
+        -log(max(hair_color[1], eps)),
+        -log(max(hair_color[2], eps))
     );
 
     out = marschner_hair(sigma_a, beta_m, beta_n, alpha, eta);
