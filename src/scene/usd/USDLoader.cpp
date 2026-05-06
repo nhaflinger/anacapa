@@ -1244,6 +1244,41 @@ LoadedScene loadUSD(const std::string& path,
     result.shutterOpen  = 0.f;
     result.shutterClose = enableMotionBlur ? 1.f : 0.f;
 
+    // Camera pre-pass: if caller didn't provide an explicit shutter window, look
+    // for a camera prim with authored shutter:open / shutter:close and use those.
+    // This must happen BEFORE the mesh traversal so that tcOpenVal/tcCloseVal and
+    // the xform caches are set up correctly for motion-key collection.
+    if (!enableMotionBlur && stage->HasAuthoredTimeCodeRange()) {
+        std::string prepassCamPath = cameraOverridePath;
+        UsdPrim prepassCamPrim;
+        if (!prepassCamPath.empty()) {
+            prepassCamPrim = stage->GetPrimAtPath(SdfPath(prepassCamPath));
+        } else {
+            for (const UsdPrim& p : stage->Traverse()) {
+                if (p.IsA<UsdGeomCamera>()) { prepassCamPrim = p; break; }
+            }
+        }
+        if (prepassCamPrim) {
+            UsdGeomCamera usdCamPre(prepassCamPrim);
+            double camOpen = 0.0, camClose = 0.0;
+            bool gotOpen  = usdCamPre.GetShutterOpenAttr() .Get(&camOpen,  UsdTimeCode::Default());
+            bool gotClose = usdCamPre.GetShutterCloseAttr().Get(&camClose, UsdTimeCode::Default());
+            if (gotClose && camClose > camOpen) {
+                shutterOpen  = static_cast<float>(camOpen);
+                shutterClose = static_cast<float>(camClose);
+                enableMotionBlur = true;
+                tcOpenVal  = renderFrame + static_cast<double>(shutterOpen);
+                tcCloseVal = renderFrame + static_cast<double>(shutterClose);
+                result.shutterOpen  = 0.f;
+                result.shutterClose = 1.f;
+                spdlog::info("USDLoader: camera '{}' has authored shutter [{:.4f}, {:.4f}] — "
+                             "enabling motion blur (time codes [{:.3f}, {:.3f}])",
+                             prepassCamPrim.GetPath().GetString(),
+                             camOpen, camClose, tcOpenVal, tcCloseVal);
+            }
+        }
+    }
+
     if (enableMotionBlur)
         spdlog::info("USDLoader: motion blur enabled — frame {:.1f}, shutter [{:.3f}, {:.3f}] "
                      "(time codes [{:.3f}, {:.3f}])",
@@ -1287,10 +1322,13 @@ LoadedScene loadUSD(const std::string& path,
             bool hasMotion = (xform0 != xform1);
 
             std::vector<MotionKey> motionKeys;
-            if (hasMotion) {
+            if (enableMotionBlur && hasMotion) {
                 motionKeys = collectMotionKeys(prim, tcOpenVal, tcCloseVal);
-                spdlog::info("USDLoader: animated mesh '{}' ({} motion key(s), motion blur active)",
+                spdlog::info("USDLoader: animated mesh '{}' — {} motion key(s)",
                              prim.GetPath().GetString(), motionKeys.size());
+            } else if (enableMotionBlur) {
+                spdlog::debug("USDLoader: mesh '{}' has no motion in [{:.3f}, {:.3f}]",
+                              prim.GetPath().GetString(), tcOpenVal, tcCloseVal);
             }
 
             std::vector<uint32_t> faceTriStart, faceTriCount;
