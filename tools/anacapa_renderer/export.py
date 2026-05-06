@@ -812,9 +812,16 @@ def build_command(executable, usd_path, settings, width, height, output_path,
 
     if getattr(settings, 'use_motion_blur', False):
         shutter = getattr(settings, 'motion_blur_shutter', 0.5)
+        position = getattr(settings, 'motion_blur_position', 'CENTER')
         if shutter > 0:
-            cmd += ["--shutter-open", "0",
-                    "--shutter-close", str(shutter)]
+            if position == 'START':
+                s_open, s_close = 0.0, shutter
+            elif position == 'END':
+                s_open, s_close = -shutter, 0.0
+            else:  # CENTER
+                s_open, s_close = -shutter / 2.0, shutter / 2.0
+            cmd += ["--shutter-open",  str(s_open),
+                    "--shutter-close", str(s_close)]
 
     if settings.denoise:
         cmd.append("--denoise")

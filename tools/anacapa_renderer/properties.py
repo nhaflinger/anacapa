@@ -93,10 +93,20 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
     )
     motion_blur_shutter: bpy.props.FloatProperty(
         name="Shutter",
-        description="Shutter duration in frames (e.g. 0.5 = half-frame)",
+        description="Shutter duration in frames (e.g. 0.5 = half-frame, 1.0 = full frame)",
         default=0.5,
         min=0.0,
         max=2.0,
+    )
+    motion_blur_position: bpy.props.EnumProperty(
+        name="Position",
+        description="How the shutter window is positioned relative to the render frame",
+        items=[
+            ("START",  "Start on Frame",  "Shutter opens at the render frame"),
+            ("CENTER", "Center on Frame", "Shutter centered on the render frame"),
+            ("END",    "End on Frame",    "Shutter closes at the render frame"),
+        ],
+        default="CENTER",
     )
     # Legacy — kept so old .blend files don't lose data; not shown in UI
     shutter_open: bpy.props.FloatProperty(name="Shutter Open", default=0.0)

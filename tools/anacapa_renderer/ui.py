@@ -124,6 +124,7 @@ class ANACAPA_PT_camera(bpy.types.Panel):
         col = layout.column()
         col.active = s.use_motion_blur
         col.prop(s, "motion_blur_shutter")
+        col.prop(s, "motion_blur_position")
 
         layout.separator()
         layout.prop(s, "camera_path")
