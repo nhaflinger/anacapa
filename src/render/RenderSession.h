@@ -43,9 +43,15 @@ struct RenderSettings {
     float          fStop         = 0.f;
     float          focusDistance = 0.f;
 
-    // Motion blur shutter interval.  Both 0 = no motion blur (rays all get
-    // time=0, animated transforms sampled only at t=0).  When shutterClose > 0
-    // each primary ray gets a random time in [shutterOpen, shutterClose].
+    // Frame to render (USD time code).  When frameSet=true, the USD loader
+    // evaluates geometry transforms at this frame rather than the stage start.
+    int            frameNumber   = 0;
+    bool           frameSet      = false;
+
+    // Motion blur shutter interval, relative to frameNumber (in USD time units /
+    // frames).  Both 0 = no motion blur.  When shutterClose > shutterOpen, the
+    // USD loader collects motion samples over [frame+shutterOpen, frame+shutterClose]
+    // and rays are sampled with time in [0, 1] mapping to that window.
     float          shutterOpen   = 0.f;
     float          shutterClose  = 0.f;
     IntegratorType integrator      = IntegratorType::BDPT;

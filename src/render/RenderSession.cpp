@@ -32,6 +32,7 @@
 #include <unordered_map>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <condition_variable>
 #include <mutex>
 #include <numeric>
@@ -66,10 +67,21 @@ RenderSession::RenderSession(RenderSettings settings)
 void RenderSession::loadScene() {
 #ifdef ANACAPA_ENABLE_USD
     if (!m_settings.scenePath.empty()) {
+        double renderFrame = m_settings.frameSet
+                             ? static_cast<double>(m_settings.frameNumber)
+                             : std::numeric_limits<double>::quiet_NaN();
+        if (m_settings.frameSet)
+            spdlog::info("RenderSession: rendering frame {} (--frame was provided)",
+                         m_settings.frameNumber);
+        else
+            spdlog::info("RenderSession: no --frame specified — will use stage startTime");
         LoadedScene loaded = loadUSD(m_settings.scenePath,
                                       m_settings.imageWidth,
                                       m_settings.imageHeight,
-                                      m_settings.cameraPath);
+                                      m_settings.cameraPath,
+                                      renderFrame,
+                                      m_settings.shutterOpen,
+                                      m_settings.shutterClose);
         if (!loaded.valid) {
             spdlog::error("Aborting: could not open scene '{}'",
                           m_settings.scenePath);
@@ -82,8 +94,8 @@ void RenderSession::loadScene() {
         m_materials          = std::move(loaded.materials);
         m_lights             = std::move(loaded.lights);
         m_materialPathIndex  = std::move(loaded.materialPathIndex);
-        m_sceneShutterOpen   = loaded.shutterOpen;
-        m_sceneShutterClose  = loaded.shutterClose;
+        m_sceneShutterOpen   = loaded.shutterOpen;   // unused after simplification below
+        m_sceneShutterClose  = loaded.shutterClose;  // unused after simplification below
         m_scene.camera = m_camera;
         m_scene.accel  = nullptr;
 
@@ -121,16 +133,15 @@ void RenderSession::loadScene() {
         }
 
         // ---- Motion blur shutter -------------------------------------------
-        // CLI flags take priority; fall back to the shutter authored in the scene.
-        float sOpen  = m_settings.shutterClose > m_settings.shutterOpen
-                         ? m_settings.shutterOpen  : m_sceneShutterOpen;
-        float sClose = m_settings.shutterClose > m_settings.shutterOpen
-                         ? m_settings.shutterClose : m_sceneShutterClose;
-        if (m_scene.camera && sClose > sOpen) {
+        // The USDLoader has already used the provided frame/shutter params to
+        // collect motion keys normalized to [0, 1].  loaded.shutterClose=1 when
+        // motion blur is active, 0 when disabled.  Apply directly to the camera.
+        if (m_scene.camera && loaded.shutterClose > loaded.shutterOpen) {
             Camera& cam = *m_scene.camera;
-            cam.shutterOpen  = sOpen;
-            cam.shutterClose = sClose;
-            spdlog::info("Motion blur: shutter [{:.3f}, {:.3f}]", sOpen, sClose);
+            cam.shutterOpen  = loaded.shutterOpen;
+            cam.shutterClose = loaded.shutterClose;
+            spdlog::info("Motion blur: shutter [{:.3f}, {:.3f}]",
+                         loaded.shutterOpen, loaded.shutterClose);
         }
 
         // ---- Auto-camera: frame the scene if no camera was found ------------

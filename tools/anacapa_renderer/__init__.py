@@ -38,14 +38,32 @@ else:
 import bpy
 
 
+@bpy.app.handlers.persistent
+def _restore_curves_on_load(filepath):
+    """Unhide any CURVES objects that anacapa hid for rendering but never restored.
+
+    If Blender is closed mid-render (or the render is cancelled after hide but
+    before _finish()), the objects are saved as hidden in the .blend file.
+    The custom property 'anacapa_hidden_for_render' is the flag we left on them.
+    """
+    for obj in bpy.data.objects:
+        if obj.type == 'CURVES' and obj.get("anacapa_hidden_for_render"):
+            obj.hide_viewport = False
+            obj.pop("anacapa_hidden_for_render", None)
+
+
 def register():
     properties.register()
     engine.register()
     operators.register()
     ui.register()
+    if _restore_curves_on_load not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_restore_curves_on_load)
 
 
 def unregister():
+    if _restore_curves_on_load in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_restore_curves_on_load)
     ui.unregister()
     operators.unregister()
     engine.unregister()

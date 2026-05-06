@@ -86,12 +86,21 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
         name="Focus Distance", description="0 = use USD camera value", default=0.0, min=0.0)
 
     # Motion blur
-    shutter_open: bpy.props.FloatProperty(name="Shutter Open", default=0.0)
-    shutter_close: bpy.props.FloatProperty(
-        name="Shutter Close",
-        description="Set > Shutter Open to enable motion blur",
-        default=0.0,
+    use_motion_blur: bpy.props.BoolProperty(
+        name="Motion Blur",
+        description="Enable transformation motion blur",
+        default=False,
     )
+    motion_blur_shutter: bpy.props.FloatProperty(
+        name="Shutter",
+        description="Shutter duration in frames (e.g. 0.5 = half-frame)",
+        default=0.5,
+        min=0.0,
+        max=2.0,
+    )
+    # Legacy — kept so old .blend files don't lose data; not shown in UI
+    shutter_open: bpy.props.FloatProperty(name="Shutter Open", default=0.0)
+    shutter_close: bpy.props.FloatProperty(name="Shutter Close", default=0.0)
 
     # Denoising / AOVs
     denoise: bpy.props.BoolProperty(name="Denoise (OIDN)", default=False)

@@ -831,8 +831,8 @@ static std::vector<MotionKey> collectMotionKeys(
     {
         std::string timesStr;
         for (double t : times) { timesStr += std::to_string(t) + " "; }
-        spdlog::info("USDLoader: collectMotionKeys for '{}': {} raw sample(s): [{}]",
-                     prim.GetPath().GetString(), times.size(), timesStr);
+        spdlog::debug("USDLoader: collectMotionKeys for '{}': {} raw sample(s): [{}]",
+                      prim.GetPath().GetString(), times.size(), timesStr);
     }
 
     // Always include the stage endpoints so the full shutter is covered
@@ -1166,7 +1166,10 @@ static Camera buildCamera(const UsdPrim& prim,
 LoadedScene loadUSD(const std::string& path,
                     uint32_t filmWidth,
                     uint32_t filmHeight,
-                    const std::string& cameraOverridePath) {
+                    const std::string& cameraOverridePath,
+                    double frame,
+                    float  shutterOpen,
+                    float  shutterClose) {
     LoadedScene result;
 
     auto stage = UsdStage::Open(path);
@@ -1218,32 +1221,41 @@ LoadedScene loadUSD(const std::string& path,
                  UsdGeomGetStageUpAxis(stage).GetString(),
                  zUp ? " — applying Y↔Z correction" : "");
 
-    // Use the stage's authored time range for motion detection.
-    // Falls back to 0/1 if the stage has no time codes (static scenes).
+    // Use the stage's authored time range to determine startTime (fallback frame).
     double startTime = stage->HasAuthoredTimeCodeRange()
                          ? stage->GetStartTimeCode() : 0.0;
-    double endTime   = stage->HasAuthoredTimeCodeRange()
-                         ? stage->GetEndTimeCode()   : 1.0;
 
-    // Normalized shutter interval: only enable motion blur if the stage has an
-    // authored time range (i.e. it's actually animated). Static scenes get 0/0.
+    // Determine which frame to render.  If the caller didn't provide one, fall
+    // back to the stage's start time code so static / single-frame scenes work.
+    double renderFrame = std::isnan(frame) ? startTime : frame;
+
+    // Motion blur is enabled only when the caller provides an explicit shutter
+    // window (shutterClose > shutterOpen) AND the stage has animation data.
+    bool enableMotionBlur = (shutterClose > shutterOpen)
+                            && stage->HasAuthoredTimeCodeRange();
+
+    // Shutter window in USD time codes (frames).
+    double tcOpenVal  = renderFrame + (enableMotionBlur ? static_cast<double>(shutterOpen)  : 0.0);
+    double tcCloseVal = renderFrame + (enableMotionBlur ? static_cast<double>(shutterClose) : 0.0);
+
+    // The motion keys stored in each mesh are normalized to [0, 1] relative to
+    // [tcOpenVal, tcCloseVal].  Camera ray.time is sampled in [0, 1] so that
+    // ray.time=0 → shutter open and ray.time=1 → shutter close.
     result.shutterOpen  = 0.f;
-    result.shutterClose = 0.f;
-    if (stage->HasAuthoredTimeCodeRange()) {
-        double tcps = stage->GetTimeCodesPerSecond();
-        if (tcps <= 0.0) tcps = 24.0;
-        double durationSec = (endTime - startTime) / tcps;
-        if (durationSec > 0.0)
-            result.shutterClose = 1.f;
-        spdlog::info("USDLoader: animated time range [{}, {}] @ {} tcps ({:.4f}s) — motion blur enabled",
-                     startTime, endTime, tcps, durationSec);
-    } else {
-        spdlog::info("USDLoader: static scene (no authored time range) — motion blur disabled");
-    }
+    result.shutterClose = enableMotionBlur ? 1.f : 0.f;
 
-    UsdTimeCode tcOpen{startTime};
-    UsdTimeCode tcClose{endTime};
-    UsdGeomXformCache xformCache{tcOpen};    // shutter-open
+    if (enableMotionBlur)
+        spdlog::info("USDLoader: motion blur enabled — frame {:.1f}, shutter [{:.3f}, {:.3f}] "
+                     "(time codes [{:.3f}, {:.3f}])",
+                     renderFrame, shutterOpen, shutterClose, tcOpenVal, tcCloseVal);
+    else
+        spdlog::info("USDLoader: motion blur disabled (frame {:.1f}{})",
+                     renderFrame,
+                     stage->HasAuthoredTimeCodeRange() ? "" : " — static scene");
+
+    UsdTimeCode tcOpen{tcOpenVal};
+    UsdTimeCode tcClose{tcCloseVal};
+    UsdGeomXformCache xformCache{tcOpen};    // shutter-open (or render frame when no motion blur)
     UsdGeomXformCache xformCacheT1{tcClose}; // shutter-close (motion detection)
 
     // Cache material → IMaterial* to avoid duplicating per-mesh
@@ -1276,7 +1288,7 @@ LoadedScene loadUSD(const std::string& path,
 
             std::vector<MotionKey> motionKeys;
             if (hasMotion) {
-                motionKeys = collectMotionKeys(prim, startTime, endTime);
+                motionKeys = collectMotionKeys(prim, tcOpenVal, tcCloseVal);
                 spdlog::info("USDLoader: animated mesh '{}' ({} motion key(s), motion blur active)",
                              prim.GetPath().GetString(), motionKeys.size());
             }
@@ -1709,7 +1721,12 @@ LoadedScene loadUSD(const std::string& path,
         spdlog::info("USDLoader: camera shutter:open={:.4f} (authored={}) "
                      "shutter:close={:.4f} (authored={})",
                      camShutterOpen, gotOpen, camShutterClose, gotClose);
-        if (gotClose && camShutterClose > camShutterOpen) {
+        // Only apply the camera's authored shutter when the caller didn't request
+        // an explicit motion blur window.  When motion blur is enabled via the
+        // --shutter-open/close flags the motion keys are already normalized to
+        // [0, 1] over that window and result.shutterClose=1; the camera's own
+        // attribute must not override that range.
+        if (!enableMotionBlur && gotClose && camShutterClose > camShutterOpen) {
             result.shutterOpen  = static_cast<float>(camShutterOpen);
             result.shutterClose = static_cast<float>(camShutterClose);
             spdlog::info("USDLoader: using camera shutter [{:.4f}, {:.4f}]",

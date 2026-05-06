@@ -119,9 +119,11 @@ class ANACAPA_PT_camera(bpy.types.Panel):
         col.prop(s, "focus_distance")
 
         layout.separator()
-        layout.label(text="Motion Blur")
-        layout.prop(s, "shutter_open")
-        layout.prop(s, "shutter_close")
+        row = layout.row()
+        row.prop(s, "use_motion_blur")
+        col = layout.column()
+        col.active = s.use_motion_blur
+        col.prop(s, "motion_blur_shutter")
 
         layout.separator()
         layout.prop(s, "camera_path")

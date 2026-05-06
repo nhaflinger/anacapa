@@ -33,6 +33,7 @@ class ANACAPA_OT_render(bpy.types.Operator):
             obj = bpy.data.objects.get(name)
             if obj:
                 obj.hide_viewport = was_hidden
+                obj.pop("anacapa_hidden_for_render", None)
         ANACAPA_OT_render._hidden_for_render = []
 
         scene    = context.scene
@@ -92,6 +93,9 @@ class ANACAPA_OT_render(bpy.types.Operator):
             if obj.type == 'CURVES':
                 was_hidden = obj.hide_viewport
                 obj.hide_viewport = True
+                # Custom property survives Blender restart — load_post handler
+                # uses it to unhide objects if _finish() never ran.
+                obj["anacapa_hidden_for_render"] = True
                 hidden_for_render.append((obj.name, was_hidden))
         ANACAPA_OT_render._hidden_for_render = hidden_for_render
         if hidden_for_render:
@@ -119,7 +123,8 @@ class ANACAPA_OT_render(bpy.types.Operator):
         cmd, _       = build_command(executable, usd_path, settings,
                                      width, height, output_path,
                                      curves_path=abc_path,
-                                     matassign_paths=matassign_paths)
+                                     matassign_paths=matassign_paths,
+                                     frame=context.scene.frame_current)
 
         # Always add progressive PNG preview (overrides settings.png_path for temp use)
         if "--png" not in cmd:
@@ -131,6 +136,8 @@ class ANACAPA_OT_render(bpy.types.Operator):
             cmd[idx + 1] = preview_path
 
         # --- Launch Anacapa ---
+        import shlex
+        print(f"[Anacapa] Command: {shlex.join(cmd)}")
         self.report({'INFO'}, "Launching Anacapa…")
         try:
             proc = subprocess.Popen(
@@ -249,6 +256,7 @@ class ANACAPA_OT_render(bpy.types.Operator):
             obj = bpy.data.objects.get(name)
             if obj:
                 obj.hide_viewport = was_hidden
+                obj.pop("anacapa_hidden_for_render", None)
         ANACAPA_OT_render._hidden_for_render = []
 
         # Re-enable dirty tracking after a short delay so Blender's own
@@ -368,7 +376,8 @@ class ANACAPA_OT_export_scene(bpy.types.Operator):
         cmd, _ = build_command(executable, usd_path, settings,
                                width, height, output_path,
                                curves_path=abc_path,
-                               matassign_paths=matassign_paths)
+                               matassign_paths=matassign_paths,
+                               frame=context.scene.frame_current)
         cmd_str = shlex.join(cmd)
 
         print("\n" + "=" * 72)

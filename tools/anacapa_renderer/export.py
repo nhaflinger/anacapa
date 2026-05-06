@@ -247,7 +247,6 @@ def export_hair_abc(abc_path, context):
     _STRAND_BODY = """\
         pos_attr = curves_data.attributes.get("position")
         if pos_attr is None:
-            print(f"[hair_read] '{name}' has no position attribute — skipped")
             continue
         rad_attr = curves_data.attributes.get("radius")
 
@@ -276,8 +275,6 @@ def export_hair_abc(abc_path, context):
 
         # Read per-strand color from CURVE-domain attribute (try common names)
         # Falls back to per-point domain using the first point's color, or white.
-        attr_summary = [(a.name, a.domain, a.data_type) for a in curves_data.attributes]
-        print(f"[hair_color] '{name}' attributes: {attr_summary}")
         curve_colors = None  # list of (r, g, b) per curve index
         for col_name in ("Col", "col", "color", "Color", "hair_color"):
             col_attr = curves_data.attributes.get(col_name)
@@ -312,17 +309,9 @@ def export_hair_abc(abc_path, context):
                 except Exception:
                     pass
             if curve_colors is not None:
-                n_samp = min(5, len(curve_colors))
-                step   = max(1, len(curve_colors) // n_samp)
-                samps  = [f"({curve_colors[i*step][0]:.3f},{curve_colors[i*step][1]:.3f},{curve_colors[i*step][2]:.3f})"
-                          for i in range(n_samp)]
-                print(f"[hair_color] '{name}' using attribute '{col_name}' ({col_attr.domain}/{col_attr.data_type}) samples={samps}")
                 break
-        if curve_colors is None:
-            print(f"[hair_color] '{name}' no color attribute found — using white")
 
         # Read per-strand root UV from surface_uv_coordinate (CURVE domain, float2)
-        # This is the UV on the emitter mesh where each strand was grown.
         curve_root_uvs = None
         uv_attr = curves_data.attributes.get("surface_uv_coordinate")
         if uv_attr is not None and uv_attr.domain == "CURVE":
@@ -330,14 +319,8 @@ def export_hair_abc(abc_path, context):
             try:
                 uv_attr.data.foreach_get("vector", raw_uv)
                 curve_root_uvs = [(raw_uv[ci*2], raw_uv[ci*2+1]) for ci in range(num_curves)]
-                n_samp = min(3, num_curves)
-                samps  = [f"({curve_root_uvs[i][0]:.3f},{curve_root_uvs[i][1]:.3f})"
-                          for i in range(n_samp)]
-                print(f"[hair_uv] '{name}' root UVs loaded, samples={samps}")
-            except Exception as e:
-                print(f"[hair_uv] '{name}' failed to read surface_uv_coordinate: {e}")
-        if curve_root_uvs is None:
-            print(f"[hair_uv] '{name}' no surface_uv_coordinate — root UV will be (0,0)")
+            except Exception:
+                pass
 
         obj_strand_count = 0
         for ci in range(num_curves):
@@ -425,6 +408,7 @@ bin_path   = {bin_path!r}
 frame      = {frame!r}
 
 bpy.context.scene.frame_set(frame)
+depsgraph = bpy.context.evaluated_depsgraph_get()
 
 total_strands = 0
 strand_counts = {{}}
@@ -437,8 +421,14 @@ with open(bin_path, "wb") as fh:
         obj = bpy.data.objects.get(name)
         if obj is None or obj.type != "CURVES":
             continue
-        curves_data      = obj.data
-        mw               = obj.matrix_world
+        curves_data = obj.data
+        # Get matrix_world from the evaluated object so animated parent
+        # transforms are included. Only .matrix_world is accessed on the
+        # evaluated object — never .data — so this is crash-safe.
+        try:
+            mw = obj.evaluated_get(depsgraph).matrix_world
+        except Exception:
+            mw = obj.matrix_world
         num_curves       = len(curves_data.curves)
         num_points_total = len(curves_data.points)
         if num_curves == 0 or num_points_total == 0:
@@ -555,7 +545,7 @@ sys.exit(0 if total_strands > 0 else 2)
         )
 
         for line in result.stdout.splitlines():
-            if ("[hair_eval]" in line or "[hair_color]" in line) and line.strip():
+            if "[hair_eval]" in line and line.strip():
                 print(f"  {line.strip()}")
 
         if result.returncode != 0 or not os.path.exists(bin_path):
@@ -578,7 +568,7 @@ sys.exit(0 if total_strands > 0 else 2)
             )
 
             for line in result.stdout.splitlines():
-                if ("[hair_guide]" in line or "[hair_color]" in line) and line.strip():
+                if "[hair_guide]" in line and line.strip():
                     print(f"  {line.strip()}")
             if result.returncode != 0:
                 print(f"[Anacapa] Guide hair subprocess exited {result.returncode} "
@@ -769,7 +759,7 @@ def export_usd(usd_path, context, run_prep=True):
 
 
 def build_command(executable, usd_path, settings, width, height, output_path,
-                  curves_path=None, matassign_paths=None):
+                  curves_path=None, matassign_paths=None, frame=None):
     cmd = [
         executable,
         "--scene",  usd_path,
@@ -782,6 +772,9 @@ def build_command(executable, usd_path, settings, width, height, output_path,
         "--tile-size",     str(settings.tile_size),
         "--firefly-clamp", str(settings.firefly_clamp),
     ]
+
+    if frame is not None:
+        cmd += ["--frame", str(int(frame))]
 
     if settings.interactive:
         cmd.append("--interactive")
@@ -810,9 +803,11 @@ def build_command(executable, usd_path, settings, width, height, output_path,
         cmd += ["--fstop", str(settings.fstop),
                 "--focus-distance", str(settings.focus_distance)]
 
-    if settings.shutter_close > settings.shutter_open:
-        cmd += ["--shutter-open",  str(settings.shutter_open),
-                "--shutter-close", str(settings.shutter_close)]
+    if getattr(settings, 'use_motion_blur', False):
+        shutter = getattr(settings, 'motion_blur_shutter', 0.5)
+        if shutter > 0:
+            cmd += ["--shutter-open", "0",
+                    "--shutter-close", str(shutter)]
 
     if settings.denoise:
         cmd.append("--denoise")

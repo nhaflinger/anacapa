@@ -1,6 +1,7 @@
 #pragma once
 
 #include <anacapa/scene/SceneLoader.h>
+#include <limits>
 #include <string>
 
 namespace anacapa {
@@ -23,9 +24,13 @@ namespace anacapa {
 //
 // Pass --list-cameras to discover available camera paths without rendering.
 // ---------------------------------------------------------------------------
+
 LoadedScene loadUSD(const std::string& path,
                     uint32_t filmWidth,
                     uint32_t filmHeight,
-                    const std::string& cameraOverridePath = "");
+                    const std::string& cameraOverridePath = "",
+                    double frame        = std::numeric_limits<double>::quiet_NaN(),
+                    float  shutterOpen  = 0.f,
+                    float  shutterClose = 0.f);
 
 } // namespace anacapa
