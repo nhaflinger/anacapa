@@ -812,7 +812,8 @@ static void collectXformTimeSamples(const UsdPrim& prim, std::vector<double>& ti
 static std::vector<MotionKey> collectMotionKeys(
         const UsdPrim& prim,
         double startTime,
-        double endTime)
+        double endTime,
+        bool zUp = false)
 {
     // Collect the union of all authored xformOp time samples from the prim
     // and every ancestor, since animation may live on a parent Xform prim.
@@ -859,16 +860,37 @@ static std::vector<MotionKey> collectMotionKeys(
         key.time          = normalizedTime;
         key.objectToWorld = toMat4f(xfm);
         key.worldToObject = toMat4f(xfm.GetInverse());
+
+        if (zUp) {
+            // Incorporate the Z-up → Y-up world-space correction into each motion key.
+            // The correction matrix converts Z-up world coords to Y-up: {x, z, -y}.
+            // In column-vector (anacapa) convention:
+            //   M_corr.row0 = [1, 0,  0, 0]
+            //   M_corr.row1 = [0, 0,  1, 0]
+            //   M_corr.row2 = [0,-1,  0, 0]
+            //   M_corr.row3 = [0, 0,  0, 1]
+            // objectToWorld_corrected = M_corr * objectToWorld_usd
+            Mat4f o2w = key.objectToWorld;
+            Mat4f c;  // Z-up correction matrix
+            c.m[0][0]=1; c.m[0][1]=0;  c.m[0][2]=0; c.m[0][3]=0;
+            c.m[1][0]=0; c.m[1][1]=0;  c.m[1][2]=1; c.m[1][3]=0;
+            c.m[2][0]=0; c.m[2][1]=-1; c.m[2][2]=0; c.m[2][3]=0;
+            c.m[3][0]=0; c.m[3][1]=0;  c.m[3][2]=0; c.m[3][3]=1;
+            key.objectToWorld = c * o2w;
+            key.worldToObject = key.objectToWorld.inverse();
+        }
+
         keys.push_back(key);
     }
-    // Log each key's translation so we can verify the arc is being captured
+    // Log only the shutter-open (t=0) and shutter-close (t=1) keys
     for (const MotionKey& k : keys) {
-        // Translation is in the last column of the column-major anacapa Mat4f
-        spdlog::info("USDLoader:   key t={:.3f} translate=({:.3f},{:.3f},{:.3f})",
-                     k.time,
-                     k.objectToWorld.m[0][3],
-                     k.objectToWorld.m[1][3],
-                     k.objectToWorld.m[2][3]);
+        if (k.time < 0.001f || (k.time > 0.999f && k.time < 1.001f)) {
+            spdlog::info("USDLoader:   key t={:.3f} translate=({:.3f},{:.3f},{:.3f}) "
+                         "scale=({:.3f},{:.3f},{:.3f})",
+                         k.time,
+                         k.objectToWorld.m[0][3], k.objectToWorld.m[1][3], k.objectToWorld.m[2][3],
+                         k.objectToWorld.m[0][0], k.objectToWorld.m[1][1], k.objectToWorld.m[2][2]);
+        }
     }
 
     return keys;
@@ -968,19 +990,19 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
                     int ni = (normalInterp == UsdGeomTokens->faceVarying) ? fvi : vi;
                     if (ni < (int)normals.size()) {
                         if (hasMotion)
-                            return applyUpCorrection(safeNormalize({normals[ni][0], normals[ni][1], normals[ni][2]}), zUp);
+                            return safeNormalize({normals[ni][0], normals[ni][1], normals[ni][2]});
                         return transformNormal(xform, normals[ni], zUp);
                     }
                 }
                 // Compute geometric normal
                 Vec3f a = hasMotion
-                    ? applyUpCorrection(Vec3f{(float)points[i0][0], (float)points[i0][1], (float)points[i0][2]}, zUp)
+                    ? Vec3f{(float)points[i0][0], (float)points[i0][1], (float)points[i0][2]}
                     : transformPoint(xform, GfVec3d(points[i0]), zUp);
                 Vec3f b = hasMotion
-                    ? applyUpCorrection(Vec3f{(float)points[i1][0], (float)points[i1][1], (float)points[i1][2]}, zUp)
+                    ? Vec3f{(float)points[i1][0], (float)points[i1][1], (float)points[i1][2]}
                     : transformPoint(xform, GfVec3d(points[i1]), zUp);
                 Vec3f c = hasMotion
-                    ? applyUpCorrection(Vec3f{(float)points[i2][0], (float)points[i2][1], (float)points[i2][2]}, zUp)
+                    ? Vec3f{(float)points[i2][0], (float)points[i2][1], (float)points[i2][2]}
                     : transformPoint(xform, GfVec3d(points[i2]), zUp);
                 return safeNormalize(cross(b - a, c - a));
             };
@@ -1323,7 +1345,7 @@ LoadedScene loadUSD(const std::string& path,
 
             std::vector<MotionKey> motionKeys;
             if (enableMotionBlur && hasMotion) {
-                motionKeys = collectMotionKeys(prim, tcOpenVal, tcCloseVal);
+                motionKeys = collectMotionKeys(prim, tcOpenVal, tcCloseVal, zUp);
                 spdlog::info("USDLoader: animated mesh '{}' — {} motion key(s)",
                              prim.GetPath().GetString(), motionKeys.size());
             } else if (enableMotionBlur) {
