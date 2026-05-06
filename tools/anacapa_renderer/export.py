@@ -37,6 +37,7 @@ def _state():
     # Migrate state dicts created before dirty_hair was added
     s.setdefault("dirty_hair",      True)
     s.setdefault("cached_abc_path", None)
+    s.setdefault("cached_frame",    None)
     return s
 
 
@@ -200,6 +201,12 @@ def export_hair_abc(abc_path, context):
 
     s = _state()
 
+    # Invalidate hair cache when the frame changes.
+    frame = context.scene.frame_current
+    if s["cached_frame"] != frame:
+        s["dirty_hair"]   = True
+        s["cached_frame"] = frame
+
     cached = s["cached_abc_path"]
     if not s["dirty_hair"] and cached and os.path.exists(cached):
         if abc_path != cached:
@@ -236,7 +243,6 @@ def export_hair_abc(abc_path, context):
         return None
 
     hair_names  = [obj.name for obj in hair_objs]
-    frame       = context.scene.frame_current
     bin_path    = abc_path.replace(".abc", ".hairbin")
     counts_path = abc_path.replace(".abc", "_counts.json")
     eval_py  = abc_path.replace(".abc", "_eval.py")
@@ -685,6 +691,7 @@ sys.exit(0 if total_strands > 0 else 2)
 
     s["dirty_hair"]      = False
     s["cached_abc_path"] = abc_path
+    s["cached_frame"]    = frame
     print(f"[Anacapa] Hair exported → {abc_path}")
     return matassign_paths
 
