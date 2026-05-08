@@ -39,24 +39,44 @@ struct BVHNode {
 static_assert(sizeof(BVHNode) == 32, "BVHNode must be 32 bytes");
 
 // ---------------------------------------------------------------------------
-// Triangle — for fast intersection.
+// BVHTriTrav — traversal-only record, 40 bytes (fits in one cache line).
 //
-// Static meshes: v0/e1/e2/n/sn* are pre-baked to world space (isObjectSpace=false).
-// Animated meshes: v0/e1/e2/n/sn* remain in object space (isObjectSpace=true).
-//   At intersection time, the triangle is transformed using the mesh's
-//   interpolated objectToWorld at ray.time.
+// Contains only the data needed for Möller-Trumbore intersection and the
+// animated-mesh transform lookup.  Kept separate from BVHTriAttrib so the
+// hot traversal loop never fetches shading data it doesn't need.
+//
+// data encoding:  bits[30:0] = meshID,  bit[31] = isObjectSpace flag.
+// Static meshes:  v0/e1/e2 in world space (isObjectSpace=false).
+// Animated meshes: v0/e1/e2 in object space (isObjectSpace=true);
+//   transform is interpolated at ray.time via MeshDesc::interpolateO2W.
 // ---------------------------------------------------------------------------
-struct BVHTriangle {
-    Vec3f v0;
-    Vec3f e1;        // v1 - v0
-    Vec3f e2;        // v2 - v0
-    Vec3f n;         // Geometric normal (normalized)
-    Vec2f uv0, uv1, uv2;
-    Vec3f sn0, sn1, sn2;  // Shading normals per vertex
-    uint32_t meshID;
-    uint32_t primID;
-    bool isObjectSpace = false; // true for animated meshes with motion blur
+struct BVHTriTrav {
+    Vec3f    v0;    // 12 bytes
+    Vec3f    e1;    // 12 bytes — v1 - v0
+    Vec3f    e2;    // 12 bytes — v2 - v0
+    uint32_t data;  //  4 bytes — meshID | (isObjectSpace << 31)
+
+    static constexpr uint32_t kObjectSpaceFlag = 0x80000000u;
+    bool     isObjectSpace() const { return (data & kObjectSpaceFlag) != 0; }
+    uint32_t meshID()        const { return  data & ~kObjectSpaceFlag; }
 };
+static_assert(sizeof(BVHTriTrav) == 64, "BVHTriTrav must be 64 bytes (one cache line)");
+
+// ---------------------------------------------------------------------------
+// BVHTriAttrib — hit attributes, only loaded on confirmed intersection.
+//
+// Shading normals, UVs, and primID are irrelevant during traversal and live
+// in a separate parallel array so they don't pollute traversal cache lines.
+// Static meshes: n/sn* pre-baked to world space.
+// Animated meshes: n/sn* in object space (transformed in fillSurfaceInteraction).
+// ---------------------------------------------------------------------------
+struct BVHTriAttrib {
+    Vec3f    n;              // 12 bytes — geometric normal (normalized)
+    Vec3f    sn0, sn1, sn2; // 36 bytes — shading normals per vertex
+    Vec2f    uv0, uv1, uv2; // 24 bytes — texture coordinates per vertex
+    uint32_t primID;         //  4 bytes
+};
+static_assert(sizeof(BVHTriAttrib) == 96, "BVHTriAttrib must be 96 bytes");
 
 // ---------------------------------------------------------------------------
 // BVHBackend — CPU SAH BVH over a GeometryPool
@@ -115,10 +135,10 @@ private:
 
     // Möller–Trumbore ray-triangle intersection
     // Returns true on hit; fills t, u, v barycentric coordinates
-    static bool intersectTriangle(const BVHTriangle& tri, const Ray4& r,
+    static bool intersectTriangle(const BVHTriTrav& trav, const Ray4& r,
                                   float& t, float& u, float& v);
 
-    void fillSurfaceInteraction(const BVHTriangle& tri,
+    void fillSurfaceInteraction(const BVHTriTrav& trav, const BVHTriAttrib& attrib,
                                 float t, float u, float v,
                                 const Mat4f* worldXfm,   // nullptr for static (already world-space)
                                 SurfaceInteraction& si) const;
@@ -131,8 +151,9 @@ private:
     // -----------------------------------------------------------------------
     const GeometryPool&        m_pool;
     std::vector<BVHNode>       m_nodes;
-    std::vector<BVHTriangle>   m_tris;      // Reordered by build
-    std::vector<uint32_t>      m_primIndices; // Leaf prim index list
+    std::vector<BVHTriTrav>    m_trav;        // Traversal records (parallel with m_attribs)
+    std::vector<BVHTriAttrib>  m_attribs;     // Hit attributes (only accessed on confirmed hit)
+    std::vector<uint32_t>      m_primIndices; // Leaf prim index list (indices into m_trav/m_attribs)
     bool                       m_built = false;
 };
 

@@ -15,15 +15,14 @@ BVHBackend::BVHBackend(const GeometryPool& pool)
 {}
 
 void BVHBackend::commit() {
-    m_tris.clear();
+    m_trav.clear();
+    m_attribs.clear();
     m_nodes.clear();
     m_primIndices.clear();
 
-    for (uint32_t meshID = 0; meshID < m_pool.numMeshes(); ++meshID) {
-        const MeshDesc& mesh = m_pool.mesh(meshID);
-        // Static meshes have positions pre-baked to world space by the loader;
-        // the identity transform is a no-op and is used only for normal transform.
-        const Mat4f xfm = Mat4f::identity();
+    for (uint32_t meshIdx = 0; meshIdx < m_pool.numMeshes(); ++meshIdx) {
+        const MeshDesc& mesh = m_pool.mesh(meshIdx);
+        const Mat4f xfm = Mat4f::identity();  // static meshes are pre-baked to world space
 
         uint32_t numTris = mesh.numTriangles();
         for (uint32_t ti = 0; ti < numTris; ++ti) {
@@ -31,72 +30,72 @@ void BVHBackend::commit() {
             uint32_t i1 = mesh.indices[ti * 3 + 1];
             uint32_t i2 = mesh.indices[ti * 3 + 2];
 
-            BVHTriangle tri;
+            BVHTriTrav   trav;
+            BVHTriAttrib attrib;
+
             if (mesh.hasMotion()) {
-                // Keep vertices in object space; transform at ray intersection time.
-                tri.v0 = mesh.positions[i0];
+                // Object-space: keep vertices in object space; transform at ray time.
+                trav.v0 = mesh.positions[i0];
                 Vec3f v1 = mesh.positions[i1];
                 Vec3f v2 = mesh.positions[i2];
-                tri.e1 = v1 - tri.v0;
-                tri.e2 = v2 - tri.v0;
-                tri.n  = safeNormalize(cross(tri.e1, tri.e2));
+                trav.e1  = v1 - trav.v0;
+                trav.e2  = v2 - trav.v0;
+                trav.data = meshIdx | BVHTriTrav::kObjectSpaceFlag;
 
+                attrib.n = safeNormalize(cross(trav.e1, trav.e2));
                 auto getN = [&](uint32_t idx) -> Vec3f {
-                    if (idx < mesh.normals.size())
-                        return safeNormalize(mesh.normals[idx]);
-                    return tri.n;
+                    return idx < mesh.normals.size()
+                        ? safeNormalize(mesh.normals[idx]) : attrib.n;
                 };
-                tri.sn0 = getN(i0); tri.sn1 = getN(i1); tri.sn2 = getN(i2);
-                tri.isObjectSpace = true;
+                attrib.sn0 = getN(i0); attrib.sn1 = getN(i1); attrib.sn2 = getN(i2);
             } else {
-                tri.v0 = xfm.transformPoint(mesh.positions[i0]);
+                // World-space: bake transform at build time.
+                trav.v0 = xfm.transformPoint(mesh.positions[i0]);
                 Vec3f v1 = xfm.transformPoint(mesh.positions[i1]);
                 Vec3f v2 = xfm.transformPoint(mesh.positions[i2]);
-                tri.e1 = v1 - tri.v0;
-                tri.e2 = v2 - tri.v0;
-                tri.n  = safeNormalize(cross(tri.e1, tri.e2));
+                trav.e1  = v1 - trav.v0;
+                trav.e2  = v2 - trav.v0;
+                trav.data = meshIdx;  // kObjectSpaceFlag clear
 
+                attrib.n = safeNormalize(cross(trav.e1, trav.e2));
                 auto getN = [&](uint32_t idx) -> Vec3f {
-                    if (idx < mesh.normals.size())
-                        return safeNormalize(xfm.transformNormal(mesh.normals[idx]));
-                    return tri.n;
+                    return idx < mesh.normals.size()
+                        ? safeNormalize(xfm.transformNormal(mesh.normals[idx])) : attrib.n;
                 };
-                tri.sn0 = getN(i0); tri.sn1 = getN(i1); tri.sn2 = getN(i2);
-                tri.isObjectSpace = false;
+                attrib.sn0 = getN(i0); attrib.sn1 = getN(i1); attrib.sn2 = getN(i2);
             }
 
             auto getUV = [&](uint32_t idx) -> Vec2f {
                 return idx < mesh.uvs.size() ? mesh.uvs[idx] : Vec2f{0.f, 0.f};
             };
-            tri.uv0 = getUV(i0); tri.uv1 = getUV(i1); tri.uv2 = getUV(i2);
+            attrib.uv0 = getUV(i0); attrib.uv1 = getUV(i1); attrib.uv2 = getUV(i2);
+            attrib.primID = ti;
 
-            tri.meshID = meshID;
-            tri.primID = ti;
-            m_tris.push_back(tri);
+            m_trav.push_back(trav);
+            m_attribs.push_back(attrib);
         }
     }
 
-    if (m_tris.empty()) { m_built = true; return; }
+    if (m_trav.empty()) { m_built = true; return; }
 
-    uint32_t n = static_cast<uint32_t>(m_tris.size());
+    uint32_t n = static_cast<uint32_t>(m_trav.size());
     std::vector<PrimInfo> primInfo(n);
     for (uint32_t i = 0; i < n; ++i) {
-        const BVHTriangle& tri = m_tris[i];
+        const BVHTriTrav& trav = m_trav[i];
         BBox3f b;
-        if (tri.isObjectSpace) {
-            // Time-expanded bounds: union of world-space AABB across all motion keys
-            const MeshDesc& mesh = m_pool.mesh(tri.meshID);
+        if (trav.isObjectSpace()) {
+            // Time-expanded bounds: union of world-space AABB across all motion keys.
+            const MeshDesc& mesh = m_pool.mesh(trav.meshID());
             for (const MotionKey& key : mesh.motionKeys) {
-                Vec3f w0 = key.objectToWorld.transformPoint(tri.v0);
-                Vec3f w1 = key.objectToWorld.transformPoint(tri.v0 + tri.e1);
-                Vec3f w2 = key.objectToWorld.transformPoint(tri.v0 + tri.e2);
+                Vec3f w0 = key.objectToWorld.transformPoint(trav.v0);
+                Vec3f w1 = key.objectToWorld.transformPoint(trav.v0 + trav.e1);
+                Vec3f w2 = key.objectToWorld.transformPoint(trav.v0 + trav.e2);
                 b.expand(w0); b.expand(w1); b.expand(w2);
             }
         } else {
-            Vec3f v1 = tri.v0 + tri.e1, v2 = tri.v0 + tri.e2;
-            b.expand(tri.v0); b.expand(v1); b.expand(v2);
+            Vec3f v1 = trav.v0 + trav.e1, v2 = trav.v0 + trav.e2;
+            b.expand(trav.v0); b.expand(v1); b.expand(v2);
         }
-        // Pad degenerate flat boxes so slabs never have zero width
         for (int ax = 0; ax < 3; ++ax)
             if (b.diagonal()[ax] < 1e-7f)
                 { b.pMin[ax] -= 1e-7f; b.pMax[ax] += 1e-7f; }
@@ -261,28 +260,28 @@ bool BVHBackend::intersectAABB(const BVHNode& node, const Ray4& r, float& tNear)
     return true;
 }
 
-bool BVHBackend::intersectTriangle(const BVHTriangle& tri, const Ray4& r,
+bool BVHBackend::intersectTriangle(const BVHTriTrav& trav, const Ray4& r,
                                     float& t, float& u, float& v) {
     // Möller–Trumbore — reconstruct direction from invDir
     Vec3f dir = { 1.f / r.invDir.x, 1.f / r.invDir.y, 1.f / r.invDir.z };
-    Vec3f h = cross(dir, tri.e2);
-    float a = dot(tri.e1, h);
+    Vec3f h = cross(dir, trav.e2);
+    float a = dot(trav.e1, h);
     if (std::abs(a) < 1e-9f) return false;
 
     float f  = 1.f / a;
-    Vec3f s  = r.origin - tri.v0;
+    Vec3f s  = r.origin - trav.v0;
     u = f * dot(s, h);
     if (u < 0.f || u > 1.f) return false;
 
-    Vec3f q = cross(s, tri.e1);
+    Vec3f q = cross(s, trav.e1);
     v = f * dot(dir, q);
     if (v < 0.f || u + v > 1.f) return false;
 
-    t = f * dot(tri.e2, q);
+    t = f * dot(trav.e2, q);
     return (t >= r.tMin && t <= r.tMax);
 }
 
-void BVHBackend::fillSurfaceInteraction(const BVHTriangle& tri,
+void BVHBackend::fillSurfaceInteraction(const BVHTriTrav& trav, const BVHTriAttrib& attrib,
                                          float t, float u, float v,
                                          const Mat4f* worldXfm,
                                          SurfaceInteraction& si) const {
@@ -290,28 +289,27 @@ void BVHBackend::fillSurfaceInteraction(const BVHTriangle& tri,
     si.t  = t;
 
     if (worldXfm) {
-        // Object-space triangle — transform everything to world space
-        Vec3f p_obj  = tri.v0 + tri.e1 * u + tri.e2 * v;
-        Vec3f n_obj  = safeNormalize(cross(tri.e1, tri.e2));
-        Vec3f sn_obj = safeNormalize(tri.sn0 * w + tri.sn1 * u + tri.sn2 * v);
+        // Object-space triangle — transform everything to world space.
+        Vec3f p_obj  = trav.v0 + trav.e1 * u + trav.e2 * v;
+        Vec3f sn_obj = safeNormalize(attrib.sn0 * w + attrib.sn1 * u + attrib.sn2 * v);
 
         si.p  = worldXfm->transformPoint(p_obj);
-        si.ng = safeNormalize(worldXfm->transformNormal(n_obj));
+        si.ng = safeNormalize(worldXfm->transformNormal(attrib.n));
         si.n  = safeNormalize(worldXfm->transformNormal(sn_obj));
-        si.dpdu = worldXfm->transformVector(tri.e1);
-        si.dpdv = worldXfm->transformVector(tri.e2);
+        si.dpdu = worldXfm->transformVector(trav.e1);
+        si.dpdv = worldXfm->transformVector(trav.e2);
     } else {
-        si.p  = tri.v0 + tri.e1 * u + tri.e2 * v;
-        si.ng = tri.n;
-        si.n  = safeNormalize(tri.sn0 * w + tri.sn1 * u + tri.sn2 * v);
-        si.dpdu = tri.e1;
-        si.dpdv = tri.e2;
+        si.p  = trav.v0 + trav.e1 * u + trav.e2 * v;
+        si.ng = attrib.n;
+        si.n  = safeNormalize(attrib.sn0 * w + attrib.sn1 * u + attrib.sn2 * v);
+        si.dpdu = trav.e1;
+        si.dpdv = trav.e2;
     }
 
     if (dot(si.n, si.ng) < 0.f) si.n = -si.n;
-    si.uv = tri.uv0 * w + tri.uv1 * u + tri.uv2 * v;
-    si.meshID     = tri.meshID;
-    si.primID     = tri.primID;
+    si.uv         = attrib.uv0 * w + attrib.uv1 * u + attrib.uv2 * v;
+    si.meshID     = trav.meshID();
+    si.primID     = attrib.primID;
     si.instanceID = ~0u;
     si.material   = nullptr;
 }
@@ -351,23 +349,23 @@ TraceResult BVHBackend::traceImpl(const Ray& ray) const {
         if (node.isLeaf()) {
             for (uint32_t i = 0; i < node.primCount(); ++i) {
                 uint32_t idx = m_primIndices[node.primOffset() + i];
-                const BVHTriangle& tri = m_tris[idx];
+                const BVHTriTrav& trav = m_trav[idx];
                 float t, u, v;
-                if (tri.isObjectSpace) {
+                if (trav.isObjectSpace()) {
                     // Piecewise-linear lerp of the FORWARD transform across all motion
                     // keys, then invert — lerping inverse matrices directly is wrong
                     // when rotation is present (lerp(A^-1,B^-1) ≠ lerp(A,B)^-1).
-                    const MeshDesc& mesh = m_pool.mesh(tri.meshID);
+                    const MeshDesc& mesh = m_pool.mesh(trav.meshID());
                     Mat4f o2w = mesh.interpolateO2W(ray.time);
                     Mat4f w2o = o2w.inverse();
                     Ray4 ro = makeObjectSpaceRay4(ray, w2o);
                     ro.tMax = closestT;
-                    if (intersectTriangle(tri, ro, t, u, v)) {
+                    if (intersectTriangle(trav, ro, t, u, v)) {
                         closestT = t; hitIdx = idx; hitU = u; hitV = v;
                     }
                 } else {
                     Ray4 rc = r; rc.tMax = closestT;
-                    if (intersectTriangle(tri, rc, t, u, v)) {
+                    if (intersectTriangle(trav, rc, t, u, v)) {
                         closestT = t; hitIdx = idx; hitU = u; hitV = v;
                     }
                 }
@@ -391,13 +389,14 @@ TraceResult BVHBackend::traceImpl(const Ray& ray) const {
     TraceResult result;
     if (hitIdx != ~0u) {
         result.hit = true;
-        const BVHTriangle& tri = m_tris[hitIdx];
-        if (tri.isObjectSpace) {
-            const MeshDesc& mesh = m_pool.mesh(tri.meshID);
+        const BVHTriTrav&   trav   = m_trav[hitIdx];
+        const BVHTriAttrib& attrib = m_attribs[hitIdx];  // cold load — only on hit
+        if (trav.isObjectSpace()) {
+            const MeshDesc& mesh = m_pool.mesh(trav.meshID());
             Mat4f o2w = mesh.interpolateO2W(ray.time);
-            fillSurfaceInteraction(tri, closestT, hitU, hitV, &o2w, result.si);
+            fillSurfaceInteraction(trav, attrib, closestT, hitU, hitV, &o2w, result.si);
         } else {
-            fillSurfaceInteraction(tri, closestT, hitU, hitV, nullptr, result.si);
+            fillSurfaceInteraction(trav, attrib, closestT, hitU, hitV, nullptr, result.si);
         }
     }
     return result;
@@ -424,15 +423,15 @@ bool BVHBackend::occluded(const Ray& ray) const {
         if (node.isLeaf()) {
             for (uint32_t i = 0; i < node.primCount(); ++i) {
                 uint32_t idx = m_primIndices[node.primOffset() + i];
-                const BVHTriangle& tri = m_tris[idx];
-                if (tri.isObjectSpace) {
-                    const MeshDesc& mesh = m_pool.mesh(tri.meshID);
+                const BVHTriTrav& trav = m_trav[idx];
+                if (trav.isObjectSpace()) {
+                    const MeshDesc& mesh = m_pool.mesh(trav.meshID());
                     Mat4f o2w = mesh.interpolateO2W(ray.time);
                     Mat4f w2o = o2w.inverse();
                     Ray4 ro = makeObjectSpaceRay4(ray, w2o);
-                    if (intersectTriangle(tri, ro, t, u, v)) return true;
+                    if (intersectTriangle(trav, ro, t, u, v)) return true;
                 } else {
-                    if (intersectTriangle(tri, r, t, u, v)) return true;
+                    if (intersectTriangle(trav, r, t, u, v)) return true;
                 }
             }
         } else {
