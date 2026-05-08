@@ -57,8 +57,6 @@ public:
     const CurvePool&    curvePool() const          { return m_curvePool; }
 
 private:
-    static bool aabbHit(const float bmin[3], const float bmax[3],
-                        const Ray& ray, float maxT);
 
     BVHBackend             m_triBvh;
     const CurvePool&       m_curvePool;

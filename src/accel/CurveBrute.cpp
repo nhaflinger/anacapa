@@ -24,6 +24,67 @@ namespace anacapa {
 namespace {
 
 // ---------------------------------------------------------------------------
+// SAH constants for curve BVH build
+// ---------------------------------------------------------------------------
+constexpr int   kCurveSAHBuckets   = 12;
+constexpr int   kCurveMaxLeaf      = 4;
+constexpr float kCurveTraversalCost = 1.f;
+constexpr float kCurveIntersectCost = 1.f;
+
+// ---------------------------------------------------------------------------
+// Per-ray traversal state: precomputed invDir to avoid per-node divisions.
+// ---------------------------------------------------------------------------
+struct RayTraversal {
+    float ox, oy, oz;
+    float invDx, invDy, invDz;
+    float tMin;
+
+    static RayTraversal make(const Ray& ray) {
+        auto safe = [](float v) { return std::abs(v) > 1e-9f ? v : 1e-9f; };
+        return { ray.origin.x, ray.origin.y, ray.origin.z,
+                 1.f / safe(ray.direction.x),
+                 1.f / safe(ray.direction.y),
+                 1.f / safe(ray.direction.z),
+                 ray.tMin };
+    }
+};
+
+// Branchless slab test — 3 multiplies, no divisions, no branches.
+static bool aabbHit(const float bmin[3], const float bmax[3],
+                    const RayTraversal& r, float tMax) {
+    float tn = r.tMin, tf = tMax;
+    float t0, t1;
+
+    t0 = (bmin[0] - r.ox) * r.invDx;  t1 = (bmax[0] - r.ox) * r.invDx;
+    tn = std::max(tn, std::min(t0, t1)); tf = std::min(tf, std::max(t0, t1));
+
+    t0 = (bmin[1] - r.oy) * r.invDy;  t1 = (bmax[1] - r.oy) * r.invDy;
+    tn = std::max(tn, std::min(t0, t1)); tf = std::min(tf, std::max(t0, t1));
+
+    t0 = (bmin[2] - r.oz) * r.invDz;  t1 = (bmax[2] - r.oz) * r.invDz;
+    tn = std::max(tn, std::min(t0, t1)); tf = std::min(tf, std::max(t0, t1));
+
+    return tn <= tf;
+}
+
+// ---------------------------------------------------------------------------
+// SAH build helpers
+// ---------------------------------------------------------------------------
+static float boxArea(const float bmin[3], const float bmax[3]) {
+    float d0 = bmax[0]-bmin[0], d1 = bmax[1]-bmin[1], d2 = bmax[2]-bmin[2];
+    if (d0 < 0.f || d1 < 0.f || d2 < 0.f) return 0.f;
+    return 2.f * (d0*d1 + d1*d2 + d2*d0);
+}
+
+static void boxUnion(float bmin[3], float bmax[3],
+                     const float sbmin[3], const float sbmax[3]) {
+    for (int k = 0; k < 3; ++k) {
+        bmin[k] = std::min(bmin[k], sbmin[k]);
+        bmax[k] = std::max(bmax[k], sbmax[k]);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Ray-space frame: ray travels along +Z, origin at (0,0,0).
 // ---------------------------------------------------------------------------
 struct RayFrame {
@@ -181,6 +242,92 @@ static bool subdivide(
 }
 
 // ---------------------------------------------------------------------------
+// subdivideAny — lean occlusion variant: returns true on first hit found.
+// Does NOT compute tangent, normal, or SurfaceInteraction — skips all of
+// that work since shadow rays only need a yes/no answer.
+// ---------------------------------------------------------------------------
+static bool subdivideAny(
+    const RayFrame& frame,
+    Vec3f P0, Vec3f P1, Vec3f P2, Vec3f P3,
+    float halfW0, float halfW3,
+    float ray_tMin, float ray_tMax,
+    int   depth)
+{
+    Vec3f cp0 = frame.project(P0);
+    Vec3f cp1 = frame.project(P1);
+    Vec3f cp2 = frame.project(P2);
+    Vec3f cp3 = frame.project(P3);
+
+    float maxHalfW = std::max(halfW0, halfW3);
+
+    float zMin = std::min({cp0.z, cp1.z, cp2.z, cp3.z});
+    float zMax = std::max({cp0.z, cp1.z, cp2.z, cp3.z});
+    if (zMin - maxHalfW > ray_tMax) return false;
+    if (zMax + maxHalfW < ray_tMin) return false;
+
+    float xMin = std::min({cp0.x, cp1.x, cp2.x, cp3.x});
+    float xMax = std::max({cp0.x, cp1.x, cp2.x, cp3.x});
+    float yMin = std::min({cp0.y, cp1.y, cp2.y, cp3.y});
+    float yMax = std::max({cp0.y, cp1.y, cp2.y, cp3.y});
+    float cx = (0.f < xMin) ? xMin : (0.f > xMax ? xMax : 0.f);
+    float cy = (0.f < yMin) ? yMin : (0.f > yMax ? yMax : 0.f);
+    if (cx*cx + cy*cy > maxHalfW*maxHalfW) return false;
+
+    if (depth == 0) {
+        float ax = cp0.x, ay = cp0.y;
+        float bx = cp3.x, by = cp3.y;
+        float dx = bx - ax, dy = by - ay;
+        float lenSq = dx*dx + dy*dy;
+        float tLine = (lenSq < 1e-12f) ? 0.f
+                    : std::max(0.f, std::min(1.f, (-ax*dx - ay*dy) / lenSq));
+        float px = ax + dx*tLine, py = ay + dy*tLine;
+        float halfW = halfW0*(1.f-tLine) + halfW3*tLine;
+        if (px*px + py*py > halfW*halfW) return false;
+        float tRay = cp0.z + (cp3.z - cp0.z)*tLine;
+        return tRay >= ray_tMin && tRay < ray_tMax;
+    }
+
+    Vec3f L0, L1, L2, L3, R0, R1, R2, R3;
+    bezierSplitMid(P0, P1, P2, P3, L0, L1, L2, L3, R0, R1, R2, R3);
+    float halfWMid = (halfW0 + halfW3) * 0.5f;
+
+    return subdivideAny(frame, L0, L1, L2, L3, halfW0, halfWMid, ray_tMin, ray_tMax, depth-1)
+        || subdivideAny(frame, R0, R1, R2, R3, halfWMid, halfW3, ray_tMin, ray_tMax, depth-1);
+}
+
+// Lean wrapper: one segment, occlusion only.
+static bool intersectOneSegmentAny(
+    const RayFrame&   frame,
+    const Ray&        ray,
+    const StrandDesc& strand,
+    uint32_t          segIdx)
+{
+    const uint32_t N = strand.numSegments();
+    if (segIdx >= N) return false;
+
+    uint32_t base = segIdx * 3;
+    Vec3f P0 = strand.controlPoints[base + 0];
+    Vec3f P1 = strand.controlPoints[base + 1];
+    Vec3f P2 = strand.controlPoints[base + 2];
+    Vec3f P3 = strand.controlPoints[base + 3];
+
+    if (strand.hasMotion()) {
+        float t = ray.time, mt = 1.f - t;
+        P0 = P0*mt + strand.controlPointsClose[base+0]*t;
+        P1 = P1*mt + strand.controlPointsClose[base+1]*t;
+        P2 = P2*mt + strand.controlPointsClose[base+2]*t;
+        P3 = P3*mt + strand.controlPointsClose[base+3]*t;
+    }
+
+    float v0 = float(segIdx)     / float(N);
+    float v3 = float(segIdx + 1) / float(N);
+    return subdivideAny(frame, P0, P1, P2, P3,
+                        strand.widthAt(v0) * 0.5f,
+                        strand.widthAt(v3) * 0.5f,
+                        ray.tMin, ray.tMax, 6);
+}
+
+// ---------------------------------------------------------------------------
 // Intersect one segment (by index) of a strand against a ray.
 // The RayFrame is pre-computed once per ray by the caller.
 // ---------------------------------------------------------------------------
@@ -252,7 +399,7 @@ static bool intersectOneSegment(
 }
 
 // ---------------------------------------------------------------------------
-// BVH build — top-down median-split over curve segment AABBs.
+// BVH build — SAH over curve segment AABBs.
 // ---------------------------------------------------------------------------
 
 struct SegWork {
@@ -261,77 +408,113 @@ struct SegWork {
     float  centroid[3];
 };
 
-// Returns index of the newly created node.
 static uint32_t buildCurveBVH(
     std::vector<SegWork>&   work,
     std::vector<SegRef>&    outRefs,
     std::vector<CurveNode>& nodes,
-    uint32_t start, uint32_t end,
-    uint32_t maxLeaf)
+    uint32_t start, uint32_t end)
 {
-    // Reserve a slot — written by index after recursive calls to stay valid
-    // through any vector reallocations caused by child push_backs.
     uint32_t nodeIdx = (uint32_t)nodes.size();
     nodes.push_back({});
 
-    // Compute node AABB as union of all segment AABBs in [start, end).
+    // Node AABB
     float bmin[3] = {  FLT_MAX,  FLT_MAX,  FLT_MAX };
     float bmax[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
-    for (uint32_t i = start; i < end; ++i) {
-        for (int k = 0; k < 3; ++k) {
-            if (work[i].bmin[k] < bmin[k]) bmin[k] = work[i].bmin[k];
-            if (work[i].bmax[k] > bmax[k]) bmax[k] = work[i].bmax[k];
-        }
-    }
+    for (uint32_t i = start; i < end; ++i)
+        boxUnion(bmin, bmax, work[i].bmin, work[i].bmax);
 
-    uint32_t count = end - start;
+    uint32_t count  = end - start;
+    float    leafCost = kCurveIntersectCost * (float)count;
 
-    if (count <= maxLeaf) {
-        // Leaf: append prims to outRefs.
+    auto makeLeaf = [&]() {
         uint32_t firstPrim = (uint32_t)outRefs.size();
-        for (uint32_t i = start; i < end; ++i)
-            outRefs.push_back(work[i].ref);
-
-        for (int k = 0; k < 3; ++k) {
-            nodes[nodeIdx].bmin[k] = bmin[k];
-            nodes[nodeIdx].bmax[k] = bmax[k];
-        }
+        for (uint32_t i = start; i < end; ++i) outRefs.push_back(work[i].ref);
+        for (int k = 0; k < 3; ++k) { nodes[nodeIdx].bmin[k] = bmin[k]; nodes[nodeIdx].bmax[k] = bmax[k]; }
         nodes[nodeIdx].left_or_prim   = firstPrim;
         nodes[nodeIdx].right_or_count = count | 0x80000000u;
-        return nodeIdx;
-    }
+    };
 
-    // Interior: find longest axis of centroid AABB and split at median.
+    if (count <= (uint32_t)kCurveMaxLeaf) { makeLeaf(); return nodeIdx; }
+
+    // Centroid AABB for bucket placement
     float cmin[3] = {  FLT_MAX,  FLT_MAX,  FLT_MAX };
     float cmax[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
-    for (uint32_t i = start; i < end; ++i) {
+    for (uint32_t i = start; i < end; ++i)
         for (int k = 0; k < 3; ++k) {
-            if (work[i].centroid[k] < cmin[k]) cmin[k] = work[i].centroid[k];
-            if (work[i].centroid[k] > cmax[k]) cmax[k] = work[i].centroid[k];
+            cmin[k] = std::min(cmin[k], work[i].centroid[k]);
+            cmax[k] = std::max(cmax[k], work[i].centroid[k]);
+        }
+
+    float parentSA = boxArea(bmin, bmax);
+    float bestCost = leafCost;
+    int   bestAxis = -1, bestBucket = -1;
+
+    if (parentSA > 1e-12f) {
+        struct Bucket {
+            float bmin[3] = {  FLT_MAX,  FLT_MAX,  FLT_MAX };
+            float bmax[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+            uint32_t count = 0;
+        };
+
+        for (int axis = 0; axis < 3; ++axis) {
+            float range = cmax[axis] - cmin[axis];
+            if (range < 1e-7f) continue;
+
+            Bucket buckets[kCurveSAHBuckets];
+            for (uint32_t i = start; i < end; ++i) {
+                int b = (int)(kCurveSAHBuckets * ((work[i].centroid[axis] - cmin[axis]) / range));
+                b = std::clamp(b, 0, kCurveSAHBuckets - 1);
+                buckets[b].count++;
+                boxUnion(buckets[b].bmin, buckets[b].bmax, work[i].bmin, work[i].bmax);
+            }
+
+            // Prefix scan (left side)
+            float    lbMin[kCurveSAHBuckets-1][3], lbMax[kCurveSAHBuckets-1][3];
+            uint32_t lCount[kCurveSAHBuckets-1];
+            {
+                float lb[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+                float ub[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+                uint32_t lc = 0;
+                for (int i = 0; i < kCurveSAHBuckets - 1; ++i) {
+                    boxUnion(lb, ub, buckets[i].bmin, buckets[i].bmax);
+                    lc += buckets[i].count;
+                    for (int k = 0; k < 3; ++k) { lbMin[i][k] = lb[k]; lbMax[i][k] = ub[k]; }
+                    lCount[i] = lc;
+                }
+            }
+
+            // Suffix scan + evaluate cost
+            float    rb[3] = {  FLT_MAX,  FLT_MAX,  FLT_MAX };
+            float    ru[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+            uint32_t rc = 0;
+            for (int i = kCurveSAHBuckets - 2; i >= 0; --i) {
+                boxUnion(rb, ru, buckets[i+1].bmin, buckets[i+1].bmax);
+                rc += buckets[i+1].count;
+                if (lCount[i] == 0 || rc == 0) continue;
+                float cost = kCurveTraversalCost +
+                    kCurveIntersectCost * (boxArea(lbMin[i], lbMax[i]) * lCount[i]
+                                         + boxArea(rb, ru)              * rc) / parentSA;
+                if (cost < bestCost) { bestCost = cost; bestAxis = axis; bestBucket = i; }
+            }
         }
     }
-    int axis = 0;
-    float ext[3] = { cmax[0]-cmin[0], cmax[1]-cmin[1], cmax[2]-cmin[2] };
-    if (ext[1] > ext[0])    axis = 1;
-    if (ext[2] > ext[axis]) axis = 2;
 
-    uint32_t mid = (start + end) / 2;
-    std::nth_element(
-        work.begin() + start,
-        work.begin() + mid,
-        work.begin() + end,
-        [axis](const SegWork& a, const SegWork& b) {
-            return a.centroid[axis] < b.centroid[axis];
+    if (bestAxis < 0) { makeLeaf(); return nodeIdx; }
+
+    float range = cmax[bestAxis] - cmin[bestAxis];
+    auto midIt = std::partition(
+        work.begin() + start, work.begin() + end,
+        [&](const SegWork& sw) {
+            int b = (int)(kCurveSAHBuckets * ((sw.centroid[bestAxis] - cmin[bestAxis]) / range));
+            return std::clamp(b, 0, kCurveSAHBuckets-1) <= bestBucket;
         });
+    uint32_t mid = (uint32_t)(midIt - work.begin());
+    if (mid == start || mid == end) mid = (start + end) / 2;
 
-    uint32_t leftIdx  = buildCurveBVH(work, outRefs, nodes, start, mid, maxLeaf);
-    uint32_t rightIdx = buildCurveBVH(work, outRefs, nodes, mid,   end, maxLeaf);
+    uint32_t leftIdx  = buildCurveBVH(work, outRefs, nodes, start, mid);
+    uint32_t rightIdx = buildCurveBVH(work, outRefs, nodes, mid,   end);
 
-    // Write interior node — safe to index now that all push_backs are done.
-    for (int k = 0; k < 3; ++k) {
-        nodes[nodeIdx].bmin[k] = bmin[k];
-        nodes[nodeIdx].bmax[k] = bmax[k];
-    }
+    for (int k = 0; k < 3; ++k) { nodes[nodeIdx].bmin[k] = bmin[k]; nodes[nodeIdx].bmax[k] = bmax[k]; }
     nodes[nodeIdx].left_or_prim   = leftIdx;
     nodes[nodeIdx].right_or_count = rightIdx;
     return nodeIdx;
@@ -424,13 +607,11 @@ void CurveBrute::commit() {
 
     if (work.empty()) return;
 
-    constexpr uint32_t MAX_LEAF = 4;
-    // Upper bound on node count: 2 * num_leaves, leaves ≈ work.size() / MAX_LEAF.
-    uint32_t estLeaves = ((uint32_t)work.size() + MAX_LEAF - 1) / MAX_LEAF;
+    uint32_t estLeaves = ((uint32_t)work.size() + kCurveMaxLeaf - 1) / kCurveMaxLeaf;
     m_curveNodes.reserve(2 * estLeaves + 4);
     m_segRefs.reserve(work.size());
 
-    buildCurveBVH(work, m_segRefs, m_curveNodes, 0, (uint32_t)work.size(), MAX_LEAF);
+    buildCurveBVH(work, m_segRefs, m_curveNodes, 0, (uint32_t)work.size());
 
     spdlog::info("CurveBVH: {} strands, {} segments → {} nodes",
                  S, work.size(), m_curveNodes.size());
@@ -443,19 +624,17 @@ TraceResult CurveBrute::trace(const Ray& ray) const {
 
     if (m_curveNodes.empty()) return result;
 
-    // Build ray-space frame once for all segment tests.
-    RayFrame frame = makeRayFrame(ray);
+    RayFrame      frame = makeRayFrame(ray);
+    RayTraversal  rt    = RayTraversal::make(ray);
 
-    // Iterative BVH traversal with explicit stack.
-    // Stack depth: BVH height ≈ log2(totalSegs / MAX_LEAF) — 64 is ample.
     uint32_t stack[64];
     int top = 0;
-    stack[top++] = 0;  // root
+    stack[top++] = 0;
 
     while (top > 0) {
         const CurveNode& node = m_curveNodes[stack[--top]];
 
-        if (!aabbHit(node.bmin, node.bmax, ray, bestT)) continue;
+        if (!aabbHit(node.bmin, node.bmax, rt, bestT)) continue;
 
         if (node.isLeaf()) {
             uint32_t end = node.left_or_prim + node.primCount();
@@ -485,7 +664,8 @@ bool CurveBrute::occluded(const Ray& ray) const {
     if (m_triBvh.occluded(ray)) return true;
     if (m_curveNodes.empty()) return false;
 
-    RayFrame frame = makeRayFrame(ray);
+    RayFrame     frame = makeRayFrame(ray);
+    RayTraversal rt    = RayTraversal::make(ray);
 
     uint32_t stack[64];
     int top = 0;
@@ -494,20 +674,16 @@ bool CurveBrute::occluded(const Ray& ray) const {
     while (top > 0) {
         const CurveNode& node = m_curveNodes[stack[--top]];
 
-        // For occlusion the tMax bound doesn't shrink, so pass ray.tMax.
-        if (!aabbHit(node.bmin, node.bmax, ray, ray.tMax)) continue;
+        if (!aabbHit(node.bmin, node.bmax, rt, ray.tMax)) continue;
 
         if (node.isLeaf()) {
             uint32_t end = node.left_or_prim + node.primCount();
             for (uint32_t i = node.left_or_prim; i < end; ++i) {
                 const SegRef& r = m_segRefs[i];
-                if (r.strandIdx == ray.skipStrandID) continue;  // self-intersection avoidance
-                float t = ray.tMax;
-                SurfaceInteraction dummy;
-                if (intersectOneSegment(frame, ray,
-                                        m_curvePool.strand(r.strandIdx),
-                                        r.segIdx, r.strandIdx,
-                                        t, dummy))
+                if (r.strandIdx == ray.skipStrandID) continue;
+                if (intersectOneSegmentAny(frame, ray,
+                                           m_curvePool.strand(r.strandIdx),
+                                           r.segIdx))
                     return true;
             }
         } else {
@@ -518,26 +694,5 @@ bool CurveBrute::occluded(const Ray& ray) const {
     return false;
 }
 
-bool CurveBrute::aabbHit(const float bmin[3], const float bmax[3],
-                          const Ray& ray, float maxT) {
-    float tMin = ray.tMin;
-    float tMax = maxT;
-
-    for (int i = 0; i < 3; ++i) {
-        float d = ray.direction[i];
-        if (std::abs(d) < 1e-9f) {
-            if (ray.origin[i] < bmin[i] || ray.origin[i] > bmax[i]) return false;
-            continue;
-        }
-        float invD = 1.f / d;
-        float t0 = (bmin[i] - ray.origin[i]) * invD;
-        float t1 = (bmax[i] - ray.origin[i]) * invD;
-        if (invD < 0.f) std::swap(t0, t1);
-        tMin = std::max(tMin, t0);
-        tMax = std::min(tMax, t1);
-        if (tMax < tMin) return false;
-    }
-    return true;
-}
 
 }  // namespace anacapa
