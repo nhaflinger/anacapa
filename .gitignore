@@ -11,6 +11,7 @@ out.png
 scenes/*
 !scenes/cornell_box.usda
 !scenes/cornell_box_motion.usda
+!scenes/cornell_box_glass_sphere.usda
 
 # macOS
 .DS_Store
