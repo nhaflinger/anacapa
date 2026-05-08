@@ -203,6 +203,16 @@ static bool intersectOneSegment(
     Vec3f P2 = strand.controlPoints[base + 2];
     Vec3f P3 = strand.controlPoints[base + 3];
 
+    // Interpolate control points at ray time for motion blur.
+    if (strand.hasMotion()) {
+        float t  = ray.time;
+        float mt = 1.f - t;
+        P0 = P0 * mt + strand.controlPointsClose[base + 0] * t;
+        P1 = P1 * mt + strand.controlPointsClose[base + 1] * t;
+        P2 = P2 * mt + strand.controlPointsClose[base + 2] * t;
+        P3 = P3 * mt + strand.controlPointsClose[base + 3] * t;
+    }
+
     float v0     = float(segIdx)     / float(N);
     float v3     = float(segIdx + 1) / float(N);
     float halfW0 = strand.widthAt(v0) * 0.5f;
@@ -358,6 +368,8 @@ void CurveBrute::commit() {
         const StrandDesc& strand = m_curvePool.strand(si);
         const uint32_t    N     = strand.numSegments();
 
+        const bool strandHasMotion = strand.hasMotion();
+
         for (uint32_t seg = 0; seg < N; ++seg) {
             uint32_t base = seg * 3;
             const Vec3f& P0 = strand.controlPoints[base + 0];
@@ -374,12 +386,33 @@ void CurveBrute::commit() {
             sw.ref = { si, seg };
 
             // Conservative AABB: convex hull of CVs ± tube radius.
-            sw.bmin[0] = std::min({P0.x, P1.x, P2.x, P3.x}) - maxHalfW;
-            sw.bmin[1] = std::min({P0.y, P1.y, P2.y, P3.y}) - maxHalfW;
-            sw.bmin[2] = std::min({P0.z, P1.z, P2.z, P3.z}) - maxHalfW;
-            sw.bmax[0] = std::max({P0.x, P1.x, P2.x, P3.x}) + maxHalfW;
-            sw.bmax[1] = std::max({P0.y, P1.y, P2.y, P3.y}) + maxHalfW;
-            sw.bmax[2] = std::max({P0.z, P1.z, P2.z, P3.z}) + maxHalfW;
+            // For motion blur, union open and close CV positions.
+            float xMin = std::min({P0.x, P1.x, P2.x, P3.x});
+            float xMax = std::max({P0.x, P1.x, P2.x, P3.x});
+            float yMin = std::min({P0.y, P1.y, P2.y, P3.y});
+            float yMax = std::max({P0.y, P1.y, P2.y, P3.y});
+            float zMin = std::min({P0.z, P1.z, P2.z, P3.z});
+            float zMax = std::max({P0.z, P1.z, P2.z, P3.z});
+
+            if (strandHasMotion) {
+                const Vec3f& C0 = strand.controlPointsClose[base + 0];
+                const Vec3f& C1 = strand.controlPointsClose[base + 1];
+                const Vec3f& C2 = strand.controlPointsClose[base + 2];
+                const Vec3f& C3 = strand.controlPointsClose[base + 3];
+                xMin = std::min({xMin, C0.x, C1.x, C2.x, C3.x});
+                xMax = std::max({xMax, C0.x, C1.x, C2.x, C3.x});
+                yMin = std::min({yMin, C0.y, C1.y, C2.y, C3.y});
+                yMax = std::max({yMax, C0.y, C1.y, C2.y, C3.y});
+                zMin = std::min({zMin, C0.z, C1.z, C2.z, C3.z});
+                zMax = std::max({zMax, C0.z, C1.z, C2.z, C3.z});
+            }
+
+            sw.bmin[0] = xMin - maxHalfW;
+            sw.bmin[1] = yMin - maxHalfW;
+            sw.bmin[2] = zMin - maxHalfW;
+            sw.bmax[0] = xMax + maxHalfW;
+            sw.bmax[1] = yMax + maxHalfW;
+            sw.bmax[2] = zMax + maxHalfW;
 
             sw.centroid[0] = (sw.bmin[0] + sw.bmax[0]) * 0.5f;
             sw.centroid[1] = (sw.bmin[1] + sw.bmax[1]) * 0.5f;

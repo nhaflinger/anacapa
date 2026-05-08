@@ -237,6 +237,7 @@ void RenderSession::appendAlembicCurves_() {
     // default MarschnerHairMaterial created by loadAlembicCurves is pushed at
     // this position after the load.
     opts.baseMaterialIndex = static_cast<uint32_t>(m_scene.materials.size());
+    opts.motionBlur        = (m_settings.shutterClose > m_settings.shutterOpen);
 
     const size_t matsBefore = m_materials.size();
 

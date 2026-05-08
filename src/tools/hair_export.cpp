@@ -101,13 +101,21 @@ struct StrandData {
 };
 
 // ---------------------------------------------------------------------------
-// writeOCurves — write one OCurves object for a slice of StrandData
+// writeOCurves — write one OCurves object for a slice of StrandData.
+//
+// When closePoints is non-null, writes a two-sample Alembic archive entry:
+//   sample 0 = shutter open (data.points)
+//   sample 1 = shutter close (*closePoints)
+// The tsIdx argument must be the time-sampling index registered on the archive;
+// pass 0 for single-sample (static) output.
 // ---------------------------------------------------------------------------
 static void writeOCurves(OObject& parent,
                           const std::string& name,
                           const StrandData& data,
                           uint32_t strandStart,
-                          uint32_t strandCount) {
+                          uint32_t strandCount,
+                          const std::vector<Imath::V3f>* closePoints = nullptr,
+                          uint32_t tsIdx = 0) {
     if (strandCount == 0) return;
 
     // Build point and width slices from the global arrays.
@@ -125,7 +133,7 @@ static void writeOCurves(OObject& parent,
     const float*      wids   = data.widths.data() + cvStart;
     const int32_t*    cnts   = data.counts.data() + strandStart;
 
-    OCurves        curves(parent, name);
+    OCurves        curves(parent, name, tsIdx);
     OCurvesSchema& schema = curves.getSchema();
 
     OFloatGeomParam::Sample widthSamp(
@@ -142,7 +150,7 @@ static void writeOCurves(OObject& parent,
     );
     schema.set(sample);
 
-    // Per-strand color (AHAIR002+)
+    // Per-strand color (AHAIR002+) — written once; constant across time samples.
     if (!data.colors.empty()) {
         const Imath::C3f* cols = data.colors.data() + strandStart;
         OC3fGeomParam colorParam(schema.getArbGeomParams(),
@@ -154,7 +162,8 @@ static void writeOCurves(OObject& parent,
         colorParam.set(colorSamp);
     }
 
-    // Per-strand root UV (AHAIR003) — UV on emitter mesh where strand was grown
+    // Per-strand root UV (AHAIR003) — UV on emitter mesh where strand was grown.
+    // Written once; constant across time samples.
     if (!data.rootUVs.empty()) {
         const Imath::V2f* uvs = data.rootUVs.data() + strandStart;
         OV2fGeomParam uvParam(schema.getArbGeomParams(),
@@ -165,6 +174,66 @@ static void writeOCurves(OObject& parent,
         );
         uvParam.set(uvSamp);
     }
+
+    // Write shutter-close sample (sample index 1).
+    if (closePoints) {
+        const Imath::V3f* closePts = closePoints->data() + cvStart;
+        OCurvesSchema::Sample closeSample(
+            P3fArraySample(closePts, cvCount),
+            Int32ArraySample(cnts, strandCount),
+            kLinear,
+            kNonPeriodic
+        );
+        schema.set(closeSample);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Read only the CV positions from a .hairbin file (any AHAIR version).
+// Used for the shutter-close sample.  Returns false on error.
+// ---------------------------------------------------------------------------
+static bool readHairbinPositions(const std::string& path,
+                                  std::vector<Imath::V3f>& outPts,
+                                  std::vector<int32_t>&    outCounts) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) { fprintf(stderr, "hair_export: cannot open close file '%s'\n", path.c_str()); return false; }
+
+    char magic[8];
+    if (fread(magic, 1, 8, f) != 8) { fclose(f); return false; }
+    bool hasColor  = (memcmp(magic, "AHAIR002", 8) == 0 || memcmp(magic, "AHAIR003", 8) == 0);
+    bool hasRootUV = (memcmp(magic, "AHAIR003", 8) == 0);
+    if (memcmp(magic, "AHAIR001", 8) != 0 && !hasColor) {
+        fprintf(stderr, "hair_export: invalid magic in close file '%s'\n", path.c_str());
+        fclose(f); return false;
+    }
+
+    uint32_t numStrands;
+    if (!readLE32(f, numStrands)) { fclose(f); return false; }
+
+    outPts.clear();
+    outCounts.clear();
+    outPts.reserve(numStrands * 32);
+    outCounts.reserve(numStrands);
+
+    for (uint32_t si = 0; si < numStrands; ++si) {
+        uint32_t n;
+        if (!readLE32(f, n)) { fclose(f); return false; }
+        outCounts.push_back(static_cast<int32_t>(n));
+
+        // Skip color / root UV header fields
+        if (hasColor)  { float tmp[3]; if (fread(tmp, 4, 3, f) != 3) { fclose(f); return false; } }
+        if (hasRootUV) { float tmp[2]; if (fread(tmp, 4, 2, f) != 2) { fclose(f); return false; } }
+
+        for (uint32_t pi = 0; pi < n; ++pi) {
+            float x, y, z, r;
+            if (!readF32(f, x) || !readF32(f, y) || !readF32(f, z) || !readF32(f, r)) {
+                fclose(f); return false;
+            }
+            outPts.push_back({x, y, z});
+        }
+    }
+    fclose(f);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -173,14 +242,18 @@ static void writeOCurves(OObject& parent,
 int main(int argc, char* argv[]) {
     if (argc < 3) {
         fprintf(stderr,
-            "Usage: hair_export <input.hairbin> <output.abc> [--objects <counts.json>]\n");
+            "Usage: hair_export <input.hairbin> <output.abc> [--objects <counts.json>] [--close <close.hairbin>]\n");
         return 1;
     }
 
     std::string objectsJsonPath;
+    std::string closeHairbinPath;
     for (int i = 3; i < argc - 1; ++i) {
         if (std::string(argv[i]) == "--objects") {
             objectsJsonPath = argv[i + 1];
+            ++i;
+        } else if (std::string(argv[i]) == "--close") {
+            closeHairbinPath = argv[i + 1];
             ++i;
         }
     }
@@ -295,22 +368,56 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ---- load close sample (optional) ----
+    std::vector<Imath::V3f> closePts;
+    std::vector<int32_t>    closeCounts;
+    bool haveClose = false;
+
+    if (!closeHairbinPath.empty()) {
+        if (readHairbinPositions(closeHairbinPath, closePts, closeCounts)) {
+            if (closePts.size() != sd.points.size() ||
+                closeCounts.size() != sd.counts.size()) {
+                fprintf(stderr,
+                    "hair_export: close file strand count mismatch "
+                    "(open=%zu close=%zu) — ignoring --close\n",
+                    sd.counts.size(), closeCounts.size());
+            } else {
+                haveClose = true;
+            }
+        }
+    }
+
     // ---- write Alembic ----
     OArchive archive(Alembic::AbcCoreOgawa::WriteArchive(), argv[2]);
+
+    // When writing two time samples, register a uniform time sampling
+    // (sample 0 at t=0, sample 1 at t=1).  The renderer loads by sample index
+    // so the absolute times don't matter — they just need to be distinct.
+    uint32_t tsIdx = 0;
+    if (haveClose) {
+        Abc::TimeSamplingPtr tsp =
+            std::make_shared<Abc::TimeSampling>(1.0, 0.0);  // period=1, startTime=0
+        tsIdx = archive.addTimeSampling(*tsp);
+    }
+
     OObject  top(archive, kTop);
+    const std::vector<Imath::V3f>* closeArg = haveClose ? &closePts : nullptr;
 
     if (objects.empty()) {
         // No per-object info — write everything as one "hair_curves" node.
         writeOCurves(top, "hair_curves", sd, 0,
-                     static_cast<uint32_t>(sd.counts.size()));
-        printf("[hair_export] %u strands, %zu CVs%s%s → %s (single object)\n",
+                     static_cast<uint32_t>(sd.counts.size()),
+                     closeArg, tsIdx);
+        printf("[hair_export] %u strands, %zu CVs%s%s%s → %s (single object)\n",
                numStrands, sd.points.size(),
-               hasColor  ? " (with color)" : "",
-               hasRootUV ? " (with root UV)" : "", argv[2]);
+               hasColor   ? " (with color)" : "",
+               hasRootUV  ? " (with root UV)" : "",
+               haveClose  ? " (motion blur)" : "", argv[2]);
     } else {
         uint32_t runningStrand = 0;
         for (const auto& obj : objects) {
-            writeOCurves(top, obj.name, sd, runningStrand, obj.count);
+            writeOCurves(top, obj.name, sd, runningStrand, obj.count,
+                         closeArg, tsIdx);
             printf("[hair_export] '%s': %u strands\n", obj.name.c_str(), obj.count);
             runningStrand += obj.count;
         }
@@ -319,10 +426,11 @@ int main(int argc, char* argv[]) {
                 "hair_export: warning: object counts sum to %u but binary has %u strands\n",
                 runningStrand, numStrands);
         }
-        printf("[hair_export] %u strands, %zu CVs%s%s → %s (%zu objects)\n",
+        printf("[hair_export] %u strands, %zu CVs%s%s%s → %s (%zu objects)\n",
                numStrands, sd.points.size(),
-               hasColor  ? " (with color)" : "",
-               hasRootUV ? " (with root UV)" : "", argv[2], objects.size());
+               hasColor   ? " (with color)" : "",
+               hasRootUV  ? " (with root UV)" : "",
+               haveClose  ? " (motion blur)" : "", argv[2], objects.size());
     }
 
     return 0;

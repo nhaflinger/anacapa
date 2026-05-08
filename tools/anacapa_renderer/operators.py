@@ -71,8 +71,22 @@ class ANACAPA_OT_render(bpy.types.Operator):
             frame    = context.scene.frame_current
             abc_path = os.path.join(cache_dir, f"hair.{frame:04d}.abc")
             self.report({'INFO'}, f"Exporting {len(hair_objs)} hair object(s) to Alembic…")
+            # Compute shutter interval for hair motion blur (same as renderer cmd).
+            _s_open, _s_close = 0.0, 0.0
+            if getattr(settings, 'use_motion_blur', False):
+                _shutter  = getattr(settings, 'motion_blur_shutter', 0.5)
+                _position = getattr(settings, 'motion_blur_position', 'CENTER')
+                if _shutter > 0:
+                    if _position == 'START':
+                        _s_open, _s_close = 0.0, _shutter
+                    elif _position == 'END':
+                        _s_open, _s_close = -_shutter, 0.0
+                    else:
+                        _s_open, _s_close = -_shutter / 2.0, _shutter / 2.0
             try:
-                matassign_paths = export_mod.export_hair_abc(abc_path, context)
+                matassign_paths = export_mod.export_hair_abc(
+                    abc_path, context,
+                    shutter_open=_s_open, shutter_close=_s_close)
             except Exception as e:
                 self.report({'WARNING'}, f"Hair export failed: {e}")
                 abc_path = None
@@ -352,8 +366,21 @@ class ANACAPA_OT_export_scene(bpy.types.Operator):
             else:
                 abc_path = os.path.splitext(usd_path)[0] + f"_hair.{frame:04d}.abc"
             self.report({'INFO'}, f"Exporting {len(hair_objs)} hair object(s)…")
+            _s_open, _s_close = 0.0, 0.0
+            if getattr(settings, 'use_motion_blur', False):
+                _shutter  = getattr(settings, 'motion_blur_shutter', 0.5)
+                _position = getattr(settings, 'motion_blur_position', 'CENTER')
+                if _shutter > 0:
+                    if _position == 'START':
+                        _s_open, _s_close = 0.0, _shutter
+                    elif _position == 'END':
+                        _s_open, _s_close = -_shutter, 0.0
+                    else:
+                        _s_open, _s_close = -_shutter / 2.0, _shutter / 2.0
             try:
-                matassign_paths = export_mod.export_hair_abc(abc_path, context)
+                matassign_paths = export_mod.export_hair_abc(
+                    abc_path, context,
+                    shutter_open=_s_open, shutter_close=_s_close)
             except Exception as e:
                 self.report({'WARNING'}, f"Hair export failed: {e}")
                 abc_path = None

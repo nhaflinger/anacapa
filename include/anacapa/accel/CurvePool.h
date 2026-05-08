@@ -26,14 +26,15 @@ namespace anacapa {
 // ---------------------------------------------------------------------------
 struct StrandDesc {
     std::string            name;
-    std::vector<Vec3f>     controlPoints;  // cubic Bézier CVs
-    std::vector<float>     widths;         // per-CV diameter
-    std::vector<MotionKey> motionKeys;     // empty = static
+    std::vector<Vec3f>     controlPoints;      // cubic Bézier CVs at shutter open
+    std::vector<Vec3f>     controlPointsClose; // CVs at shutter close; empty = static
+    std::vector<float>     widths;             // per-CV diameter
+    std::vector<MotionKey> motionKeys;         // unused for hair; reserved
     uint32_t               materialIndex = 0;
     Vec3f                  color   = {1.f, 1.f, 1.f};  // per-strand RGB (linear); white = use material default
     Vec2f                  rootUV  = {0.f, 0.f};        // UV on emitter mesh where strand was grown
 
-    bool     hasMotion()   const { return !motionKeys.empty(); }
+    bool     hasMotion()   const { return !controlPointsClose.empty(); }
 
     // Number of cubic Bézier segments in this strand.
     uint32_t numSegments() const {

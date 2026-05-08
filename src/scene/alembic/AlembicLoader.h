@@ -17,6 +17,9 @@ struct AlembicCurveOptions {
     // the owning scene's materials array.  All strands receive this index
     // (one MarschnerHairMaterial is created per loadAlembicCurves call).
     uint32_t baseMaterialIndex = 0;
+    // When true, load sample 0 as shutter-open CVs and sample 1 (if present)
+    // as shutter-close CVs, storing them in StrandDesc::controlPointsClose.
+    bool     motionBlur    = false;
 };
 
 // ---------------------------------------------------------------------------

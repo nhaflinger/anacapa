@@ -166,7 +166,7 @@ static void processICurves(const Alembic::AbcGeom::ICurves&  curvesObj,
     if (!schema.getNumSamples()) return;
 
     ICurvesSchema::Sample samp;
-    schema.get(samp);
+    schema.get(samp, ISampleSelector(Alembic::Abc::index_t(0)));
 
     auto positions = samp.getPositions();
     auto counts    = samp.getCurvesNumVertices();
@@ -174,6 +174,22 @@ static void processICurves(const Alembic::AbcGeom::ICurves&  curvesObj,
 
     const CurveType basisType = samp.getType();   // kLinear | kCubic
     const BasisType basis     = samp.getBasis();  // kBezierBasis | kBsplineBasis | …
+
+    // Load close positions for motion blur (sample index 1)
+    bool hasClose = opts.motionBlur && schema.getNumSamples() >= 2;
+    spdlog::info("AlembicLoader: '{}' — {} time sample(s), motionBlur={}, hasClose={}",
+                 curvesObj.getFullName(), schema.getNumSamples(),
+                 opts.motionBlur, hasClose);
+    ICurvesSchema::Sample closeSamp;
+    if (hasClose) {
+        schema.get(closeSamp, ISampleSelector(Alembic::Abc::index_t(1)));
+        auto closePts = closeSamp.getPositions();
+        if (!closePts || closePts->size() != positions->size()) {
+            spdlog::warn("AlembicLoader: close sample size mismatch in '{}' — disabling motion blur",
+                         curvesObj.getFullName());
+            hasClose = false;
+        }
+    }
 
     // ---- widths ----
     // Determine per-vertex widths by checking array size vs total CVs.
@@ -265,12 +281,16 @@ static void processICurves(const Alembic::AbcGeom::ICurves&  curvesObj,
     const uint32_t poolOffsetBefore = static_cast<uint32_t>(pool.numStrands());
 
     // ---- iterate curves ----
-    const Imath::V3f* pts      = positions->get();
+    const Imath::V3f* pts       = positions->get();
+    const Imath::V3f* closePts  = hasClose ? closeSamp.getPositions()->get() : nullptr;
     const int32_t*    nVertsArr = counts->get();
     size_t cvOffset = 0;
 
     size_t strandsAdded = 0;
     size_t strandsSkipped = 0;
+
+    // Dummy widths reused for close-sample basis conversion (widths don't change).
+    static const std::vector<float> kDummyWidths1 = {1.f};
 
     for (size_t ci = 0; ci < numCurves; ++ci) {
         int32_t nv = nVertsArr[ci];
@@ -290,7 +310,7 @@ static void processICurves(const Alembic::AbcGeom::ICurves&  curvesObj,
                              allWidths.begin() + cvOffset + nv);
         }
 
-        // Convert to endpoint-sharing cubic Bézier
+        // Convert open sample to endpoint-sharing cubic Bézier
         std::vector<Vec3f> bezCVs;
         std::vector<float> bezWidths;
 
@@ -320,10 +340,34 @@ static void processICurves(const Alembic::AbcGeom::ICurves&  curvesObj,
 
         if (bezCVs.size() < 4) { cvOffset += nv; ++strandsSkipped; continue; }
 
+        // Convert close sample to Bézier (positions only; widths are constant)
+        std::vector<Vec3f> bezCVsClose;
+        if (hasClose) {
+            std::vector<Vec3f> rawClose(nv);
+            for (int32_t i = 0; i < nv; ++i) {
+                const auto& p = closePts[cvOffset + i];
+                rawClose[i] = xform.transformPoint({p.x, p.y, p.z});
+            }
+            std::vector<float> dummyW(nv, 1.f);
+            std::vector<float> dummyBW;
+            if (basisType == kLinear) {
+                linearToBezier(rawClose, dummyW, bezCVsClose, dummyBW);
+            } else if (basis == kBezierBasis) {
+                bezCVsClose = rawClose;
+            } else if (basis == kBsplineBasis) {
+                bsplineToBezier(rawClose, dummyW, bezCVsClose, dummyBW);
+            } else if (basis == kCatmullromBasis) {
+                catmullromToBezier(rawClose, dummyW, bezCVsClose, dummyBW);
+            }
+            if (bezCVsClose.size() != bezCVs.size())
+                bezCVsClose.clear();  // mismatch — fall back to static
+        }
+
         StrandDesc strand;
-        strand.controlPoints  = std::move(bezCVs);
-        strand.widths         = std::move(bezWidths);
-        strand.materialIndex  = opts.baseMaterialIndex;
+        strand.controlPoints      = std::move(bezCVs);
+        strand.controlPointsClose = std::move(bezCVsClose);
+        strand.widths             = std::move(bezWidths);
+        strand.materialIndex      = opts.baseMaterialIndex;
         if (!strandColors.empty())
             strand.color = strandColors[ci];
         if (!strandRootUVs.empty())

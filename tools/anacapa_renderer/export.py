@@ -180,9 +180,21 @@ def get_hair_objects(context):
     return objs
 
 
-def export_hair_abc(abc_path, context):
+def _frame_subframe(total):
+    """Split a fractional frame number into (int_frame, subframe) for frame_set."""
+    import math
+    int_frame = int(math.floor(total))
+    sub = total - int_frame
+    return int_frame, sub
+
+
+def export_hair_abc(abc_path, context, shutter_open=0.0, shutter_close=0.0):
     """
     Export all visible hair/curve objects to an Alembic file.
+
+    When shutter_close > shutter_open (motion blur enabled), exports a second
+    hair snapshot at frame + shutter_close and passes it to hair_export as
+    --close, producing a 2-sample Alembic file for velocity motion blur.
 
     Blender 5.1 crashes (SIGSEGV) on any in-process access to hair-nodes
     Curves data — including obj.data.attributes, alembic_export, and
@@ -200,12 +212,16 @@ def export_hair_abc(abc_path, context):
     import subprocess
 
     s = _state()
+    s.setdefault("cached_shutter_close", None)
 
-    # Invalidate hair cache when the frame changes.
+    # Invalidate hair cache when the frame or shutter settings change.
     frame = context.scene.frame_current
     if s["cached_frame"] != frame:
         s["dirty_hair"]   = True
         s["cached_frame"] = frame
+    if s["cached_shutter_close"] != shutter_close:
+        s["dirty_hair"]           = True
+        s["cached_shutter_close"] = shutter_close
 
     cached = s["cached_abc_path"]
     if not s["dirty_hair"] and cached and os.path.exists(cached):
@@ -247,6 +263,11 @@ def export_hair_abc(abc_path, context):
     counts_path = abc_path.replace(".abc", "_counts.json")
     eval_py  = abc_path.replace(".abc", "_eval.py")
     guide_py = abc_path.replace(".abc", "_guide.py")
+
+    do_motion_blur = shutter_close > shutter_open
+    close_bin_path = abc_path.replace(".abc", ".close.hairbin")
+    close_eval_py  = abc_path.replace(".abc", "_close_eval.py")
+    close_guide_py = abc_path.replace(".abc", "_close_guide.py")
 
     # Shared strand-writing body used by both helpers (template, no depsgraph line)
     # Format: AHAIR003 — per strand: num_points u32, r g b f32×3, u v f32×2, then n*(x y z radius f32×4)
@@ -585,7 +606,122 @@ sys.exit(0 if total_strands > 0 else 2)
                 return None
 
         # ------------------------------------------------------------------
-        # 2c. Write persistent .matassign.json alongside the ABC.
+        # 2c. Export close-frame hair for motion blur (shutter_close sample).
+        #     Reuses the same helper approach as the open sample.
+        # ------------------------------------------------------------------
+        if do_motion_blur:
+            close_total = frame + shutter_close
+            cf_int, cf_sub = _frame_subframe(close_total)
+
+            close_helper_eval = f"""\
+import bpy, struct, sys
+from mathutils import Vector
+
+hair_names = {hair_names!r}
+bin_path   = {close_bin_path!r}
+frame      = {cf_int!r}
+subframe   = {cf_sub!r}
+
+bpy.context.scene.frame_set(frame, subframe=subframe)
+depsgraph = bpy.context.evaluated_depsgraph_get()
+
+total_strands = 0
+strand_counts = {{}}
+with open(bin_path, "wb") as fh:
+    fh.write(b"AHAIR003")
+    count_offset = fh.tell()
+    fh.write(b"\\x00\\x00\\x00\\x00")
+
+    for name in hair_names:
+        obj_orig = bpy.data.objects.get(name)
+        if obj_orig is None or obj_orig.type != "CURVES":
+            continue
+        obj              = obj_orig.evaluated_get(depsgraph)
+        curves_data      = obj.data
+        mw               = obj.matrix_world
+        num_curves       = len(curves_data.curves)
+        num_points_total = len(curves_data.points)
+        if num_curves == 0 or num_points_total == 0:
+            continue
+{_STRAND_BODY}
+    fh.seek(count_offset)
+    fh.write(struct.pack("<I", total_strands))
+
+print(f"[hair_close_eval] {{total_strands}} strand(s) written to {{bin_path}}")
+sys.exit(0 if total_strands > 0 else 2)
+"""
+
+            close_helper_guide = f"""\
+import bpy, struct, sys
+from mathutils import Vector
+
+hair_names = {hair_names!r}
+bin_path   = {close_bin_path!r}
+frame      = {cf_int!r}
+subframe   = {cf_sub!r}
+
+bpy.context.scene.frame_set(frame, subframe=subframe)
+depsgraph = bpy.context.evaluated_depsgraph_get()
+
+total_strands = 0
+strand_counts = {{}}
+with open(bin_path, "wb") as fh:
+    fh.write(b"AHAIR003")
+    count_offset = fh.tell()
+    fh.write(b"\\x00\\x00\\x00\\x00")
+
+    for name in hair_names:
+        obj = bpy.data.objects.get(name)
+        if obj is None or obj.type != "CURVES":
+            continue
+        try:
+            mw = obj.evaluated_get(depsgraph).matrix_world
+        except Exception:
+            mw = obj.matrix_world
+        curves_data      = obj.data
+        num_curves       = len(curves_data.curves)
+        num_points_total = len(curves_data.points)
+        if num_curves == 0 or num_points_total == 0:
+            continue
+{_STRAND_BODY}
+    fh.seek(count_offset)
+    fh.write(struct.pack("<I", total_strands))
+
+print(f"[hair_close_guide] {{total_strands}} strand(s) written to {{bin_path}}")
+sys.exit(0 if total_strands > 0 else 2)
+"""
+
+            with open(close_eval_py,  "w") as fh:
+                fh.write(close_helper_eval)
+            with open(close_guide_py, "w") as fh:
+                fh.write(close_helper_guide)
+
+            print(f"[Anacapa] Exporting close-frame hair (frame {close_total:.3f}) for motion blur…")
+            close_result = subprocess.run(
+                [bpy.app.binary_path, "--background", blend_path,
+                 "--python", close_eval_py],
+                capture_output=True, text=True, timeout=180,
+            )
+            for line in close_result.stdout.splitlines():
+                if "[hair_close_eval]" in line and line.strip():
+                    print(f"  {line.strip()}")
+
+            if close_result.returncode != 0 or not os.path.exists(close_bin_path):
+                print("[Anacapa] Close-frame evaluated hair failed — trying guide fallback")
+                close_result = subprocess.run(
+                    [bpy.app.binary_path, "--background", blend_path,
+                     "--python", close_guide_py],
+                    capture_output=True, text=True, timeout=180,
+                )
+                for line in close_result.stdout.splitlines():
+                    if "[hair_close_guide]" in line and line.strip():
+                        print(f"  {line.strip()}")
+                if close_result.returncode != 0 or not os.path.exists(close_bin_path):
+                    print("[Anacapa] Close-frame hair export failed — hair will render without motion blur")
+                    do_motion_blur = False
+
+        # ------------------------------------------------------------------
+        # 2d. Write persistent .matassign.json alongside the ABC.
         #     Strand counts from subprocess are logged for diagnostics.
         # ------------------------------------------------------------------
         strand_counts = {}
@@ -652,6 +788,8 @@ sys.exit(0 if total_strands > 0 else 2)
         cmd2 = [hair_export, bin_path, abc_path]
         if os.path.exists(counts_path):
             cmd2 += ["--objects", counts_path]
+        if do_motion_blur and os.path.exists(close_bin_path):
+            cmd2 += ["--close", close_bin_path]
         result2 = subprocess.run(
             cmd2,
             capture_output=True,
@@ -681,7 +819,8 @@ sys.exit(0 if total_strands > 0 else 2)
         print(f"[Anacapa] Hair export error: {e} — rendering without hair")
         return None
     finally:
-        for path in (eval_py, guide_py, bin_path, counts_path):
+        for path in (eval_py, guide_py, bin_path, counts_path,
+                     close_eval_py, close_guide_py, close_bin_path):
             try:
                 os.remove(path)
             except OSError:
@@ -689,9 +828,10 @@ sys.exit(0 if total_strands > 0 else 2)
         if not was_suppressed:
             s["suppress_dirty"] = False
 
-    s["dirty_hair"]      = False
-    s["cached_abc_path"] = abc_path
-    s["cached_frame"]    = frame
+    s["dirty_hair"]           = False
+    s["cached_abc_path"]      = abc_path
+    s["cached_frame"]         = frame
+    s["cached_shutter_close"] = shutter_close
     print(f"[Anacapa] Hair exported → {abc_path}")
     return matassign_paths
 
