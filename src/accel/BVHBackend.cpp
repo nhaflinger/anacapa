@@ -9,8 +9,8 @@
 #if defined(__aarch64__)
 #  include <arm_neon.h>
 #elif defined(__SSE2__)
-#  include <xmmintrin.h>   // SSE
-#  include <emmintrin.h>   // SSE2
+#  include <xmmintrin.h>
+#  include <emmintrin.h>
 #endif
 
 namespace anacapa {
@@ -110,19 +110,19 @@ void BVHBackend::commit() {
     m_primIndices.resize(n);
     std::iota(m_primIndices.begin(), m_primIndices.end(), 0u);
 
-    // Phase 1: recursive SAH build into a temporary node array
+    // Phase 1: binary SAH build
     std::vector<BuildBVHNode> buildNodes;
     buildNodes.reserve(2 * n);
     buildRecursive(primInfo, 0, n, buildNodes);
 
-    // Phase 2: repack into final SOA BVHNode layout for SIMD traversal
+    // Phase 2: collapse binary tree into BVH4 SOA nodes
     repackBuildTree(buildNodes);
 
     m_built = true;
 }
 
 // ---------------------------------------------------------------------------
-// Build — recursive SAH BVH into BuildBVHNode array
+// Build — recursive SAH into BuildBVHNode array
 // ---------------------------------------------------------------------------
 static void storeBuildBounds(BuildBVHNode& node, const BBox3f& b) {
     node.boundsMin[0] = b.pMin.x; node.boundsMin[1] = b.pMin.y; node.boundsMin[2] = b.pMin.z;
@@ -170,7 +170,7 @@ uint32_t BVHBackend::buildRecursive(std::vector<PrimInfo>& primInfo,
     }
     if (mid == start || mid == end) mid = start + count / 2;
 
-    buildRecursive(primInfo, start, mid, buildNodes);  // left child = nodeIdx+1
+    buildRecursive(primInfo, start, mid, buildNodes);
     uint32_t rightIdx = buildRecursive(primInfo, mid, end, buildNodes);
 
     buildNodes[nodeIdx].dataA = rightIdx;
@@ -235,34 +235,76 @@ int BVHBackend::sahSplit(const std::vector<PrimInfo>& primInfo,
 }
 
 // ---------------------------------------------------------------------------
-// repackBuildTree — convert BuildBVHNode[] → SOA BVHNode[]
+// BVH4 repack — collapse binary SAH tree into 4-wide SOA BVHNode array
 // ---------------------------------------------------------------------------
-void BVHBackend::repackChild(const std::vector<BuildBVHNode>& build,
-                              uint32_t oldIdx, uint32_t parentIdx, int slot) {
-    const BuildBVHNode& old = build[oldIdx];
 
-    // Store this child's bounds in the parent's slot
-    m_nodes[parentIdx].minX[slot] = old.boundsMin[0];
-    m_nodes[parentIdx].minY[slot] = old.boundsMin[1];
-    m_nodes[parentIdx].minZ[slot] = old.boundsMin[2];
-    m_nodes[parentIdx].maxX[slot] = old.boundsMax[0];
-    m_nodes[parentIdx].maxY[slot] = old.boundsMax[1];
-    m_nodes[parentIdx].maxZ[slot] = old.boundsMax[2];
+// Fill an empty (never-hit) slot at index s in m_nodes[nodeIdx].
+static void fillEmptySlot(BVHNode& node, int s) {
+    constexpr float kInf = std::numeric_limits<float>::infinity();
+    node.minX[s] = node.minY[s] = node.minZ[s] =  kInf;
+    node.maxX[s] = node.maxY[s] = node.maxZ[s] = -kInf;
+    node.childData[s] = 0;
+    node.childMeta[s] = BVHNode::kLeafFlag;  // leaf with 0 prims — never matches
+}
 
-    if (old.isLeaf()) {
-        m_nodes[parentIdx].childData[slot] = old.primOffset();
-        m_nodes[parentIdx].childMeta[slot] = old.primCount() | BVHNode::kLeafFlag;
-    } else {
-        // Allocate a new SOA node for this interior child
-        uint32_t newIdx = static_cast<uint32_t>(m_nodes.size());
-        m_nodes.push_back(BVHNode{});
-        m_nodes[parentIdx].childData[slot] = newIdx;
-        m_nodes[parentIdx].childMeta[slot] = 0;  // interior — no leaf flag
+uint32_t BVHBackend::buildBVH4Node(const std::vector<BuildBVHNode>& build,
+                                    uint32_t oldIdx) {
+    // Gather up to 4 child slots by expanding the two binary children one level.
+    // Each binary child is expanded into its own children if it is interior and
+    // we still have room (total slots < 4).  This collapses two binary levels
+    // into one BVH4 level without changing the SAH quality.
+    struct Slot { uint32_t idx; };
+    Slot slots[4];
+    int  nSlots = 0;
 
-        // Recurse: fill the new node with its two children
-        repackChild(build, oldIdx + 1,          newIdx, 0);  // left child
-        repackChild(build, old.rightChild(),    newIdx, 1);  // right child
+    auto addSlot = [&](uint32_t idx) {
+        const BuildBVHNode& n = build[idx];
+        if (!n.isLeaf() && nSlots <= 2) {
+            // Expand: use n's two children instead of n itself
+            slots[nSlots++] = { (uint32_t)(idx + 1) };           // left child of n
+            slots[nSlots++] = { n.rightChild() };                 // right child of n
+        } else {
+            slots[nSlots++] = { idx };
+        }
+    };
+
+    const BuildBVHNode& root = build[oldIdx];
+    addSlot(oldIdx + 1);          // binary left child
+    addSlot(root.rightChild());   // binary right child
+    // nSlots is now 2, 3, or 4
+
+    // Allocate BVH4 node — do this AFTER gathering slots so no index is stale
+    uint32_t newIdx = static_cast<uint32_t>(m_nodes.size());
+    m_nodes.push_back(BVHNode{});
+
+    // Fill each slot; recurse for interior children
+    for (int s = 0; s < nSlots; ++s) {
+        uint32_t si = slots[s].idx;
+        const BuildBVHNode& sn = build[si];
+
+        m_nodes[newIdx].minX[s] = sn.boundsMin[0];
+        m_nodes[newIdx].minY[s] = sn.boundsMin[1];
+        m_nodes[newIdx].minZ[s] = sn.boundsMin[2];
+        m_nodes[newIdx].maxX[s] = sn.boundsMax[0];
+        m_nodes[newIdx].maxY[s] = sn.boundsMax[1];
+        m_nodes[newIdx].maxZ[s] = sn.boundsMax[2];
+
+        if (sn.isLeaf()) {
+            m_nodes[newIdx].childData[s] = sn.primOffset();
+            m_nodes[newIdx].childMeta[s] = sn.primCount() | BVHNode::kLeafFlag;
+        } else {
+            uint32_t childNodeIdx = buildBVH4Node(build, si);
+            // Re-index through newIdx — m_nodes may have reallocated during recursion
+            m_nodes[newIdx].childData[s] = childNodeIdx;
+            m_nodes[newIdx].childMeta[s] = 0;
+        }
     }
+
+    // Pad unused slots with empty AABBs
+    for (int s = nSlots; s < 4; ++s)
+        fillEmptySlot(m_nodes[newIdx], s);
+
+    return newIdx;
 }
 
 void BVHBackend::repackBuildTree(const std::vector<BuildBVHNode>& build) {
@@ -270,12 +312,9 @@ void BVHBackend::repackBuildTree(const std::vector<BuildBVHNode>& build) {
 
     const BuildBVHNode& root = build[0];
 
-    // Allocate the root SOA node (index 0)
-    m_nodes.push_back(BVHNode{});
-
     if (root.isLeaf()) {
-        // Degenerate: entire scene is a single leaf — wrap it in slot 0,
-        // put an empty (never-hit) AABB in slot 1.
+        // Degenerate: single leaf — wrap it in slot 0, pad slots 1-3.
+        m_nodes.push_back(BVHNode{});
         m_nodes[0].minX[0] = root.boundsMin[0];
         m_nodes[0].minY[0] = root.boundsMin[1];
         m_nodes[0].minZ[0] = root.boundsMin[2];
@@ -284,16 +323,9 @@ void BVHBackend::repackBuildTree(const std::vector<BuildBVHNode>& build) {
         m_nodes[0].maxZ[0] = root.boundsMax[2];
         m_nodes[0].childData[0] = root.primOffset();
         m_nodes[0].childMeta[0] = root.primCount() | BVHNode::kLeafFlag;
-
-        // Slot 1: inverted AABB that never intersects any ray
-        constexpr float kInf = std::numeric_limits<float>::infinity();
-        m_nodes[0].minX[1] = m_nodes[0].minY[1] = m_nodes[0].minZ[1] =  kInf;
-        m_nodes[0].maxX[1] = m_nodes[0].maxY[1] = m_nodes[0].maxZ[1] = -kInf;
-        m_nodes[0].childData[1] = 0;
-        m_nodes[0].childMeta[1] = BVHNode::kLeafFlag;  // leaf with 0 prims
+        for (int s = 1; s < 4; ++s) fillEmptySlot(m_nodes[0], s);
     } else {
-        repackChild(build, 0 + 1,             0, 0);  // left child of root
-        repackChild(build, root.rightChild(), 0, 1);  // right child of root
+        buildBVH4Node(build, 0);  // root BVH4 node will be at index 0
     }
 }
 
@@ -320,59 +352,57 @@ BVHBackend::Ray4 BVHBackend::makeObjectSpaceRay4(const Ray& ray, const Mat4f& wo
 }
 
 // ---------------------------------------------------------------------------
-// intersectAABB2 — simultaneous SIMD test of both children's AABBs.
+// intersectAABB4 — simultaneous SIMD test of all four children.
 //
-// Returns hit mask: bit 0 = child 0 hit, bit 1 = child 1 hit.
+// Returns hit mask: bit c = child c hit.
 // tNear[c] receives the entry distance for each hit child.
-// closestT is used as tMax so rays that already have a closer hit prune early.
+// closestT is used as tMax to prune children behind a known hit.
 // ---------------------------------------------------------------------------
 
 #if defined(__aarch64__)
 
-int BVHBackend::intersectAABB2(const BVHNode& node, const Ray4& r,
-                                float tNear[2], float closestT) {
-    // NEON 2-wide float32x2_t — each lane holds one child.
-    float32x2_t tn = vdup_n_f32(r.tMin);
-    float32x2_t tf = vdup_n_f32(closestT);
+int BVHBackend::intersectAABB4(const BVHNode& node, const Ray4& r,
+                                float tNear[4], float closestT) {
+    // NEON 4-wide: one lane per child, all 4 tested simultaneously.
+    float32x4_t tn = vdupq_n_f32(r.tMin);
+    float32x4_t tf = vdupq_n_f32(closestT);
 
-    float32x2_t ox = vdup_n_f32(r.origin.x);
-    float32x2_t oy = vdup_n_f32(r.origin.y);
-    float32x2_t oz = vdup_n_f32(r.origin.z);
-    float32x2_t dx = vdup_n_f32(r.invDir.x);
-    float32x2_t dy = vdup_n_f32(r.invDir.y);
-    float32x2_t dz = vdup_n_f32(r.invDir.z);
+    float32x4_t ox = vdupq_n_f32(r.origin.x);
+    float32x4_t oy = vdupq_n_f32(r.origin.y);
+    float32x4_t oz = vdupq_n_f32(r.origin.z);
+    float32x4_t dx = vdupq_n_f32(r.invDir.x);
+    float32x4_t dy = vdupq_n_f32(r.invDir.y);
+    float32x4_t dz = vdupq_n_f32(r.invDir.z);
 
-    float32x2_t t0x = vmul_f32(vsub_f32(vld1_f32(node.minX), ox), dx);
-    float32x2_t t1x = vmul_f32(vsub_f32(vld1_f32(node.maxX), ox), dx);
-    tn = vmax_f32(tn, vmin_f32(t0x, t1x));
-    tf = vmin_f32(tf, vmax_f32(t0x, t1x));
+    float32x4_t t0x = vmulq_f32(vsubq_f32(vld1q_f32(node.minX), ox), dx);
+    float32x4_t t1x = vmulq_f32(vsubq_f32(vld1q_f32(node.maxX), ox), dx);
+    tn = vmaxq_f32(tn, vminq_f32(t0x, t1x));
+    tf = vminq_f32(tf, vmaxq_f32(t0x, t1x));
 
-    float32x2_t t0y = vmul_f32(vsub_f32(vld1_f32(node.minY), oy), dy);
-    float32x2_t t1y = vmul_f32(vsub_f32(vld1_f32(node.maxY), oy), dy);
-    tn = vmax_f32(tn, vmin_f32(t0y, t1y));
-    tf = vmin_f32(tf, vmax_f32(t0y, t1y));
+    float32x4_t t0y = vmulq_f32(vsubq_f32(vld1q_f32(node.minY), oy), dy);
+    float32x4_t t1y = vmulq_f32(vsubq_f32(vld1q_f32(node.maxY), oy), dy);
+    tn = vmaxq_f32(tn, vminq_f32(t0y, t1y));
+    tf = vminq_f32(tf, vmaxq_f32(t0y, t1y));
 
-    float32x2_t t0z = vmul_f32(vsub_f32(vld1_f32(node.minZ), oz), dz);
-    float32x2_t t1z = vmul_f32(vsub_f32(vld1_f32(node.maxZ), oz), dz);
-    tn = vmax_f32(tn, vmin_f32(t0z, t1z));
-    tf = vmin_f32(tf, vmax_f32(t0z, t1z));
+    float32x4_t t0z = vmulq_f32(vsubq_f32(vld1q_f32(node.minZ), oz), dz);
+    float32x4_t t1z = vmulq_f32(vsubq_f32(vld1q_f32(node.maxZ), oz), dz);
+    tn = vmaxq_f32(tn, vminq_f32(t0z, t1z));
+    tf = vminq_f32(tf, vmaxq_f32(t0z, t1z));
 
-    uint32x2_t hit = vcle_f32(tn, tf);
-    vst1_f32(tNear, tn);
+    uint32x4_t hit = vcleq_f32(tn, tf);
+    vst1q_f32(tNear, tn);
 
-    return (vget_lane_u32(hit, 0) ? 1 : 0)
-         | (vget_lane_u32(hit, 1) ? 2 : 0);
+    return (vgetq_lane_u32(hit, 0) ? 1 : 0)
+         | (vgetq_lane_u32(hit, 1) ? 2 : 0)
+         | (vgetq_lane_u32(hit, 2) ? 4 : 0)
+         | (vgetq_lane_u32(hit, 3) ? 8 : 0);
 }
 
 #elif defined(__SSE2__)
 
-int BVHBackend::intersectAABB2(const BVHNode& node, const Ray4& r,
-                                float tNear[2], float closestT) {
-    // SSE: use lower 2 lanes of __m128 — upper 2 lanes are zeroed and harmless.
-    auto load2 = [](const float* p) -> __m128 {
-        return _mm_set_ps(0.f, 0.f, p[1], p[0]);
-    };
-
+int BVHBackend::intersectAABB4(const BVHNode& node, const Ray4& r,
+                                float tNear[4], float closestT) {
+    // SSE: __m128 is a natural 4-wide float — one lane per child.
     __m128 tn = _mm_set1_ps(r.tMin);
     __m128 tf = _mm_set1_ps(closestT);
     __m128 ox = _mm_set1_ps(r.origin.x);
@@ -382,58 +412,42 @@ int BVHBackend::intersectAABB2(const BVHNode& node, const Ray4& r,
     __m128 dy = _mm_set1_ps(r.invDir.y);
     __m128 dz = _mm_set1_ps(r.invDir.z);
 
-    __m128 t0x = _mm_mul_ps(_mm_sub_ps(load2(node.minX), ox), dx);
-    __m128 t1x = _mm_mul_ps(_mm_sub_ps(load2(node.maxX), ox), dx);
+    __m128 t0x = _mm_mul_ps(_mm_sub_ps(_mm_loadu_ps(node.minX), ox), dx);
+    __m128 t1x = _mm_mul_ps(_mm_sub_ps(_mm_loadu_ps(node.maxX), ox), dx);
     tn = _mm_max_ps(tn, _mm_min_ps(t0x, t1x));
     tf = _mm_min_ps(tf, _mm_max_ps(t0x, t1x));
 
-    __m128 t0y = _mm_mul_ps(_mm_sub_ps(load2(node.minY), oy), dy);
-    __m128 t1y = _mm_mul_ps(_mm_sub_ps(load2(node.maxY), oy), dy);
+    __m128 t0y = _mm_mul_ps(_mm_sub_ps(_mm_loadu_ps(node.minY), oy), dy);
+    __m128 t1y = _mm_mul_ps(_mm_sub_ps(_mm_loadu_ps(node.maxY), oy), dy);
     tn = _mm_max_ps(tn, _mm_min_ps(t0y, t1y));
     tf = _mm_min_ps(tf, _mm_max_ps(t0y, t1y));
 
-    __m128 t0z = _mm_mul_ps(_mm_sub_ps(load2(node.minZ), oz), dz);
-    __m128 t1z = _mm_mul_ps(_mm_sub_ps(load2(node.maxZ), oz), dz);
+    __m128 t0z = _mm_mul_ps(_mm_sub_ps(_mm_loadu_ps(node.minZ), oz), dz);
+    __m128 t1z = _mm_mul_ps(_mm_sub_ps(_mm_loadu_ps(node.maxZ), oz), dz);
     tn = _mm_max_ps(tn, _mm_min_ps(t0z, t1z));
     tf = _mm_min_ps(tf, _mm_max_ps(t0z, t1z));
 
-    int mask = _mm_movemask_ps(_mm_cmple_ps(tn, tf)) & 3;  // lower 2 bits only
-
-    // Store tNear for the two children
-    alignas(16) float tmp[4];
-    _mm_store_ps(tmp, tn);
-    tNear[0] = tmp[0];
-    tNear[1] = tmp[1];
-
-    return mask;
+    _mm_storeu_ps(tNear, tn);
+    return _mm_movemask_ps(_mm_cmple_ps(tn, tf));  // 4-bit mask, one per child
 }
 
 #else
 
-// Scalar fallback — two sequential slab tests without early exit per axis,
-// allowing the compiler to auto-vectorize the inner loop.
-int BVHBackend::intersectAABB2(const BVHNode& node, const Ray4& r,
-                                float tNear[2], float closestT) {
+int BVHBackend::intersectAABB4(const BVHNode& node, const Ray4& r,
+                                float tNear[4], float closestT) {
     int mask = 0;
-    for (int c = 0; c < 2; ++c) {
+    for (int c = 0; c < 4; ++c) {
         float tn = r.tMin, tf = closestT;
         float t0, t1;
-
         t0 = (node.minX[c] - r.origin.x) * r.invDir.x;
         t1 = (node.maxX[c] - r.origin.x) * r.invDir.x;
-        tn = std::max(tn, std::min(t0, t1));
-        tf = std::min(tf, std::max(t0, t1));
-
+        tn = std::max(tn, std::min(t0, t1)); tf = std::min(tf, std::max(t0, t1));
         t0 = (node.minY[c] - r.origin.y) * r.invDir.y;
         t1 = (node.maxY[c] - r.origin.y) * r.invDir.y;
-        tn = std::max(tn, std::min(t0, t1));
-        tf = std::min(tf, std::max(t0, t1));
-
+        tn = std::max(tn, std::min(t0, t1)); tf = std::min(tf, std::max(t0, t1));
         t0 = (node.minZ[c] - r.origin.z) * r.invDir.z;
         t1 = (node.maxZ[c] - r.origin.z) * r.invDir.z;
-        tn = std::max(tn, std::min(t0, t1));
-        tf = std::min(tf, std::max(t0, t1));
-
+        tn = std::max(tn, std::min(t0, t1)); tf = std::min(tf, std::max(t0, t1));
         if (tn <= tf) { tNear[c] = tn; mask |= (1 << c); }
     }
     return mask;
@@ -489,7 +503,7 @@ void BVHBackend::fillSurfaceInteraction(const BVHTriTrav& trav,
 }
 
 // ---------------------------------------------------------------------------
-// trace() — nearest-hit traversal
+// trace() / traceImpl() — nearest-hit traversal
 // ---------------------------------------------------------------------------
 TraceResult BVHBackend::trace(const Ray& ray) const {
     assert(m_built);
@@ -511,49 +525,50 @@ TraceResult BVHBackend::traceImpl(const Ray& ray) const {
     while (top > 0) {
         const BVHNode& node = m_nodes[stack[--top]];
 
-        float tNear[2];
-        int mask = intersectAABB2(node, r, tNear, closestT);
+        float tNear[4];
+        int mask = intersectAABB4(node, r, tNear, closestT);
         if (!mask) continue;
 
-        // Determine near/far child order for ordered traversal
-        int near = 0, far = 1;
-        if (mask == 3 && tNear[1] < tNear[0]) { near = 1; far = 0; }
+        // Collect hit children and sort near-to-far (insertion sort, ≤4 elements).
+        int hits[4], nHits = 0;
+        for (int c = 0; c < 4; ++c)
+            if (mask & (1 << c)) hits[nHits++] = c;
+        for (int i = 1; i < nHits; ++i) {
+            int key = hits[i]; int j = i - 1;
+            while (j >= 0 && tNear[hits[j]] > tNear[key]) { hits[j+1] = hits[j]; --j; }
+            hits[j+1] = key;
+        }
 
-        // Lambda: process one child — push if interior, test triangles if leaf
-        auto doChild = [&](int c) {
-            if (!(mask & (1 << c))) return;
+        // Push interior children far-to-near so near is at stack top.
+        // Process leaf children inline near-to-far to update closestT early.
+        for (int i = nHits - 1; i >= 0; --i)
+            if (!node.isLeaf(hits[i])) stack[top++] = node.childIdx(hits[i]);
 
-            if (node.isLeaf(c)) {
-                uint32_t offset = node.primOffset(c);
-                uint32_t count  = node.primCount(c);
-                for (uint32_t i = 0; i < count; ++i) {
-                    uint32_t idx = m_primIndices[offset + i];
-                    const BVHTriTrav& trav = m_trav[idx];
-                    float t, u, v;
-                    if (trav.isObjectSpace()) {
-                        const MeshDesc& mesh = m_pool.mesh(trav.meshID());
-                        Mat4f o2w = mesh.interpolateO2W(ray.time);
-                        Mat4f w2o = o2w.inverse();
-                        Ray4 ro = makeObjectSpaceRay4(ray, w2o);
-                        ro.tMax = closestT;
-                        if (intersectTriangle(trav, ro, t, u, v)) {
-                            closestT = t; hitIdx = idx; hitU = u; hitV = v;
-                        }
-                    } else {
-                        Ray4 rc = r; rc.tMax = closestT;
-                        if (intersectTriangle(trav, rc, t, u, v)) {
-                            closestT = t; hitIdx = idx; hitU = u; hitV = v;
-                        }
+        for (int i = 0; i < nHits; ++i) {
+            int c = hits[i];
+            if (!node.isLeaf(c)) continue;
+            uint32_t offset = node.primOffset(c);
+            uint32_t count  = node.primCount(c);
+            for (uint32_t k = 0; k < count; ++k) {
+                uint32_t idx = m_primIndices[offset + k];
+                const BVHTriTrav& trav = m_trav[idx];
+                float t, u, v;
+                if (trav.isObjectSpace()) {
+                    const MeshDesc& mesh = m_pool.mesh(trav.meshID());
+                    Mat4f o2w = mesh.interpolateO2W(ray.time);
+                    Ray4 ro = makeObjectSpaceRay4(ray, o2w.inverse());
+                    ro.tMax = closestT;
+                    if (intersectTriangle(trav, ro, t, u, v)) {
+                        closestT = t; hitIdx = idx; hitU = u; hitV = v;
+                    }
+                } else {
+                    Ray4 rc = r; rc.tMax = closestT;
+                    if (intersectTriangle(trav, rc, t, u, v)) {
+                        closestT = t; hitIdx = idx; hitU = u; hitV = v;
                     }
                 }
-            } else {
-                stack[top++] = node.childIdx(c);
             }
-        };
-
-        // Push far child first so near child is popped (and processed) first
-        doChild(far);
-        doChild(near);
+        }
     }
 
     TraceResult result;
@@ -583,20 +598,20 @@ bool BVHBackend::occluded(const Ray& ray) const {
     uint32_t stack[64];
     int top = 0;
     stack[top++] = 0;
-    float tNear[2];
+    float tNear[4];
 
     while (top > 0) {
         const BVHNode& node = m_nodes[stack[--top]];
-        int mask = intersectAABB2(node, r, tNear, r.tMax);
+        int mask = intersectAABB4(node, r, tNear, r.tMax);
         if (!mask) continue;
 
-        for (int c = 0; c < 2; ++c) {
+        for (int c = 0; c < 4; ++c) {
             if (!(mask & (1 << c))) continue;
             if (node.isLeaf(c)) {
                 uint32_t offset = node.primOffset(c);
                 uint32_t count  = node.primCount(c);
-                for (uint32_t i = 0; i < count; ++i) {
-                    uint32_t idx = m_primIndices[offset + i];
+                for (uint32_t k = 0; k < count; ++k) {
+                    uint32_t idx = m_primIndices[offset + k];
                     const BVHTriTrav& trav = m_trav[idx];
                     float t, u, v;
                     if (trav.isObjectSpace()) {
