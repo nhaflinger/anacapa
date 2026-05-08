@@ -104,11 +104,23 @@ void BVHBackend::commit() {
         for (int ax = 0; ax < 3; ++ax)
             if (b.diagonal()[ax] < 1e-7f)
                 { b.pMin[ax] -= 1e-7f; b.pMax[ax] += 1e-7f; }
-        primInfo[i] = { b, b.centroid(), i };
+        primInfo[i] = { b, b.centroid(), i,
+                        trav.v0, trav.v0 + trav.e1, trav.v0 + trav.e2,
+                        trav.isObjectSpace() };
     }
 
-    m_primIndices.resize(n);
-    std::iota(m_primIndices.begin(), m_primIndices.end(), 0u);
+    // SBVH build budget
+    {
+        BBox3f rootBounds;
+        for (uint32_t i = 0; i < n; ++i) rootBounds.expand(primInfo[i].bounds);
+        Vec3f rd = rootBounds.diagonal();
+        m_buildRootSA    = 2.f * (rd.x*rd.y + rd.y*rd.z + rd.z*rd.x);
+        m_buildMaxRefs   = static_cast<uint32_t>(n * kMaxRefFactor);
+        m_buildTotalRefs = n;
+    }
+
+    m_primIndices.clear();
+    m_primIndices.reserve(n);
 
     // Phase 1: binary SAH build
     std::vector<BuildBVHNode> buildNodes;
@@ -143,54 +155,118 @@ uint32_t BVHBackend::buildRecursive(std::vector<PrimInfo>& primInfo,
     storeBuildBounds(buildNodes[nodeIdx], bounds);
 
     uint32_t count = end - start;
-    int bestAxis = -1, splitBucket = -1;
-    if (count > static_cast<uint32_t>(kMaxLeafPrims))
-        splitBucket = sahSplit(primInfo, start, end, centroidBounds, bestAxis);
+    float leafCost = kIntersectCost * (float)count;
 
-    if (bestAxis < 0 || splitBucket < 0) {
-        uint32_t offset = static_cast<uint32_t>(m_primIndices.size());
-        for (uint32_t i = start; i < end; ++i)
-            m_primIndices.push_back(primInfo[i].originalIndex);
-        buildNodes[nodeIdx].dataA = offset;
-        buildNodes[nodeIdx].dataB = count | BuildBVHNode::kLeafFlag;
+    // Object split
+    float    objCost   = std::numeric_limits<float>::infinity();
+    int      objAxis   = -1, objBucket = -1;
+    if (count > (uint32_t)kMaxLeafPrims)
+        objBucket = sahSplit(primInfo, start, end, centroidBounds, bounds, objAxis, objCost);
+
+    // Spatial split — only when budget allows
+    float spatCost = std::numeric_limits<float>::infinity();
+    int   spatAxis = -1; float spatPos = 0.f;
+    if (count > (uint32_t)kMaxLeafPrims && m_buildTotalRefs < m_buildMaxRefs)
+        spatCost = spatialSplit(primInfo, start, end, bounds, spatAxis, spatPos);
+
+    // Spatial split path — try first if it beats both object split and leaf
+    if (spatAxis >= 0 && spatCost < objCost && spatCost < leafCost) {
+        std::vector<PrimInfo> leftRefs, rightRefs;
+        leftRefs.reserve(count); rightRefs.reserve(count);
+
+        for (uint32_t i = start; i < end; ++i) {
+            const PrimInfo& pi = primInfo[i];
+            bool pureLeft  = pi.bounds.pMax[spatAxis] <= spatPos;
+            bool pureRight = pi.bounds.pMin[spatAxis] >= spatPos;
+
+            if (pureLeft) {
+                leftRefs.push_back(pi);
+            } else if (pureRight) {
+                rightRefs.push_back(pi);
+            } else {
+                // Straddle: clip to each half for tighter bounds
+                Vec3f verts[3] = { pi.v0, pi.v1, pi.v2 };
+
+                BBox3f lb = clipTriangleSlab(verts, spatAxis, bounds.pMin[spatAxis], spatPos);
+                if (lb.pMin.x <= lb.pMax.x) {
+                    lb.pMax[spatAxis] = std::min(lb.pMax[spatAxis], spatPos);
+                    PrimInfo lpi = pi; lpi.bounds = lb; lpi.centroid = lb.centroid();
+                    leftRefs.push_back(lpi);
+                } else {
+                    leftRefs.push_back(pi);  // degenerate clip — keep original
+                }
+
+                BBox3f rb = clipTriangleSlab(verts, spatAxis, spatPos, bounds.pMax[spatAxis]);
+                if (rb.pMin.x <= rb.pMax.x) {
+                    rb.pMin[spatAxis] = std::max(rb.pMin[spatAxis], spatPos);
+                    PrimInfo rpi = pi; rpi.bounds = rb; rpi.centroid = rb.centroid();
+                    rightRefs.push_back(rpi);
+                } else {
+                    rightRefs.push_back(pi);
+                }
+            }
+        }
+
+        if (!leftRefs.empty() && !rightRefs.empty()) {
+            uint32_t extra = (uint32_t)(leftRefs.size() + rightRefs.size()) - count;
+            m_buildTotalRefs += extra;
+
+            buildRecursive(leftRefs, 0, (uint32_t)leftRefs.size(), buildNodes);
+            uint32_t rightIdx = buildRecursive(rightRefs, 0, (uint32_t)rightRefs.size(), buildNodes);
+
+            buildNodes[nodeIdx].dataA = rightIdx;
+            buildNodes[nodeIdx].dataB = (uint32_t)spatAxis;
+            return nodeIdx;
+        }
+        // else fall through to object split
+    }
+
+    // Object split path
+    if (objAxis >= 0 && objCost < leafCost) {
+        float range = centroidBounds.diagonal()[objAxis];
+        uint32_t mid = start;
+        if (range > 0.f) {
+            auto* p = std::partition(
+                primInfo.data() + start, primInfo.data() + end,
+                [&](const PrimInfo& pi) {
+                    int b = (int)(kSAHBuckets *
+                        ((pi.centroid[objAxis] - centroidBounds.pMin[objAxis]) / range));
+                    return std::clamp(b, 0, kSAHBuckets - 1) <= objBucket;
+                });
+            mid = (uint32_t)(p - primInfo.data());
+        }
+        if (mid == start || mid == end) mid = start + count / 2;
+
+        buildRecursive(primInfo, start, mid, buildNodes);
+        uint32_t rightIdx = buildRecursive(primInfo, mid, end, buildNodes);
+
+        buildNodes[nodeIdx].dataA = rightIdx;
+        buildNodes[nodeIdx].dataB = (uint32_t)objAxis;
         return nodeIdx;
     }
 
-    float range = centroidBounds.diagonal()[bestAxis];
-    uint32_t mid = start;
-    if (range > 0.f) {
-        auto* p = std::partition(
-            primInfo.data() + start, primInfo.data() + end,
-            [&](const PrimInfo& pi) {
-                int b = static_cast<int>(kSAHBuckets *
-                    ((pi.centroid[bestAxis] - centroidBounds.pMin[bestAxis]) / range));
-                return std::clamp(b, 0, kSAHBuckets - 1) <= splitBucket;
-            });
-        mid = static_cast<uint32_t>(p - primInfo.data());
-    }
-    if (mid == start || mid == end) mid = start + count / 2;
-
-    buildRecursive(primInfo, start, mid, buildNodes);
-    uint32_t rightIdx = buildRecursive(primInfo, mid, end, buildNodes);
-
-    buildNodes[nodeIdx].dataA = rightIdx;
-    buildNodes[nodeIdx].dataB = static_cast<uint32_t>(bestAxis);
+    // Leaf
+    uint32_t offset = (uint32_t)m_primIndices.size();
+    for (uint32_t i = start; i < end; ++i)
+        m_primIndices.push_back(primInfo[i].originalIndex);
+    buildNodes[nodeIdx].dataA = offset;
+    buildNodes[nodeIdx].dataB = count | BuildBVHNode::kLeafFlag;
     return nodeIdx;
 }
 
 int BVHBackend::sahSplit(const std::vector<PrimInfo>& primInfo,
                          uint32_t start, uint32_t end,
                          const BBox3f& centroidBounds,
-                         int& outAxis) const {
+                         const BBox3f& nodeBounds,
+                         int& outAxis,
+                         float& outCost) const {
     struct Bucket { BBox3f bounds; uint32_t count = 0; };
 
     float bestCost = std::numeric_limits<float>::infinity();
     int   bestSplit = -1;
-    outAxis = -1;
+    outAxis = -1; outCost = std::numeric_limits<float>::infinity();
 
-    BBox3f parentBounds;
-    for (uint32_t i = start; i < end; ++i) parentBounds.expand(primInfo[i].bounds);
-    Vec3f d = parentBounds.diagonal();
+    Vec3f d = nodeBounds.diagonal();
     float parentArea = 2.f * (d.x*d.y + d.y*d.z + d.z*d.x);
     if (parentArea < 1e-12f) return -1;
 
@@ -229,9 +305,150 @@ int BVHBackend::sahSplit(const std::vector<PrimInfo>& primInfo,
         }
     }
 
-    float leafCost = kIntersectCost * static_cast<float>(end - start);
-    if (bestCost >= leafCost) { outAxis = -1; return -1; }
-    return bestSplit;
+    outCost = bestCost;
+    return bestSplit;   // -1 if no valid split (degenerate bounds on all axes)
+}
+
+// ---------------------------------------------------------------------------
+// SBVH — spatial split support
+// ---------------------------------------------------------------------------
+
+// Clips triangle v[0..2] to the slab [sMin, sMax] on axis.
+// Returns the bounding box of the surviving polygon (empty BBox3f if nothing survives).
+BBox3f BVHBackend::clipTriangleSlab(const Vec3f v[3], int axis, float sMin, float sMax) {
+    Vec3f poly[9]; int n = 3;
+    poly[0] = v[0]; poly[1] = v[1]; poly[2] = v[2];
+
+    // Clip to axis >= sMin
+    {
+        Vec3f out[9]; int m = 0;
+        for (int i = 0; i < n; ++i) {
+            const Vec3f& a = poly[i];
+            const Vec3f& b = poly[(i + 1) % n];
+            bool aIn = (a[axis] >= sMin), bIn = (b[axis] >= sMin);
+            if (aIn) out[m++] = a;
+            if (aIn != bIn) {
+                float t = (sMin - a[axis]) / (b[axis] - a[axis]);
+                out[m++] = a + (b - a) * t;
+            }
+        }
+        n = m; for (int i = 0; i < n; ++i) poly[i] = out[i];
+    }
+
+    // Clip to axis <= sMax
+    {
+        Vec3f out[9]; int m = 0;
+        for (int i = 0; i < n; ++i) {
+            const Vec3f& a = poly[i];
+            const Vec3f& b = poly[(i + 1) % n];
+            bool aIn = (a[axis] <= sMax), bIn = (b[axis] <= sMax);
+            if (aIn) out[m++] = a;
+            if (aIn != bIn) {
+                float t = (sMax - a[axis]) / (b[axis] - a[axis]);
+                out[m++] = a + (b - a) * t;
+            }
+        }
+        n = m; for (int i = 0; i < n; ++i) poly[i] = out[i];
+    }
+
+    BBox3f result;
+    for (int i = 0; i < n; ++i) result.expand(poly[i]);
+    return result;
+}
+
+float BVHBackend::spatialSplit(const std::vector<PrimInfo>& primInfo,
+                                uint32_t start, uint32_t end,
+                                const BBox3f& nodeBounds,
+                                int& outAxis, float& outPos) const {
+    struct SpatBucket { BBox3f bounds; uint32_t in = 0, out = 0; };
+
+    auto area = [](const BBox3f& b) -> float {
+        Vec3f d = b.diagonal();
+        return 2.f * (d.x*d.y + d.y*d.z + d.z*d.x);
+    };
+    auto isEmpty = [](const BBox3f& b) -> bool {
+        return b.pMin.x > b.pMax.x;
+    };
+
+    float parentArea = area(nodeBounds);
+    outAxis = -1; outPos = 0.f;
+
+    if (parentArea < 1e-12f) return std::numeric_limits<float>::infinity();
+    // Guard: skip nodes too small relative to scene root
+    if (m_buildRootSA > 0.f && parentArea / m_buildRootSA < kSpatialAlpha)
+        return std::numeric_limits<float>::infinity();
+
+    // Skip if any ref is animated (motion-expanded bounds can't be usefully clipped)
+    for (uint32_t i = start; i < end; ++i)
+        if (primInfo[i].animated) return std::numeric_limits<float>::infinity();
+
+    float bestCost = std::numeric_limits<float>::infinity();
+    Vec3f diag = nodeBounds.diagonal();
+
+    for (int axis = 0; axis < 3; ++axis) {
+        if (diag[axis] < 1e-7f) continue;
+        float binSize   = diag[axis] / kSpatialBuckets;
+        float invBin    = 1.f / binSize;
+        float nodeMin   = nodeBounds.pMin[axis];
+
+        std::array<SpatBucket, kSpatialBuckets> buckets{};
+
+        for (uint32_t i = start; i < end; ++i) {
+            const PrimInfo& pi = primInfo[i];
+            int bMin = std::clamp((int)((pi.bounds.pMin[axis] - nodeMin) * invBin), 0, kSpatialBuckets - 1);
+            int bMax = std::clamp((int)((pi.bounds.pMax[axis] - nodeMin) * invBin), 0, kSpatialBuckets - 1);
+            buckets[bMin].in++;
+            buckets[bMax].out++;
+
+            Vec3f verts[3] = { pi.v0, pi.v1, pi.v2 };
+            for (int b = bMin; b <= bMax; ++b) {
+                float sMin = nodeMin + b * binSize;
+                float sMax = nodeMin + (b + 1) * binSize;
+                BBox3f clipped = clipTriangleSlab(verts, axis, sMin, sMax);
+                if (!isEmpty(clipped)) buckets[b].bounds.expand(clipped);
+            }
+        }
+
+        // Prefix scan: left bounds and counts
+        std::array<BBox3f,   kSpatialBuckets - 1> leftBounds{};
+        std::array<uint32_t, kSpatialBuckets - 1> leftCount{};
+        {
+            BBox3f lb; uint32_t lc = 0;
+            for (int i = 0; i < kSpatialBuckets - 1; ++i) {
+                if (!isEmpty(buckets[i].bounds)) lb.expand(buckets[i].bounds);
+                lc += buckets[i].in;
+                leftBounds[i] = lb; leftCount[i] = lc;
+            }
+        }
+
+        // Suffix scan: right bounds and counts
+        std::array<BBox3f,   kSpatialBuckets - 1> rightBounds{};
+        std::array<uint32_t, kSpatialBuckets - 1> rightCount{};
+        {
+            BBox3f rb; uint32_t rc = 0;
+            for (int i = kSpatialBuckets - 2; i >= 0; --i) {
+                if (!isEmpty(buckets[i + 1].bounds)) rb.expand(buckets[i + 1].bounds);
+                rc += buckets[i + 1].out;
+                rightBounds[i] = rb; rightCount[i] = rc;
+            }
+        }
+
+        for (int i = 0; i < kSpatialBuckets - 1; ++i) {
+            uint32_t lc = leftCount[i], rc = rightCount[i];
+            if (lc == 0 || rc == 0) continue;
+            if (isEmpty(leftBounds[i]) || isEmpty(rightBounds[i])) continue;
+
+            float cost = kTraversalCost +
+                kIntersectCost * (area(leftBounds[i]) * lc + area(rightBounds[i]) * rc) / parentArea;
+            if (cost < bestCost) {
+                bestCost = cost;
+                outAxis  = axis;
+                outPos   = nodeMin + (i + 1) * binSize;
+            }
+        }
+    }
+
+    return bestCost;
 }
 
 // ---------------------------------------------------------------------------

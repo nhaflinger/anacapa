@@ -89,9 +89,12 @@ static_assert(sizeof(BVHTriAttrib) == 96, "BVHTriAttrib must be 96 bytes");
 class BVHBackend : public IAccelerationStructure {
 public:
     static constexpr int   kSAHBuckets      = 12;
+    static constexpr int   kSpatialBuckets  = 16;
     static constexpr int   kMaxLeafPrims    = 4;
     static constexpr float kTraversalCost   = 1.f;
     static constexpr float kIntersectCost   = 1.f;
+    static constexpr float kSpatialAlpha    = 1e-5f;  // skip spatial splits on tiny nodes
+    static constexpr float kMaxRefFactor    = 3.0f;   // max total refs = n * factor
 
     explicit BVHBackend(const GeometryPool& pool);
 
@@ -107,19 +110,33 @@ private:
     // Build
     // -----------------------------------------------------------------------
     struct PrimInfo {
-        BBox3f bounds;
-        Vec3f  centroid;
+        BBox3f   bounds;
+        Vec3f    centroid;
         uint32_t originalIndex;
+        Vec3f    v0, v1, v2;  // world-space vertices for spatial split clipping
+        bool     animated;    // if true, skip spatial splits for this ref
     };
 
     uint32_t buildRecursive(std::vector<PrimInfo>& primInfo,
                             uint32_t start, uint32_t end,
                             std::vector<BuildBVHNode>& buildNodes);
 
+    // Returns best SAH bucket (or -1 if no valid split). Caller compares outCost vs leafCost.
     int sahSplit(const std::vector<PrimInfo>& primInfo,
                  uint32_t start, uint32_t end,
                  const BBox3f& centroidBounds,
-                 int& outAxis) const;
+                 const BBox3f& nodeBounds,
+                 int& outAxis,
+                 float& outCost) const;
+
+    // Evaluates spatial split candidates; returns best SAH cost (infinity if none useful).
+    float spatialSplit(const std::vector<PrimInfo>& primInfo,
+                       uint32_t start, uint32_t end,
+                       const BBox3f& nodeBounds,
+                       int& outAxis, float& outPos) const;
+
+    // Clips triangle v[0..2] to the slab [sMin,sMax] on axis; returns clipped bbox.
+    static BBox3f clipTriangleSlab(const Vec3f v[3], int axis, float sMin, float sMax);
 
     // Convert binary BuildBVHNode tree → BVH4 SOA BVHNode array in m_nodes.
     void repackBuildTree(const std::vector<BuildBVHNode>& build);
@@ -171,6 +188,11 @@ private:
     std::vector<BVHTriAttrib>  m_attribs;
     std::vector<uint32_t>      m_primIndices;
     bool                       m_built = false;
+
+    // SBVH build budget — reset in commit(), updated during buildRecursive.
+    float    m_buildRootSA    = 0.f;
+    uint32_t m_buildMaxRefs   = 0;
+    uint32_t m_buildTotalRefs = 0;
 };
 
 } // namespace anacapa
