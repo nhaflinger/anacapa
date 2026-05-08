@@ -1,5 +1,6 @@
 #include "MatAssignLoader.h"
 #include "../shading/MarschnerHair.h"
+#include "../shading/ChiangHair.h"
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -15,8 +16,9 @@ using json = nlohmann::json;
 // ---------------------------------------------------------------------------
 
 static MatAssignType parseType(const std::string& s) {
-    if (s == "usd")      return MatAssignType::Usd;
-    if (s == "osl")      return MatAssignType::Osl;
+    if (s == "usd")     return MatAssignType::Usd;
+    if (s == "osl")     return MatAssignType::Osl;
+    if (s == "chiang")  return MatAssignType::Chiang;
     return MatAssignType::Marschner;  // "marschner" or unknown → safe default
 }
 
@@ -29,7 +31,7 @@ static MatAssignEntry parseEntry(const json& j) {
     const json* mat = j.contains("material") ? &j["material"] : nullptr;
     e.type = parseType(mat ? mat->value("type", "marschner") : "marschner");
 
-    if (e.type == MatAssignType::Marschner) {
+    if (e.type == MatAssignType::Marschner || e.type == MatAssignType::Chiang) {
         const json& m = mat ? *mat : j;
         if (m.contains("sigma_a") && m["sigma_a"].is_array()
                 && m["sigma_a"].size() >= 3) {
@@ -120,7 +122,7 @@ void mergeMatAssign(std::vector<MatAssignEntry>&       dst,
 // buildMaterial
 // ---------------------------------------------------------------------------
 std::unique_ptr<IMaterial> buildMaterial(const MatAssignEntry& entry) {
-    if (entry.type == MatAssignType::Marschner) {
+    if (entry.type == MatAssignType::Marschner || entry.type == MatAssignType::Chiang) {
         MarschnerHairMaterial::Params p;
         p.sigma_a = { entry.marschner.sigma_a[0],
                       entry.marschner.sigma_a[1],
@@ -128,6 +130,8 @@ std::unique_ptr<IMaterial> buildMaterial(const MatAssignEntry& entry) {
         p.beta_m  = entry.marschner.beta_m;
         p.beta_n  = entry.marschner.beta_n;
         p.alpha   = entry.marschner.alpha;
+        if (entry.type == MatAssignType::Chiang)
+            return std::make_unique<ChiangHairMaterial>(p);
         return std::make_unique<MarschnerHairMaterial>(p);
     }
 

@@ -22,7 +22,7 @@ namespace anacapa {
 // for a given object name overrides an earlier one (layer semantics).
 // ---------------------------------------------------------------------------
 
-enum class MatAssignType { Marschner, Usd, Osl };
+enum class MatAssignType { Marschner, Chiang, Usd, Osl };
 
 struct MarschnerAssignParams {
     float sigma_a[3] = {0.06f, 0.10f, 0.20f};  // absorption coefficients (Beer-Lambert)

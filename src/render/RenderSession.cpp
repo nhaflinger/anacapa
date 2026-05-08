@@ -299,6 +299,7 @@ void RenderSession::appendAlembicCurves_() {
             spdlog::info("appendAlembicCurves: '{}' → matassign ({})",
                          range.objectName,
                          entry.type == MatAssignType::Marschner ? "marschner" :
+                         entry.type == MatAssignType::Chiang    ? "chiang"    :
                          entry.type == MatAssignType::Usd       ? "usd"       : "osl");
         } else {
             spdlog::info("appendAlembicCurves: '{}' not in matassign → default hair",

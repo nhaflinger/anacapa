@@ -258,7 +258,12 @@ Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
                 }
 
                 if (!isBlack(Li) && !isBlack(Tr)) {
-                    float cosI = absDot(bs.wi, si.n);
+                    // Hair sample() pre-multiplies bs.f by cosThetaI (sinθ from
+                    // tangent). For curves, skip the separate cosI factor; for
+                    // surfaces, apply the standard normal dot product.
+                    float cosI = si.isCurve
+                        ? 1.f
+                        : absDot(bs.wi, si.n);
                     Ld += bs.f * Li * Tr * cosI * weight / bs.pdf;
                 }
             }

@@ -2,6 +2,7 @@
 
 #include "AlembicLoader.h"
 #include "../../shading/MarschnerHair.h"
+#include "../../shading/ChiangHair.h"
 
 #include <Alembic/AbcGeom/All.h>
 #include <Alembic/AbcCoreFactory/IFactory.h>
@@ -447,7 +448,6 @@ bool loadAlembicCurves(const std::string&                        path,
                      strandsLoaded, path);
     }
 
-    // Create one MarschnerHairMaterial with default parameters
     outMaterials.push_back(std::make_unique<MarschnerHairMaterial>(
         MarschnerHairMaterial::Params{}));
 
