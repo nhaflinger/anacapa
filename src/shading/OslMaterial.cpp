@@ -484,35 +484,36 @@ public:
     }
 
 private:
+    // OSL::TextureSystem::create() returns TextureSystem* in OIIO 2.x and
+    // shared_ptr<TextureSystem> in OIIO 3+. Overload-dispatch handles both.
+    static OSL::TextureSystem* assignTexSys(OslShadingSystem* self,
+                                            OSL::TextureSystem* raw) {
+        self->m_texRaw = raw;
+        return raw;
+    }
+    static OSL::TextureSystem* assignTexSys(OslShadingSystem* self,
+                                            std::shared_ptr<OSL::TextureSystem> sp) {
+        self->m_textureSystem = std::move(sp);
+        return self->m_textureSystem.get();
+    }
+
     OslShadingSystem() {
-#if OSL_LIBRARY_VERSION_MINOR >= 13
-        // OIIO 2.4+: TextureSystem::create returns shared_ptr
-        m_textureSystem = OSL::TextureSystem::create(true);
-        OSL::TextureSystem* texRaw = m_textureSystem.get();
-#else
-        // OIIO 2.2: TextureSystem::create returns raw pointer
-        m_texRaw = OSL::TextureSystem::create(true);
-        OSL::TextureSystem* texRaw = m_texRaw;
-#endif
+        OSL::TextureSystem* texRaw =
+            assignTexSys(this, OSL::TextureSystem::create(true));
         m_services = OslRendererServices(texRaw);
         m_sys = new OSL::ShadingSystem(&m_services, texRaw);
         registerOslClosures(m_sys);
     }
     ~OslShadingSystem() {
         delete m_sys;
-#if OSL_LIBRARY_VERSION_MINOR < 13
         if (m_texRaw) OSL::TextureSystem::destroy(m_texRaw);
-#endif
     }
 
     OslRendererServices  m_services;
     OSL::ShadingSystem*  m_sys = nullptr;
     std::string          m_searchPaths;
-#if OSL_LIBRARY_VERSION_MINOR >= 13
-    std::shared_ptr<OSL::TextureSystem> m_textureSystem;
-#else
-    OSL::TextureSystem* m_texRaw = nullptr;
-#endif
+    std::shared_ptr<OSL::TextureSystem> m_textureSystem;  // owned in OIIO 3+
+    OSL::TextureSystem*                 m_texRaw = nullptr;  // owned in OIIO 2.x
 };
 
 // ===========================================================================
@@ -1465,25 +1466,50 @@ bool oslCompileShader(const std::string& oslPath,
                       const std::string& osoPath,
                       const std::string& matDir) {
     OSL::OSLCompiler compiler;
-    // Stdosl.h location — try Blender's Cycles shader directory first.
-    // stdoslpath must be the full path to stdosl.h (not a directory).
-    // OSLCompiler prepends it as: #include "<stdoslpath>"
-    const char* blenderSteamStdosl =
+    // stdosl.h location — full path to the file; OSLCompiler prepends it as
+    // #include "<stdoslpath>". Searches: $ANACAPA_OSL_STDOSL, then known
+    // Blender install layouts on macOS / Linux, then nothing (compiler default).
+    auto firstReadable = [](std::initializer_list<std::string> paths) -> std::string {
+        for (const auto& p : paths)
+            if (!p.empty() && std::ifstream(p).good()) return p;
+        return {};
+    };
+    const char* envStdosl = std::getenv("ANACAPA_OSL_STDOSL");
+    std::string stdosl = firstReadable({
+        envStdosl ? envStdosl : "",
+        // macOS Steam Blender
         "/Users/douglascreel/Library/Application Support/Steam/"
         "steamapps/common/Blender/Blender.app/Contents/Resources/"
-        "5.1/scripts/addons_core/cycles/shader/stdosl.h";
-    std::string stdosl;
-    if (std::ifstream(blenderSteamStdosl).good())
-        stdosl = blenderSteamStdosl;
+        "5.1/scripts/addons_core/cycles/shader/stdosl.h",
+        // macOS .app Blender
+        "/Applications/Blender.app/Contents/Resources/"
+        "5.1/scripts/addons_core/cycles/shader/stdosl.h",
+        // Linux Blender (tarball install — common: ~/software, /opt, /usr/local)
+        std::string(std::getenv("HOME") ? std::getenv("HOME") : "") +
+            "/software/blender-5.1.1-linux-x64/5.1/scripts/addons_core/cycles/shader/stdosl.h",
+        "/opt/blender/5.1/scripts/addons_core/cycles/shader/stdosl.h",
+    });
+
     // mx_funcs.h is included by _mx_stdlib.h with a quoted include, which only
     // searches the including file's directory. Copy it to matDir if absent.
     const std::string mxFuncsDst = matDir + "/mx_funcs.h";
     if (!std::ifstream(mxFuncsDst).good()) {
-        const std::string mxFuncsSrc =
+        const char* envMxFuncs = std::getenv("ANACAPA_OSL_MX_FUNCS");
+        std::string mxFuncsSrc = firstReadable({
+            envMxFuncs ? envMxFuncs : "",
+            // macOS Steam Blender
             "/Users/douglascreel/Library/Application Support/Steam/"
             "steamapps/common/Blender/Blender.app/Contents/Resources/"
-            "lib/materialx/libraries/stdlib/genosl/include/mx_funcs.h";
-        if (std::ifstream(mxFuncsSrc).good()) {
+            "lib/materialx/libraries/stdlib/genosl/include/mx_funcs.h",
+            // macOS .app Blender
+            "/Applications/Blender.app/Contents/Resources/"
+            "lib/materialx/libraries/stdlib/genosl/include/mx_funcs.h",
+            // Linux Blender
+            std::string(std::getenv("HOME") ? std::getenv("HOME") : "") +
+                "/software/blender-5.1.1-linux-x64/lib/materialx/libraries/stdlib/genosl/include/mx_funcs.h",
+            "/opt/blender/lib/materialx/libraries/stdlib/genosl/include/mx_funcs.h",
+        });
+        if (!mxFuncsSrc.empty()) {
             std::ifstream  src(mxFuncsSrc, std::ios::binary);
             std::ofstream  dst(mxFuncsDst, std::ios::binary);
             dst << src.rdbuf();
