@@ -191,11 +191,13 @@ if(ANACAPA_ENABLE_VIEWER)
         ${IMGUI_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
     )
     add_executable(viewer src/tools/viewer.cpp ${IMGUI_SOURCES})
-    FetchContent_GetProperties(stb  SOURCE_DIR STB_SOURCE_DIR)
+    FetchContent_GetProperties(stb               SOURCE_DIR STB_SOURCE_DIR)
+    FetchContent_GetProperties(imgui_filebrowser SOURCE_DIR IMGUI_FILEBROWSER_SOURCE_DIR)
     target_include_directories(viewer PRIVATE
         ${IMGUI_SOURCE_DIR}
         ${IMGUI_SOURCE_DIR}/backends
         ${STB_SOURCE_DIR}
+        ${IMGUI_FILEBROWSER_SOURCE_DIR}
     )
     target_link_libraries(viewer PRIVATE
         SDL2::SDL2-static
@@ -208,6 +210,15 @@ if(ANACAPA_ENABLE_VIEWER)
     else()
         find_package(OpenGL REQUIRED)
         target_link_libraries(viewer PRIVATE OpenGL::GL)
+    endif()
+    # OpenColorIO (optional — viewer falls back to ACES polynomial without it)
+    find_package(OpenColorIO QUIET)
+    if(OpenColorIO_FOUND)
+        target_link_libraries(viewer PRIVATE OpenColorIO::OpenColorIO)
+        target_compile_definitions(viewer PRIVATE ANACAPA_HAVE_OCIO)
+        message(STATUS "Viewer: OpenColorIO ${OpenColorIO_VERSION} found — OCIO color management enabled")
+    else()
+        message(STATUS "Viewer: OpenColorIO not found — falling back to built-in ACES polynomial")
     endif()
     # Silence warnings in ImGui's own sources
     set_source_files_properties(${IMGUI_SOURCES}

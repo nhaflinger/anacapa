@@ -195,6 +195,15 @@ if(ANACAPA_ENABLE_VIEWER)
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(imgui)
+
+    # imgui-filebrowser — pure ImGui cross-platform file browser (single header)
+    FetchContent_Declare(
+        imgui_filebrowser
+        GIT_REPOSITORY https://github.com/AirGuanZ/imgui-filebrowser.git
+        GIT_TAG        master
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(imgui_filebrowser)
 endif()
 
 # ---------------------------------------------------------------------------
