@@ -6,6 +6,8 @@
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 
+#include <anacapa/core/Types.h>
+
 #include <spdlog/spdlog.h>
 #include <vector>
 #include <cstring>
@@ -20,7 +22,8 @@ struct MetalAccelStructure::Impl {
     NSMutableArray<id<MTLAccelerationStructure>>* blasArray = nil;
 
     // Concatenated vertex attribute buffers (all meshes in order)
-    id<MTLBuffer> positionBuffer          = nil;  // packed_float3
+    id<MTLBuffer> positionBuffer          = nil;  // packed_float3 — world-space at shutter-open
+    id<MTLBuffer> positionBufferClose     = nil;  // packed_float3 — world-space at shutter-close (= positionBuffer for static)
     id<MTLBuffer> normalBuffer            = nil;  // packed_float3
     id<MTLBuffer> uvBuffer                = nil;  // float2
     id<MTLBuffer> indexBuffer             = nil;  // uint32_t
@@ -112,11 +115,12 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
         totalTris  += m.numTriangles();
     }
 
-    std::vector<PackedFloat3> positions(totalVerts);
-    std::vector<PackedFloat3> normals  (totalVerts);
-    std::vector<PackedFloat2> uvs      (totalVerts);
-    std::vector<uint32_t>     indices  (totalTris * 3);
-    std::vector<uint32_t>     triMeshIDs(totalTris);
+    std::vector<PackedFloat3> positions     (totalVerts);  // world-space at shutter-open
+    std::vector<PackedFloat3> positionsClose(totalVerts);  // world-space at shutter-close
+    std::vector<PackedFloat3> normals       (totalVerts);
+    std::vector<PackedFloat2> uvs           (totalVerts);
+    std::vector<uint32_t>     indices       (totalTris * 3);
+    std::vector<uint32_t>     triMeshIDs   (totalTris);
     std::vector<uint32_t>     vertexOffsets(numMeshes);
     std::vector<uint32_t>     indexOffsets (numMeshes);
 
@@ -127,10 +131,28 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
         indexOffsets [mi] = tBase * 3;  // byte/element offset in index array
 
         for (uint32_t v = 0; v < m.numVertices(); ++v) {
-            positions[vBase + v] = {m.positions[v].x, m.positions[v].y, m.positions[v].z};
-            normals  [vBase + v] = m.normals.empty()
-                ? PackedFloat3{0,1,0}
-                : PackedFloat3{m.normals[v].x, m.normals[v].y, m.normals[v].z};
+            Vec3f p = m.positions[v];
+            Vec3f n = m.normals.empty() ? Vec3f{0,1,0} : m.normals[v];
+            PackedFloat3 pOpen, pClose;
+            if (m.hasMotion()) {
+                const Mat4f& xfOpen  = m.motionKeys.front().objectToWorld;
+                const Mat4f& ixfOpen = m.motionKeys.front().worldToObject;
+                const Mat4f& xfClose = m.motionKeys.back().objectToWorld;
+                Vec3f woOpen  = xfOpen.transformPoint(p);
+                Vec3f woClose = xfClose.transformPoint(p);
+                pOpen  = {woOpen.x,  woOpen.y,  woOpen.z};
+                pClose = {woClose.x, woClose.y, woClose.z};
+                // Normal baked at shutter-open (acceptable approximation for rigid motion)
+                n = ixfOpen.transformNormal(n);
+                float len = n.length();
+                if (len > 1e-6f) n = n * (1.f / len);
+            } else {
+                pOpen  = {p.x, p.y, p.z};
+                pClose = {p.x, p.y, p.z};
+            }
+            positions     [vBase + v] = pOpen;
+            positionsClose[vBase + v] = pClose;
+            normals        [vBase + v] = {n.x, n.y, n.z};
             uvs[vBase + v] = m.uvs.empty()
                 ? PackedFloat2{0,0}
                 : PackedFloat2{m.uvs[v].x, m.uvs[v].y};
@@ -154,7 +176,9 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
     // Upload attribute buffers
     // -----------------------------------------------------------------------
     m_impl->positionBuffer = makeSharedBuffer(
-        device, positions.data(),  totalVerts * sizeof(PackedFloat3), "positions");
+        device, positions.data(),      totalVerts * sizeof(PackedFloat3), "positions");
+    m_impl->positionBufferClose = makeSharedBuffer(
+        device, positionsClose.data(), totalVerts * sizeof(PackedFloat3), "positionsClose");
     m_impl->normalBuffer   = makeSharedBuffer(
         device, normals.data(),    totalVerts * sizeof(PackedFloat3), "normals");
     m_impl->uvBuffer       = makeSharedBuffer(
@@ -169,36 +193,61 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
         device, indexOffsets.data(),  numMeshes * sizeof(uint32_t),   "indexOffsets");
 
     // -----------------------------------------------------------------------
-    // Build one BLAS per mesh
+    // Build one BLAS per mesh.
+    // Animated meshes get a motion BLAS with 2 world-space vertex keyframes
+    // (shutter-open and shutter-close). Static meshes get a regular BLAS.
+    // The TLAS remains non-motion; primitive_motion interpolation happens within
+    // each motion BLAS based on the ray time passed to intersect().
     // -----------------------------------------------------------------------
     for (uint32_t mi = 0; mi < numMeshes; ++mi) {
         const MeshDesc& m = pool.mesh(mi);
 
-        // Vertex and index sub-buffers are the full concatenated buffers with offsets.
-        MTLAccelerationStructureTriangleGeometryDescriptor* geomDesc =
-            [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
-
-        // Use the full concatenated vertex buffer starting at offset 0.
-        // Global indices (which include vBase) are correct because the vertex
-        // buffer covers all meshes — no per-mesh vertex offset needed.
-        geomDesc.vertexBuffer       = m_impl->positionBuffer;
-        geomDesc.vertexBufferOffset = 0;
-        geomDesc.vertexStride       = sizeof(PackedFloat3);
-        geomDesc.vertexFormat       = MTLAttributeFormatFloat3;
-
-        geomDesc.indexBuffer       = m_impl->indexBuffer;
-        geomDesc.indexBufferOffset = indexOffsets[mi] * sizeof(uint32_t);
-        geomDesc.indexType         = MTLIndexTypeUInt32;
-
-        geomDesc.triangleCount = m.numTriangles();
-        geomDesc.opaque        = YES;
-
         MTLPrimitiveAccelerationStructureDescriptor* blasDesc =
             [MTLPrimitiveAccelerationStructureDescriptor descriptor];
-        blasDesc.geometryDescriptors = @[geomDesc];
 
-        id<MTLAccelerationStructure> blas =
-            buildAccelStructure(device, cmdQueue, blasDesc);
+        if (m.hasMotion()) {
+            MTLAccelerationStructureMotionTriangleGeometryDescriptor* geomDesc =
+                [MTLAccelerationStructureMotionTriangleGeometryDescriptor descriptor];
+
+            MTLMotionKeyframeData* kf0 = [MTLMotionKeyframeData data];
+            kf0.buffer = m_impl->positionBuffer;
+            kf0.offset = 0;  // global indices have vertex base baked in
+
+            MTLMotionKeyframeData* kf1 = [MTLMotionKeyframeData data];
+            kf1.buffer = m_impl->positionBufferClose;
+            kf1.offset = 0;
+
+            geomDesc.vertexBuffers     = @[kf0, kf1];
+            geomDesc.vertexStride      = sizeof(PackedFloat3);
+            geomDesc.vertexFormat      = MTLAttributeFormatFloat3;
+            geomDesc.indexBuffer       = m_impl->indexBuffer;
+            geomDesc.indexBufferOffset = indexOffsets[mi] * sizeof(uint32_t);
+            geomDesc.indexType         = MTLIndexTypeUInt32;
+            geomDesc.triangleCount     = m.numTriangles();
+            geomDesc.opaque            = YES;
+
+            blasDesc.geometryDescriptors = @[geomDesc];
+            blasDesc.motionKeyframeCount = 2;
+            blasDesc.motionStartTime     = 0.0f;
+            blasDesc.motionEndTime       = 1.0f;
+        } else {
+            MTLAccelerationStructureTriangleGeometryDescriptor* geomDesc =
+                [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
+
+            geomDesc.vertexBuffer       = m_impl->positionBuffer;
+            geomDesc.vertexBufferOffset = 0;
+            geomDesc.vertexStride       = sizeof(PackedFloat3);
+            geomDesc.vertexFormat       = MTLAttributeFormatFloat3;
+            geomDesc.indexBuffer        = m_impl->indexBuffer;
+            geomDesc.indexBufferOffset  = indexOffsets[mi] * sizeof(uint32_t);
+            geomDesc.indexType          = MTLIndexTypeUInt32;
+            geomDesc.triangleCount      = m.numTriangles();
+            geomDesc.opaque             = YES;
+
+            blasDesc.geometryDescriptors = @[geomDesc];
+        }
+
+        id<MTLAccelerationStructure> blas = buildAccelStructure(device, cmdQueue, blasDesc);
         if (!blas) {
             spdlog::error("MetalAccelStructure: BLAS build failed for mesh {}", mi);
             return;
@@ -209,9 +258,6 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
     // -----------------------------------------------------------------------
     // Build TLAS with identity transforms (geometry is already world-space)
     // -----------------------------------------------------------------------
-    // Populate instance descriptors in a CPU buffer.
-    // MTLPackedFloat4x3 stores 4 rows of float3 (columns 0-2 = rotation/scale,
-    // row 3 = translation).  Identity = rows {1,0,0}, {0,1,0}, {0,0,1}, {0,0,0}.
     size_t instDescSize = sizeof(MTLAccelerationStructureInstanceDescriptor);
     id<MTLBuffer> instBuf = [device newBufferWithLength:instDescSize * numMeshes
                                                options:MTLResourceStorageModeShared];
@@ -222,7 +268,6 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
     for (uint32_t i = 0; i < numMeshes; ++i) {
         MTLAccelerationStructureInstanceDescriptor d;
         memset(&d, 0, sizeof(d));
-        // Identity MTLPackedFloat4x3: columns are rows of the matrix
         d.transformationMatrix.columns[0] = {1, 0, 0};
         d.transformationMatrix.columns[1] = {0, 1, 0};
         d.transformationMatrix.columns[2] = {0, 0, 1};

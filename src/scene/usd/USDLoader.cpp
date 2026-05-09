@@ -836,7 +836,11 @@ static std::vector<MotionKey> collectMotionKeys(
                       prim.GetPath().GetString(), times.size(), timesStr);
     }
 
-    // Always include the stage endpoints so the full shutter is covered
+    // Clamp to shutter window: discard any samples outside [startTime, endTime],
+    // then ensure the endpoints themselves are always present.
+    times.erase(std::remove_if(times.begin(), times.end(),
+        [startTime, endTime](double t) { return t < startTime || t > endTime; }),
+        times.end());
     times.insert(times.begin(), startTime);
     times.push_back(endTime);
     std::sort(times.begin(), times.end());

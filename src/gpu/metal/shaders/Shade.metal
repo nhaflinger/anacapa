@@ -169,26 +169,27 @@ static float3 shadowTransmittance(
     float3                          origin,
     float3                          dir,
     float                           tMax,
+    float                           rayTime,
     const device GpuMaterial*       materials,
     uint                            numMaterials,
     const device PackedFloat3*      normals,
     const device uint32_t*          indices,
     const device uint32_t*          meshIndexOffsets,
-    instance_acceleration_structure accelStruct)
+    acceleration_structure<instancing, primitive_motion> accelStruct)
 {
     float3 T = float3(1.0f);
     ray    stepRay;
-    stepRay.direction   = dir;
+    stepRay.direction    = dir;
     stepRay.min_distance = 1e-4f;
     stepRay.max_distance = tMax;
-    stepRay.origin      = origin;
+    stepRay.origin       = origin;
 
-    intersector<triangle_data, instancing> isect;
+    intersector<triangle_data, instancing, primitive_motion> isect;
     isect.accept_any_intersection(false);  // need closest hit to step correctly
 
     for (int step = 0; step < 8; ++step) {
-        intersection_result<triangle_data, instancing> res =
-            isect.intersect(stepRay, accelStruct, 0xFF);
+        intersection_result<triangle_data, instancing, primitive_motion> res =
+            isect.intersect(stepRay, accelStruct, 0xFF, rayTime);
 
         if (res.type == intersection_type::none) break;  // clear path
 
@@ -206,7 +207,7 @@ static float3 shadowTransmittance(
             // Advance past this surface
             float remaining = stepRay.max_distance - res.distance;
             if (remaining <= 1e-4f) break;
-            stepRay.origin      = stepRay.origin + dir * (res.distance + 1e-4f);
+            stepRay.origin       = stepRay.origin + dir * (res.distance + 1e-4f);
             stepRay.max_distance = remaining - 1e-4f;
         } else {
             // Opaque surface blocks the light
@@ -224,6 +225,7 @@ static float3 sampleDirect(
     float3                          baseColor,
     float                           roughness,
     float                           metalness,
+    float                           rayTime,
     const device GpuLight*          lights,
     uint                            numLights,
     const device GpuMaterial*       materials,
@@ -232,7 +234,7 @@ static float3 sampleDirect(
     const device uint32_t*          indices,
     const device uint32_t*          meshIndexOffsets,
     thread uint&                    rng,
-    instance_acceleration_structure accelStruct,
+    acceleration_structure<instancing, primitive_motion> accelStruct,
     constant GpuCameraParams&       cam,
     texture2d<float, access::sample> envTex)
 {
@@ -304,7 +306,7 @@ static float3 sampleDirect(
 
     // Transmittance along shadow ray — steps through glass surfaces
     float3 shadowOrigin = hitPos + n * 1e-4f;
-    float3 Tr = shadowTransmittance(shadowOrigin, wi, tMax,
+    float3 Tr = shadowTransmittance(shadowOrigin, wi, tMax, rayTime,
                                     materials, numMaterials,
                                     normals, indices, meshIndexOffsets,
                                     accelStruct);
@@ -354,7 +356,7 @@ kernel void shade(
     const device uint32_t*                  meshVertexOffsets [[ buffer(9) ]],
     const device uint32_t*                  meshIndexOffsets  [[ buffer(10) ]],
     constant  GpuSampleBatch&               batch         [[ buffer(11) ]],
-    instance_acceleration_structure         accelStruct   [[ buffer(12) ]],
+    acceleration_structure<instancing, primitive_motion> accelStruct [[ buffer(12) ]],
     texture2d<float, access::sample>        envTexture    [[ texture(0) ]],
     uint2                                   gid           [[ thread_position_in_grid ]])
 {
@@ -372,7 +374,7 @@ kernel void shade(
     float3 vert   = float3(cam.vertical.x,   cam.vertical.y,   cam.vertical.z);
     float3 ll     = float3(cam.lowerLeft.x,  cam.lowerLeft.y,  cam.lowerLeft.z);
 
-    intersector<triangle_data, instancing> isect;
+    intersector<triangle_data, instancing, primitive_motion> isect;
     isect.accept_any_intersection(false);
 
     // Local accumulators — written once after the whole batch
@@ -384,6 +386,9 @@ kernel void shade(
 
         // Per-sample RNG seed decorrelated by pixel and sample index
         uint rng = pcg(pcg(globalPixelIdx) ^ (sampleIndex * 2654435761u));
+
+        // Sample shutter time uniformly within [shutterOpen, shutterClose]
+        float rayTime = cam.shutterOpen + rand01(rng) * (cam.shutterClose - cam.shutterOpen);
 
         // Generate camera ray
         float jx = rand01(rng);
@@ -405,8 +410,8 @@ kernel void shade(
 
     for (uint bounce = 0; bounce <= cam.maxDepth; ++bounce) {
 
-        intersection_result<triangle_data, instancing> res =
-            isect.intersect(r, accelStruct, 0xFF);
+        intersection_result<triangle_data, instancing, primitive_motion> res =
+            isect.intersect(r, accelStruct, 0xFF, rayTime);
 
         if (res.type == intersection_type::none) {
             float3 envColor;
@@ -461,6 +466,7 @@ kernel void shade(
             L += throughput * sampleDirect(hitPos, n, wo,
                                            mat.type, baseColor,
                                            mat.roughness, mat.metalness,
+                                           rayTime,
                                            lights, numLights,
                                            materials, numMaterials,
                                            normals, indices, meshIndexOffsets,

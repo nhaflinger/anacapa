@@ -65,7 +65,7 @@ kernel void rayGen(
     ray.pixelIdx   = pixelIdx;
     ray.sampleIdx  = 0;
     ray.bounce     = 0;
-    ray._pad       = 0;
+    ray.time       = 0.f;
 
     rays[pixelIdx] = ray;
 }

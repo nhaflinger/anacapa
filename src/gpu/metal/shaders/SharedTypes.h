@@ -38,7 +38,7 @@ struct GpuRay {
     uint32_t  pixelIdx;   // flat pixel index (y*width + x)
     uint32_t  sampleIdx;  // which sample within the spp loop
     uint32_t  bounce;     // current bounce depth
-    uint32_t  _pad;
+    float     time;       // normalized shutter time [0,1] for motion blur
 };
 
 // ---------------------------------------------------------------------------
@@ -128,7 +128,9 @@ struct GpuCameraParams {
     GpuFloat3 envRot1;
     GpuFloat3 envRot2;
     float     envIntensity;   // multiplier for HDRI pixels (DomeLight intensity)
-    float     _pad4, _pad5, _pad6;
+    float     shutterOpen;    // normalized shutter open time  (typically 0.0)
+    float     shutterClose;   // normalized shutter close time (typically 1.0)
+    float     _pad6;
 };
 
 // ---------------------------------------------------------------------------

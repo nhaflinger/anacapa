@@ -454,6 +454,8 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
         avg = avg * (1.f / 5.f);
         camParams.envLe = {avg.x, avg.y, avg.z};
     }
+    camParams.shutterOpen  = cam.shutterOpen;
+    camParams.shutterClose = cam.shutterClose;
 
     // Use the persistent accum buffer — allocates only on first call or size change.
     // clearAccum() should be called when starting a fresh render (new scene/camera).
@@ -609,6 +611,8 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
         avg = avg * (1.f / 5.f);
         camParams.envLe = {avg.x, avg.y, avg.z};
     }
+    camParams.shutterOpen  = cam.shutterOpen;
+    camParams.shutterClose = cam.shutterClose;
 
     // Tile-sized accum buffer (gid is local; shader writes gid.y*tileW+gid.x)
     size_t accumBytes   = tileW * tileH * sizeof(GpuAccumPixel);
