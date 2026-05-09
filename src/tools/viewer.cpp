@@ -361,30 +361,45 @@ int main(int argc, char** argv)
     auto lastPoll = std::chrono::steady_clock::now();
     bool fitToWin = true;
     float zoom    = 1.0f;
+    bool needsRedraw = true;
 
     bool running = true;
     while (running) {
+        // Sleep the thread until an event arrives or the poll timer fires.
+        int timeUntilPoll;
+        {
+            auto now = std::chrono::steady_clock::now();
+            int elapsed = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - lastPoll).count());
+            timeUntilPoll = pollMs - elapsed;
+            if (timeUntilPoll < 0) timeUntilPoll = 0;
+        }
+
         SDL_Event event;
-        while (SDL_PollEvent(&event)) {
-            ImGui_ImplSDL2_ProcessEvent(&event);
-            if (event.type == SDL_QUIT) running = false;
-            if (event.type == SDL_KEYDOWN) {
-                if (event.key.keysym.sym == SDLK_q) running = false;
-                if (event.key.keysym.sym == SDLK_r) {
-                    auto& s = slots[activeSlot];
-                    s.exposure = 0.f; s.saturation = 1.f;
-                    s.contrast = 0.f; s.temperature = 0.f;
-                    s.toneMap  = false;
+        if (SDL_WaitEventTimeout(&event, timeUntilPoll) != 0) {
+            do {
+                ImGui_ImplSDL2_ProcessEvent(&event);
+                if (event.type == SDL_QUIT) running = false;
+                if (event.type == SDL_KEYDOWN) {
+                    if (event.key.keysym.sym == SDLK_q) running = false;
+                    if (event.key.keysym.sym == SDLK_r) {
+                        auto& s = slots[activeSlot];
+                        s.exposure = 0.f; s.saturation = 1.f;
+                        s.contrast = 0.f; s.temperature = 0.f;
+                        s.toneMap  = false;
+                    }
+                    // Number keys 1-8 switch view slot; Shift+number sets record slot
+                    if (event.key.keysym.sym >= SDLK_1 && event.key.keysym.sym <= SDLK_8) {
+                        int idx = event.key.keysym.sym - SDLK_1;
+                        if (event.key.keysym.mod & KMOD_SHIFT)
+                            recordSlot = idx;
+                        else
+                            activeSlot = idx;
+                    }
                 }
-                // Number keys 1-8 switch view slot; Shift+number sets record slot
-                if (event.key.keysym.sym >= SDLK_1 && event.key.keysym.sym <= SDLK_8) {
-                    int idx = event.key.keysym.sym - SDLK_1;
-                    if (event.key.keysym.mod & KMOD_SHIFT)
-                        recordSlot = idx;
-                    else
-                        activeSlot = idx;
-                }
-            }
+            } while (SDL_PollEvent(&event));
+            needsRedraw = true;
         }
 
         // Poll the watched file — on change, load into the active slot
@@ -406,8 +421,12 @@ int main(int argc, char** argv)
                 s.texH    = g_texHeight;
                 s.lastMod = mod;
                 g_srcTexture = 0; g_texWidth = 0; g_texHeight = 0;
+                needsRedraw = true;
             }
         }
+
+        if (!needsRedraw) continue;
+        needsRedraw = false;
 
         // Apply color grading for active slot
         SlotState& as = slots[activeSlot];
@@ -565,6 +584,11 @@ int main(int argc, char** argv)
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
+
+        // Keep redrawing while the user is interacting — dragging a slider
+        // doesn't generate continuous SDL events, so we must self-trigger.
+        if (ImGui::IsAnyItemActive() || ImGui::GetIO().MouseDown[0])
+            needsRedraw = true;
     }
 
     for (int i = 0; i < kNumSlots; ++i)
