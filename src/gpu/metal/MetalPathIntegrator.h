@@ -48,6 +48,8 @@ public:
 
     bool isValid() const;
 
+    void setFireflyClamp(float v);
+
     // Zero the persistent accumulation buffer.
     // Call before starting a fresh render (scene/camera change) so stale
     // samples from the previous render do not bleed into the new one.

@@ -179,6 +179,12 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
         }
     }
 
+    if (m_fireflyClamp > 0.f) {
+        float lum = luminance(L);
+        if (lum > m_fireflyClamp)
+            L = L * (m_fireflyClamp / lum);
+    }
+
     return L;
 }
 

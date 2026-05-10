@@ -56,6 +56,7 @@ struct MetalPathIntegrator::Impl {
     uint32_t numMaterials = 0;
     uint32_t numLights    = 0;
     uint32_t maxDepth     = 6;
+    float    fireflyClamp = 10.f;
 
     // Persistent full-frame accumulation buffer.
     // Allocated once and reused across renderFrame() calls so samples accumulate
@@ -287,6 +288,10 @@ void MetalPathIntegrator::clearAccum() {
     m_impl->clearAccum();
 }
 
+void MetalPathIntegrator::setFireflyClamp(float v) {
+    m_impl->fireflyClamp = v;
+}
+
 // ---------------------------------------------------------------------------
 // prepare() — build accel structure, upload materials + lights
 // ---------------------------------------------------------------------------
@@ -481,6 +486,7 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     camParams.shutterClose = cam.shutterClose;
     camParams.envMapWidth  = m_impl->envCdfWidth;
     camParams.envMapHeight = m_impl->envCdfHeight;
+    camParams.fireflyClamp = m_impl->fireflyClamp;
 
     // Use the persistent accum buffer — allocates only on first call or size change.
     // clearAccum() should be called when starting a fresh render (new scene/camera).
@@ -643,6 +649,7 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
     camParams.shutterClose = cam.shutterClose;
     camParams.envMapWidth  = m_impl->envCdfWidth;
     camParams.envMapHeight = m_impl->envCdfHeight;
+    camParams.fireflyClamp = m_impl->fireflyClamp;
 
     // Tile-sized accum buffer (gid is local; shader writes gid.y*tileW+gid.x)
     size_t accumBytes   = tileW * tileH * sizeof(GpuAccumPixel);

@@ -759,6 +759,13 @@ kernel void shade(
         r.max_distance = 1e10f;
     }  // end bounce loop
 
+        // Firefly clamp: scale L down if its luminance exceeds the threshold.
+        if (cam.fireflyClamp > 0.0f) {
+            float lum = 0.2126f * L.x + 0.7152f * L.y + 0.0722f * L.z;
+            if (lum > cam.fireflyClamp)
+                L *= cam.fireflyClamp / lum;
+        }
+
         // Accumulate this sample into batch locals
         batchL += L;
         float lum = 0.2126f * L.x + 0.7152f * L.y + 0.0722f * L.z;

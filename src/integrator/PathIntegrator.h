@@ -21,8 +21,10 @@ namespace anacapa {
 // ---------------------------------------------------------------------------
 class PathIntegrator : public IIntegrator {
 public:
-    explicit PathIntegrator(uint32_t maxDepth = 8, uint32_t minDepth = 2)
-        : m_maxDepth(maxDepth), m_minDepth(minDepth) {}
+    explicit PathIntegrator(uint32_t maxDepth = 8, uint32_t minDepth = 2,
+                            float fireflyClamp = 10.f)
+        : m_maxDepth(maxDepth), m_minDepth(minDepth)
+        , m_fireflyClamp(fireflyClamp) {}
 
     void prepare(const SceneView& /*scene*/) override {}
 
@@ -59,9 +61,10 @@ private:
         return (f * f) / (f*f + g*g);
     }
 
-    uint32_t m_maxDepth    = 8;
-    uint32_t m_minDepth    = 2;
-    int32_t  m_debugMeshID = -1;
+    uint32_t m_maxDepth     = 8;
+    uint32_t m_minDepth     = 2;
+    float    m_fireflyClamp = 10.f;
+    int32_t  m_debugMeshID  = -1;
 };
 
 } // namespace anacapa

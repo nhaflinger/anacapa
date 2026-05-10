@@ -504,6 +504,7 @@ void RenderSession::render() {
             std::string(ANACAPA_METALLIB_PATH));
         if (metalIntegrator->isValid()) {
             spdlog::info("Interactive mode: using Metal GPU backend");
+            metalIntegrator->setFireflyClamp(m_settings.fireflyClamp);
             m_integrator = std::move(metalIntegrator);
         } else {
             spdlog::warn("--interactive: Metal backend unavailable, "
@@ -534,7 +535,9 @@ void RenderSession::render() {
             m_integrator = std::make_unique<BDPTIntegrator>(m_settings.maxDepth,
                                                                m_settings.fireflyClamp);
         else
-            m_integrator = std::make_unique<PathIntegrator>(m_settings.maxDepth);
+            m_integrator = std::make_unique<PathIntegrator>(m_settings.maxDepth,
+                                                               2,
+                                                               m_settings.fireflyClamp);
     }
     m_baseSampler = std::make_unique<HaltonSampler>(m_settings.samplesPerPixel);
     m_threadPool  = std::make_unique<ThreadPool>(m_settings.numThreads);
