@@ -140,6 +140,13 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 ./build/Darwin/anacapa --scene scenes/cornell_box.usda \
   -o images/render.exr --override-materials
 
+# Render only one mesh's pixels (primary rays to other meshes return black;
+# indirect bounces are unaffected so the target mesh is fully lit).  Useful
+# for diagnosing per-mesh shading issues — the meshID matches the order in
+# which meshes are loaded from USD.
+./build/Darwin/anacapa --scene scenes/cornell_box.usda \
+  -o images/render.exr --debug-mesh 1   # 1 = ceiling in cornell_box.usda
+
 # Soft shadows from directional lights (2° angular radius, ~4× the sun)
 ./build/Darwin/anacapa --scene scenes/cornell_box.usda \
   -o images/render.exr --png images/render.png \
@@ -218,6 +225,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 | `--exposure` | `0` | EV exposure adjustment for `--png` output (stops; positive = brighter) |
 | `--override-lights` | off | Replace all scene lights with a single white directional light (isolate material issues) |
 | `--override-materials` | off | Replace all scene materials with white Lambertian (isolate lighting issues) |
+| `--debug-mesh INT` | -1 (off) | Primary rays that hit any other mesh ID return black; only the target mesh is shaded.  Indirect bounces unaffected. |
 
 `--spp`: 16–32 for quick composition checks; 256+ for final renders.
 

@@ -65,6 +65,11 @@ struct RenderSettings {
     std::string    pngPath;                   // If set, write ACES-tonemapped PNG alongside EXR
     float          exposure          = 0.f;   // EV adjustment for PNG output
     DenoiseOptions denoise;
+
+    // Debug: when >= 0, primary rays that hit a different mesh return black.
+    // Useful for isolating which pixels belong to a given mesh, and for testing
+    // that mesh's shading in isolation.  Indirect bounces are unaffected.
+    int32_t        debugMeshID       = -1;
 };
 
 // ---------------------------------------------------------------------------

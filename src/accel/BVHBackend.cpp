@@ -715,6 +715,15 @@ void BVHBackend::fillSurfaceInteraction(const BVHTriTrav& trav,
         si.n  = safeNormalize(attrib.sn0 * w + attrib.sn1 * u + attrib.sn2 * v);
     }
 
+    // Align geometric normal with the shading normal hemisphere.  USD scenes
+    // can author shading normals that disagree with triangle-winding-derived
+    // geometric normals (e.g. the Cornell box ceiling, where vertex order
+    // makes ng point up while authored normals point down into the room).
+    // The path tracer treats the shading normal as the intended outward
+    // direction, so flip ng if they're opposed.  Without this, frontFace
+    // tests in ShadingContext misclassify these surfaces as back-facing.
+    if (dot(si.ng, si.n) < 0.f) si.ng = -si.ng;
+
     si.meshID = trav.meshID();
     si.primID = attrib.primID;
 }

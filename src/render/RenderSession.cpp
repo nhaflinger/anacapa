@@ -539,6 +539,7 @@ void RenderSession::render() {
     m_baseSampler = std::make_unique<HaltonSampler>(m_settings.samplesPerPixel);
     m_threadPool  = std::make_unique<ThreadPool>(m_settings.numThreads);
 
+    m_integrator->setDebugMeshID(m_settings.debugMeshID);
     m_integrator->prepare(m_scene);
 
     std::vector<TileRequest> tiles;

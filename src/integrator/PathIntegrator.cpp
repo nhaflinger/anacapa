@@ -92,6 +92,16 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
 
         SurfaceInteraction& si = hit.si;
 
+        // --debug-mesh: when set, primary rays that hit any other mesh return
+        // black so only the target mesh's pixels are visible.  Indirect bounces
+        // are unaffected — the target mesh is shaded with full lighting.
+        if (firstHit && m_debugMeshID >= 0
+                && static_cast<int32_t>(si.meshID) != m_debugMeshID) {
+            outAlbedo = {};
+            outNormal = {};
+            return {};
+        }
+
         const IMaterial* mat = nullptr;
         if (si.meshID < scene.materials.size())
             mat = scene.materials[si.meshID];

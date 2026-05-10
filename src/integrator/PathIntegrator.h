@@ -36,6 +36,8 @@ public:
                     ISampler& sampler,
                     TileBuffer& localTile) override;
 
+    void setDebugMeshID(int32_t id) override { m_debugMeshID = id; }
+
 private:
     // outAlbedo/outNormal are filled with first-hit surface data for denoising
     Spectrum Li(const Ray& ray, const SceneView& scene,
@@ -61,6 +63,7 @@ private:
     uint32_t m_maxDepth  = 8;
     uint32_t m_minDepth  = 2;
     uint32_t m_lightCount = 0;
+    int32_t  m_debugMeshID = -1;
 };
 
 } // namespace anacapa

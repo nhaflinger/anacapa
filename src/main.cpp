@@ -94,6 +94,12 @@ int main(int argc, char** argv) {
                  "Replace all scene materials with white Lambertian "
                  "(useful for isolating lighting issues from material issues)");
 
+    app.add_option("--debug-mesh", settings.debugMeshID,
+                   "Debug: primary rays that hit any other mesh ID return "
+                   "black, so only the target mesh's pixels are shaded.  "
+                   "Indirect bounces are unaffected.  Default: -1 (off).")
+       ->default_val(-1);
+
 
     app.add_option("--png", settings.pngPath,
                    "Write an ACES-tonemapped sRGB PNG for easy comparison (e.g. out.png)");

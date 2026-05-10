@@ -195,6 +195,11 @@ public:
                              uint32_t sampleStart,
                              uint32_t sampleCount,
                              Film& film) { return false; }
+
+    // Debug: when >= 0, primary rays that hit a different mesh return black.
+    // Indirect bounces are unaffected.  Used to isolate a single mesh's
+    // pixels and test its shading in isolation.
+    virtual void setDebugMeshID(int32_t /*id*/) {}
 };
 
 } // namespace anacapa
