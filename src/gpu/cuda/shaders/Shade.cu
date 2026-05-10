@@ -418,15 +418,16 @@ extern "C" __global__ void __raygen__rg()
             TraceResult hit = trace(rayOrig, rayDir, 1e-4f, 1e10f, rayTime);
 
             if (!hit.valid) {
-                float3 envColor;
+                // Match the CPU PathIntegrator: scenes without an environment
+                // light produce black for escaped rays.  This branch used to
+                // synthesise a blue/white sky gradient, which leaked into
+                // Cornell-box indirect bounces through the open front face —
+                // making GPU renders ~2× brighter and blue-shifted vs CPU.
+                float3 envColor = make_float3(0.0f, 0.0f, 0.0f);
                 if (params.cam.hasEnvLight && params.envTexture != 0) {
                     envColor = evalEnvmap(rayDir);
                 } else if (params.cam.hasEnvLight) {
                     envColor = make3(params.cam.envLe);
-                } else {
-                    float skyT = 0.5f * (rayDir.y + 1.0f);
-                    envColor = lerp3(make_float3(1.0f, 1.0f, 1.0f),
-                                     make_float3(0.5f, 0.7f, 1.0f), skyT) * 0.5f;
                 }
                 L += throughput * envColor;
                 break;

@@ -414,12 +414,15 @@ kernel void shade(
             isect.intersect(r, accelStruct, 0xFF, rayTime);
 
         if (res.type == intersection_type::none) {
-            float3 envColor;
+            // Match the CPU PathIntegrator: scenes without an environment
+            // light produce black for escaped rays.  Earlier this branch
+            // synthesised a blue/white sky gradient, which leaked into
+            // closed-room indirect bounces (e.g. the Cornell box's open
+            // front face) and made GPU renders ~2× brighter and blue-shifted
+            // vs CPU.
+            float3 envColor = float3(0.0f);
             if (cam.hasEnvLight) {
                 envColor = evalEnvmap(r.direction, cam, envTexture);
-            } else {
-                float skyT = 0.5f * (r.direction.y + 1.0f);
-                envColor = mix(float3(1.0f), float3(0.5f, 0.7f, 1.0f), skyT) * 0.5f;
             }
             L += throughput * envColor;
             break;
