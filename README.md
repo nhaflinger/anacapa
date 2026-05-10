@@ -187,6 +187,8 @@ DYLD_LIBRARY_PATH=~/usd/lib \
   --interactive                              \
   --firefly-clamp    10                      \
   --light-angle      2.0                     \
+  --filter           mitchell                \
+  --filter-width     2.0                     \
   --adaptive                                 \
   --adaptive-base-spp 0
 
