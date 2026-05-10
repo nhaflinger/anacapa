@@ -11,7 +11,13 @@ namespace {
 // shared_ptr<TextureSystem> in OIIO 3+. Overload-dispatch handles both.
 inline void assignTextureSystem(std::shared_ptr<OIIO::TextureSystem>& dst,
                                 OIIO::TextureSystem* raw) {
+#if OIIO_VERSION_MAJOR >= 3
+    // OIIO 3+: create() returns shared_ptr so this overload is unreachable;
+    // if somehow called, let the shared_ptr destructor handle cleanup.
+    dst.reset(raw);
+#else
     dst.reset(raw, [](OIIO::TextureSystem* ts) { OIIO::TextureSystem::destroy(ts); });
+#endif
 }
 inline void assignTextureSystem(std::shared_ptr<OIIO::TextureSystem>& dst,
                                 std::shared_ptr<OIIO::TextureSystem> sp) {

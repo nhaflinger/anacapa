@@ -113,19 +113,21 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
 
     if (!mat) return gm;
 
-    // EmissiveMaterial
-    const EmissiveMaterial* em = dynamic_cast<const EmissiveMaterial*>(mat);
-    if (em) {
-        gm.type = kMatEmissive;
-        // Le via a dummy ShadingContext — surface normal = +Z
+    // Emissive — covers EmissiveMaterial, StandardSurfaceMaterial with emission > 0,
+    // OslMaterial with emission, etc.  Use a dummy front-face ShadingContext so Le
+    // is evaluated from the correct (front) side of the surface.
+    {
         SurfaceInteraction si;
         si.n = si.ng = {0,0,1};
-        ShadingContext ctx(si, {0,0,1});
+        ShadingContext ctx(si, {0,0,-1});  // rayDir opposite ng → frontFace = true
         Spectrum Le = mat->Le(ctx, {0,0,1});
-        gm.emissive = {Le.x, Le.y, Le.z};
-        Spectrum alb = mat->reflectance(ctx);
-        gm.baseColor = {alb.x, alb.y, alb.z};
-        return gm;
+        if (Le.x > 0.f || Le.y > 0.f || Le.z > 0.f) {
+            gm.type = kMatEmissive;
+            gm.emissive = {Le.x, Le.y, Le.z};
+            Spectrum alb = mat->reflectance(ctx);
+            gm.baseColor = {alb.x, alb.y, alb.z};
+            return gm;
+        }
     }
 
     // Glass detection — works for StandardSurfaceMaterial and OslMaterial.

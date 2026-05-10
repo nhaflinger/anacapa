@@ -506,7 +506,8 @@ private:
     }
     ~OslShadingSystem() {
         delete m_sys;
-        if (m_texRaw) OSL::TextureSystem::destroy(m_texRaw);
+        if (m_textureSystem)
+            OSL::TextureSystem::destroy(m_textureSystem);
     }
 
     OslRendererServices  m_services;
