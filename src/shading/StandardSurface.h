@@ -3,6 +3,7 @@
 #include <anacapa/shading/IMaterial.h>
 #include "MarschnerHair.h"
 #include "Texture.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -91,6 +92,159 @@ inline float fresnelDielectric(float cosI, float eta) {
     float Rs = (cosI - eta * cosT) / (cosI + eta * cosT);
     float Rp = (eta * cosI - cosT) / (eta * cosI + cosT);
     return 0.5f * (Rs * Rs + Rp * Rp);
+}
+
+// ---------------------------------------------------------------------------
+// Specular directional-hemispherical albedo for the dielectric layer
+//
+// E_spec(cos_theta_o, roughness) = ∫ f_GGX(wo, wi) * cos(theta_i) dwi
+//
+// Used in the diffuse weight `(1 - spec * E_spec)` so the energy that the
+// rough specular lobe DOESN'T reflect (because GGX*F integrates to less than
+// the Fresnel point evaluation, especially at high roughness) returns to
+// the diffuse layer instead of vanishing.  Replaces the previous point
+// Fresnel `specF`, which over-counted spec reflectance and dimmed indirect
+// diffuse — the "spec/diff balance" issue in the indirect-brightness memo.
+//
+// LUT is 32 × 32 (cos_theta_o × roughness), MC-integrated for F0 = 0.04
+// (IOR ≈ 1.5).  Materials with significantly different IORs incur a small
+// approximation error, smaller than the energy loss this fix prevents.
+// ---------------------------------------------------------------------------
+namespace detail {
+struct SpecAlbedoLUT {
+    static constexpr int N_COS = 32;
+    static constexpr int N_R   = 32;
+    float v    [N_COS * N_R];   // E_spec(cos_theta_o, roughness)
+    float eAvg [N_R];           // E_avg(roughness) = ∫ E_spec(μ, α) * 2μ dμ
+
+    SpecAlbedoLUT() {
+        for (int ic = 0; ic < N_COS; ++ic) {
+            float cosO = (ic + 0.5f) / float(N_COS);
+            float sinO = std::sqrt(std::max(0.f, 1.f - cosO * cosO));
+            Vec3f wo{sinO, 0.f, cosO};
+            for (int ir = 0; ir < N_R; ++ir) {
+                float r       = (ir + 0.5f) / float(N_R);
+                float alpha   = std::max(1e-4f, r * r);
+                float alpha2  = alpha * alpha;
+                v[ic * N_R + ir] = computeCell(wo, alpha2);
+            }
+        }
+        // Cosine-weighted directional average → "avg albedo" used as the
+        // Kulla-Conty multi-scatter denominator (1 - E_avg).
+        for (int ir = 0; ir < N_R; ++ir) {
+            float sum = 0.f;
+            for (int ic = 0; ic < N_COS; ++ic) {
+                float cosO = (ic + 0.5f) / float(N_COS);
+                sum += v[ic * N_R + ir] * 2.f * cosO;
+            }
+            eAvg[ir] = sum / float(N_COS);
+        }
+    }
+
+    static float halton(int i, int b) {
+        float f = 1.f, r = 0.f;
+        while (i > 0) { f /= float(b); r += f * float(i % b); i /= b; }
+        return r;
+    }
+
+    static float computeCell(Vec3f wo, float alpha2) {
+        constexpr int N  = 4096;
+        constexpr float F0 = 0.04f;       // dielectric, IOR ~ 1.5
+        float E = 0.f;
+        for (int s = 0; s < N; ++s) {
+            float u1 = halton(s + 1, 2);
+            float u2 = halton(s + 1, 3);
+            // GGX half-vector NDF sample (Trowbridge-Reitz)
+            float phi   = 2.f * kSS_Pi * u1;
+            float cosH2 = (1.f - u2) / ((alpha2 - 1.f) * u2 + 1.f);
+            float cosH  = std::sqrt(std::max(0.f, cosH2));
+            float sinH  = std::sqrt(std::max(0.f, 1.f - cosH2));
+            Vec3f wh{sinH * std::cos(phi), sinH * std::sin(phi), cosH};
+            // Reflect wo about wh
+            float dotVH = wo.x * wh.x + wo.y * wh.y + wo.z * wh.z;
+            if (dotVH <= 0.f || wh.z <= 0.f) continue;
+            Vec3f wi{2.f * dotVH * wh.x - wo.x,
+                     2.f * dotVH * wh.y - wo.y,
+                     2.f * dotVH * wh.z - wo.z};
+            if (wi.z <= 0.f) continue;
+            // Smith G2 separable
+            auto G1 = [&](float c) {
+                return 2.f * c / (c + std::sqrt(alpha2 + (1.f - alpha2) * c * c));
+            };
+            float G2 = G1(wo.z) * G1(wi.z);
+            // Schlick Fresnel
+            float Fr = F0 + (1.f - F0) * std::pow(1.f - dotVH, 5.f);
+            // Estimator: G2 * F * |wo·wh| / (cos_theta_o * cos_theta_h)
+            E += G2 * Fr * dotVH / (wo.z * wh.z);
+        }
+        return E / float(N);
+    }
+
+    float lookup(float cosO, float roughness) const {
+        cosO      = std::min(1.f, std::max(0.f, cosO));
+        roughness = std::min(1.f, std::max(0.f, roughness));
+        float fc = cosO      * float(N_COS - 1);
+        float fr = roughness * float(N_R   - 1);
+        int   ic0 = std::min(N_COS - 1, int(fc));
+        int   ir0 = std::min(N_R   - 1, int(fr));
+        int   ic1 = std::min(N_COS - 1, ic0 + 1);
+        int   ir1 = std::min(N_R   - 1, ir0 + 1);
+        float tc  = fc - float(ic0);
+        float tr  = fr - float(ir0);
+        float v00 = v[ic0 * N_R + ir0];
+        float v01 = v[ic0 * N_R + ir1];
+        float v10 = v[ic1 * N_R + ir0];
+        float v11 = v[ic1 * N_R + ir1];
+        return (v00 * (1.f - tc) + v10 * tc) * (1.f - tr)
+             + (v01 * (1.f - tc) + v11 * tc) * tr;
+    }
+};
+}  // namespace detail
+
+// Directional-hemispherical reflectance of the dielectric GGX spec lobe at
+// (cos_theta_o, roughness).  Thread-safe lazy init via C++11 magic statics.
+inline float specAlbedoDielectric(float cosO, float roughness) {
+    static const detail::SpecAlbedoLUT lut;
+    return lut.lookup(cosO, roughness);
+}
+
+// Cosine-weighted hemispherical average of E_spec — only depends on
+// roughness.  Used as the Kulla-Conty multi-scatter compensation
+// denominator: missing energy = (1 - E_avg).
+inline float specAvgAlbedoDielectric(float roughness) {
+    static const detail::SpecAlbedoLUT lut;
+    roughness = std::min(1.f, std::max(0.f, roughness));
+    float fr  = roughness * float(detail::SpecAlbedoLUT::N_R - 1);
+    int   i0  = std::min(detail::SpecAlbedoLUT::N_R - 1, int(fr));
+    int   i1  = std::min(detail::SpecAlbedoLUT::N_R - 1, i0 + 1);
+    float t   = fr - float(i0);
+    return lut.eAvg[i0] * (1.f - t) + lut.eAvg[i1] * t;
+}
+
+// Kulla-Conty multi-scatter compensation BRDF.  Adds the energy that
+// single-scatter GGX loses to inter-microfacet masking back into the spec
+// lobe.  The closer the surface gets to fully rough, the larger this term
+// — for a chrome ball at roughness=1, single-scatter delivers ~50% of
+// incoming; the rest comes through this term.  For dielectric F0=0.04
+// the absolute magnitude is small; for metals (F0 ≈ baseColor) it's
+// substantial and is the main reason rough metals look dim without it.
+//
+// f_ms(wo, wi) = F_ms * (1 - E(wo)) * (1 - E(wi)) / (π * (1 - E_avg))
+//
+// where F_ms ≈ F0 (the layer's incident reflectance — `base_color * spec`
+// for metals, `m_f0Dielectric * spec` for dielectric spec).
+inline Spectrum evalGGX_ms(Vec3f woLocal, Vec3f wiLocal,
+                           float roughness, Spectrum F_ms)
+{
+    float cosO = woLocal.z;
+    float cosI = wiLocal.z;
+    if (cosO <= 0.f || cosI <= 0.f) return {};
+    float Eo = specAlbedoDielectric(cosO, roughness);
+    float Ei = specAlbedoDielectric(cosI, roughness);
+    float Ea = specAvgAlbedoDielectric(roughness);
+    if (Ea >= 0.999f) return {};   // saturated — no missing energy
+    float k = (1.f - Eo) * (1.f - Ei) / (kSS_Pi * (1.f - Ea));
+    return F_ms * k;
 }
 
 // ---------------------------------------------------------------------------
@@ -387,12 +541,20 @@ public:
         float coatF = schlickDielectric(woLocal.z, m_coatF0);
         float specF = schlickDielectric(woLocal.z, m_f0Dielectric);
 
-        // Layer selection weights (all in [0,1], then renormalize)
+        // Layer selection weights (all in [0,1], then renormalize).
+        // Diffuse weight uses the spec lobe's directional-hemispherical
+        // albedo E_spec — the average fraction the rough specular actually
+        // reflects, integrated over the upper hemisphere — instead of the
+        // point Fresnel `specF` at this single direction.  The latter
+        // double-counted reflectance (especially at grazing angles where
+        // specF→1 but rough GGX still scatters most energy elsewhere) and
+        // dimmed indirect diffuse.
+        float specE  = specAlbedoDielectric(woLocal.z, rough);
         float wCoat  = m_p.coat * coatF;
         float wMetal = metal * (1.f - wCoat);
         float wSpec  = spec * (1.f - metal) * specF * (1.f - wCoat);
         float wDiff  = m_p.base * (1.f - metal)
-                     * (1.f - spec * specF) * (1.f - wCoat);
+                     * (1.f - spec * specE) * (1.f - wCoat);
 
         float wSum = wCoat + wMetal + wSpec + wDiff;
         if (wSum <= 0.f) return {};
@@ -426,7 +588,7 @@ public:
         float pdfFwd = 0.f, pdfRev = 0.f;
         Spectrum fCombined = evalCombined(ctx, woLocal, sctx.toLocal(result.wi),
                                           wCoat, wMetal, wSpec, wDiff,
-                                          base_color, spec, alpha2,
+                                          base_color, spec, rough, alpha2,
                                           pdfFwd, pdfRev);
 
         result.f      = fCombined * std::abs(sctx.toLocal(result.wi).z);
@@ -512,11 +674,16 @@ public:
         float coatF = schlickDielectric(woLocal.z, m_coatF0);
         float specF = schlickDielectric(woLocal.z, m_f0Dielectric);
 
+        // Energy-conserving spec/diff balance — see the same calculation in
+        // sample() for the rationale.  E_spec replaces specF in the diffuse
+        // weight to avoid double-counting the spec lobe's reflectance at
+        // grazing angles (where the rough GGX*F integrates to << specF).
+        float specE  = specAlbedoDielectric(woLocal.z, rough);
         float wCoat  = m_p.coat * coatF;
         float wMetal = metal * (1.f - wCoat);
         float wSpec  = spec * (1.f - metal) * specF * (1.f - wCoat);
         float wDiff  = m_p.base * (1.f - metal)
-                     * (1.f - spec * specF) * (1.f - wCoat);
+                     * (1.f - spec * specE) * (1.f - wCoat);
 
         float wSum = wCoat + wMetal + wSpec + wDiff;
         if (wSum <= 0.f) return {};
@@ -526,7 +693,7 @@ public:
         float pdfFwd, pdfRev;
         Spectrum f = evalCombined(ctx, woLocal, wiLocal,
                                   wCoat, wMetal, wSpec, wDiff,
-                                  base_color, spec, alpha2,
+                                  base_color, spec, rough, alpha2,
                                   pdfFwd, pdfRev);
 
         BSDFEval e;
@@ -642,7 +809,8 @@ private:
     Spectrum evalCombined(const ShadingContext& /*ctx*/,
                            Vec3f woLocal, Vec3f wiLocal,
                            float wCoat, float wMetal, float wSpec, float wDiff,
-                           Spectrum base_color, float spec, float alpha2,
+                           Spectrum base_color, float spec, float roughness,
+                           float alpha2,
                            float& pdfFwd, float& pdfRev) const {
         Spectrum f = {};
         pdfFwd = pdfRev = 0.f;
@@ -659,33 +827,51 @@ private:
             pdfRev += pR * wCoat;
         }
 
-        // Metallic layer
+        // Metallic layer.  Single-scatter GGX + Kulla-Conty multi-scatter
+        // compensation — without the MS term, rough metals are visibly dim
+        // because single-scatter GGX masks ~half the energy at α≈1.
         if (wMetal > 0.f) {
             float pF, pR;
-            Spectrum fM = evalGGX(woLocal, wiLocal, alpha2,
-                                   base_color * m_p.base, pF, pR);
+            Spectrum F0 = base_color * m_p.base;
+            Spectrum fM = evalGGX(woLocal, wiLocal, alpha2, F0, pF, pR);
+            fM = fM + evalGGX_ms(woLocal, wiLocal, roughness, F0);
             f += fM * wMetal;
             pdfFwd += pF * wMetal;
             pdfRev += pR * wMetal;
         }
 
-        // Dielectric specular layer
+        // Dielectric specular layer (same MS compensation; effect is small at
+        // F0=0.04 but consistent with the metal lobe).
         if (wSpec > 0.f) {
             float pF, pR;
             Spectrum f0 = m_p.specular_color * (spec * m_f0Dielectric);
             Spectrum fS = evalGGX(woLocal, wiLocal, alpha2, f0, pF, pR);
+            fS = fS + evalGGX_ms(woLocal, wiLocal, roughness, f0);
             f += fS * wSpec;
             pdfFwd += pF * wSpec;
             pdfRev += pR * wSpec;
         }
 
-        // Diffuse layer
+        // Diffuse layer — Disney/Burley diffuse with roughness-dependent
+        // retro-reflection (Burley 2012, "Physically-Based Shading at
+        // Disney").  At low roughness Fd90 ≈ 0.5 so the term DARKENS the
+        // diffuse at grazing (consistent with smooth dielectrics shedding
+        // light forward); at roughness=1 Fd90 = 2.5 so the term BRIGHTENS
+        // the diffuse at grazing — the retro-reflection peak that gives
+        // Cycles its softer wall-bounce look.  Reduces to plain Lambertian
+        // when both cos_i and cos_o = 1.
         if (wDiff > 0.f) {
-            float cosI  = std::abs(wiLocal.z);
-            float cosO  = std::abs(woLocal.z);
-            Spectrum fD = base_color * m_p.base * kSS_InvPi;
-            float pF    = cosI * kSS_InvPi;
-            float pR    = cosO * kSS_InvPi;
+            float cosI = std::abs(wiLocal.z);
+            float cosO = std::abs(woLocal.z);
+            Vec3f wh   = safeNormalize(woLocal + wiLocal);
+            float cosD = std::max(0.f, dot(wiLocal, wh));
+            float Fd90 = 0.5f + 2.f * cosD * cosD * roughness;
+            float Fview  = 1.f + (Fd90 - 1.f) * std::pow(1.f - cosO, 5.f);
+            float Flight = 1.f + (Fd90 - 1.f) * std::pow(1.f - cosI, 5.f);
+            Spectrum fD  = base_color * m_p.base
+                         * (kSS_InvPi * Fview * Flight);
+            float pF = cosI * kSS_InvPi;
+            float pR = cosO * kSS_InvPi;
             f += fD * wDiff;
             pdfFwd += pF * wDiff;
             pdfRev += pR * wDiff;
