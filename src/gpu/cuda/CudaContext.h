@@ -33,6 +33,10 @@ public:
     // Caller casts the returned void* to CUstream / cudaStream_t.
     void* cuStream() const;
 
+    // OptiX device context.  Non-null only when ANACAPA_ENABLE_OPTIX is set.
+    // Caller casts to OptixDeviceContext.
+    void* optixContext() const;
+
 private:
     CudaContext();
 

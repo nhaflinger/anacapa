@@ -7,6 +7,11 @@
 
 #include <cuda_runtime.h>
 
+#ifdef ANACAPA_ENABLE_OPTIX
+#include <optix.h>
+#include <optix_stubs.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cfloat>
@@ -20,228 +25,39 @@
         fprintf(stderr, "[error] CUDA %s %s:%d\n", cudaGetErrorString(_e), __FILE__, __LINE__); \
 } while(0)
 
+#ifdef ANACAPA_ENABLE_OPTIX
+#define OPTIX_CHECK(call) do { \
+    OptixResult _r = (call); \
+    if (_r != OPTIX_SUCCESS) \
+        fprintf(stderr, "[error] OptiX %d (%s) at %s:%d\n", \
+            int(_r), optixGetErrorName(_r), __FILE__, __LINE__); \
+} while(0)
+#endif
+
 namespace anacapa {
-
-// ---------------------------------------------------------------------------
-// CPU-side BVH builder — binned SAH (matches quality of the CPU BVHBackend)
-// ---------------------------------------------------------------------------
-struct BvhBuilder {
-    const float*    positions;
-    const uint32_t* indices;
-    uint32_t        numTris;
-
-    std::vector<BvhNode>  nodes;
-    std::vector<uint32_t> primOrder;
-
-    struct TriData {
-        float cX, cY, cZ;   // centroid
-        float minX, minY, minZ;
-        float maxX, maxY, maxZ;
-    };
-    std::vector<TriData> triData;
-
-    void build() {
-        primOrder.resize(numTris);
-        for (uint32_t i = 0; i < numTris; ++i) primOrder[i] = i;
-
-        triData.resize(numTris);
-        for (uint32_t t = 0; t < numTris; ++t) {
-            float mnX= FLT_MAX, mnY= FLT_MAX, mnZ= FLT_MAX;
-            float mxX=-FLT_MAX, mxY=-FLT_MAX, mxZ=-FLT_MAX;
-            for (int v = 0; v < 3; ++v) {
-                uint32_t vi = indices[t * 3 + v];
-                float px = positions[vi*3+0], py = positions[vi*3+1], pz = positions[vi*3+2];
-                if (px<mnX) mnX=px; if (px>mxX) mxX=px;
-                if (py<mnY) mnY=py; if (py>mxY) mxY=py;
-                if (pz<mnZ) mnZ=pz; if (pz>mxZ) mxZ=pz;
-            }
-            triData[t] = { (mnX+mxX)*0.5f, (mnY+mxY)*0.5f, (mnZ+mxZ)*0.5f,
-                            mnX, mnY, mnZ, mxX, mxY, mxZ };
-        }
-
-        nodes.reserve(2 * numTris);
-        nodes.push_back(BvhNode{});
-        buildNode(0, 0, numTris);
-    }
-
-private:
-    static constexpr uint32_t MAX_LEAF_TRIS = 4;
-    static constexpr int      NUM_BINS      = 8;
-
-    // Half surface area of an AABB — proportional to expected ray hit probability
-    static float halfArea(float mnX, float mnY, float mnZ,
-                          float mxX, float mxY, float mxZ) {
-        float dx = mxX-mnX, dy = mxY-mnY, dz = mxZ-mnZ;
-        return dx*dy + dy*dz + dz*dx;
-    }
-
-    struct Bin {
-        float mnX= FLT_MAX, mnY= FLT_MAX, mnZ= FLT_MAX;
-        float mxX=-FLT_MAX, mxY=-FLT_MAX, mxZ=-FLT_MAX;
-        uint32_t count = 0;
-        void expand(float x, float y, float z,
-                    float x2, float y2, float z2) {
-            if (x <mnX) mnX=x;  if (x2>mxX) mxX=x2;
-            if (y <mnY) mnY=y;  if (y2>mxY) mxY=y2;
-            if (z <mnZ) mnZ=z;  if (z2>mxZ) mxZ=z2;
-            ++count;
-        }
-    };
-
-    void buildNode(uint32_t nodeIdx, uint32_t first, uint32_t count) {
-        // Compute node AABB
-        float bMinX= FLT_MAX, bMinY= FLT_MAX, bMinZ= FLT_MAX;
-        float bMaxX=-FLT_MAX, bMaxY=-FLT_MAX, bMaxZ=-FLT_MAX;
-        for (uint32_t i = first; i < first + count; ++i) {
-            const TriData& td = triData[primOrder[i]];
-            if (td.minX<bMinX) bMinX=td.minX; if (td.maxX>bMaxX) bMaxX=td.maxX;
-            if (td.minY<bMinY) bMinY=td.minY; if (td.maxY>bMaxY) bMaxY=td.maxY;
-            if (td.minZ<bMinZ) bMinZ=td.minZ; if (td.maxZ>bMaxZ) bMaxZ=td.maxZ;
-        }
-        nodes[nodeIdx].aabbMin = { bMinX, bMinY, bMinZ };
-        nodes[nodeIdx].aabbMax = { bMaxX, bMaxY, bMaxZ };
-
-        if (count <= MAX_LEAF_TRIS) {
-            nodes[nodeIdx].leftFirst = first;
-            nodes[nodeIdx].triCount  = count;
-            return;
-        }
-
-        // SAH binned split — try all 3 axes, pick lowest cost
-        float parentArea = halfArea(bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ);
-        float leafCost   = float(count);  // cost of not splitting
-
-        float bestCost = leafCost;
-        int   bestAxis = -1;
-        float bestSplit = 0.0f;
-
-        // Centroid AABB for this set
-        float cMinX= FLT_MAX, cMinY= FLT_MAX, cMinZ= FLT_MAX;
-        float cMaxX=-FLT_MAX, cMaxY=-FLT_MAX, cMaxZ=-FLT_MAX;
-        for (uint32_t i = first; i < first + count; ++i) {
-            const TriData& td = triData[primOrder[i]];
-            if (td.cX<cMinX) cMinX=td.cX; if (td.cX>cMaxX) cMaxX=td.cX;
-            if (td.cY<cMinY) cMinY=td.cY; if (td.cY>cMaxY) cMaxY=td.cY;
-            if (td.cZ<cMinZ) cMinZ=td.cZ; if (td.cZ>cMaxZ) cMaxZ=td.cZ;
-        }
-
-        float cRange[3] = { cMaxX-cMinX, cMaxY-cMinY, cMaxZ-cMinZ };
-        float cMin [3]  = { cMinX, cMinY, cMinZ };
-
-        for (int axis = 0; axis < 3; ++axis) {
-            if (cRange[axis] < 1e-6f) continue;
-
-            Bin bins[NUM_BINS]{};
-            float scale = float(NUM_BINS) / cRange[axis];
-
-            for (uint32_t i = first; i < first + count; ++i) {
-                const TriData& td = triData[primOrder[i]];
-                float c = (&td.cX)[axis];
-                int b = std::min(int((c - cMin[axis]) * scale), NUM_BINS - 1);
-                bins[b].expand(td.minX, td.minY, td.minZ,
-                               td.maxX, td.maxY, td.maxZ);
-            }
-
-            // Prefix left bounds, suffix right bounds → evaluate NUM_BINS-1 splits
-            float lMnX[NUM_BINS-1], lMnY[NUM_BINS-1], lMnZ[NUM_BINS-1];
-            float lMxX[NUM_BINS-1], lMxY[NUM_BINS-1], lMxZ[NUM_BINS-1];
-            uint32_t lCnt[NUM_BINS-1];
-            {
-                float mx= FLT_MAX, my= FLT_MAX, mz= FLT_MAX;
-                float Mx=-FLT_MAX, My=-FLT_MAX, Mz=-FLT_MAX;
-                uint32_t cnt = 0;
-                for (int b = 0; b < NUM_BINS-1; ++b) {
-                    if (bins[b].count > 0) {
-                        if (bins[b].mnX<mx) mx=bins[b].mnX;
-                        if (bins[b].mnY<my) my=bins[b].mnY;
-                        if (bins[b].mnZ<mz) mz=bins[b].mnZ;
-                        if (bins[b].mxX>Mx) Mx=bins[b].mxX;
-                        if (bins[b].mxY>My) My=bins[b].mxY;
-                        if (bins[b].mxZ>Mz) Mz=bins[b].mxZ;
-                    }
-                    cnt += bins[b].count;
-                    lMnX[b]=mx; lMnY[b]=my; lMnZ[b]=mz;
-                    lMxX[b]=Mx; lMxY[b]=My; lMxZ[b]=Mz;
-                    lCnt[b]=cnt;
-                }
-            }
-
-            {
-                float mx= FLT_MAX, my= FLT_MAX, mz= FLT_MAX;
-                float Mx=-FLT_MAX, My=-FLT_MAX, Mz=-FLT_MAX;
-                uint32_t cnt = 0;
-                for (int b = NUM_BINS-1; b >= 1; --b) {
-                    if (bins[b].count > 0) {
-                        if (bins[b].mnX<mx) mx=bins[b].mnX;
-                        if (bins[b].mnY<my) my=bins[b].mnY;
-                        if (bins[b].mnZ<mz) mz=bins[b].mnZ;
-                        if (bins[b].mxX>Mx) Mx=bins[b].mxX;
-                        if (bins[b].mxY>My) My=bins[b].mxY;
-                        if (bins[b].mxZ>Mz) Mz=bins[b].mxZ;
-                    }
-                    cnt += bins[b].count;
-                    int s = b - 1;  // split after bin s (left = [0..s], right = [s+1..])
-                    if (lCnt[s] == 0 || cnt == 0) continue;
-                    float cost = (halfArea(lMnX[s],lMnY[s],lMnZ[s],lMxX[s],lMxY[s],lMxZ[s]) / parentArea) * float(lCnt[s])
-                               + (halfArea(mx,my,mz,Mx,My,Mz)                                / parentArea) * float(cnt);
-                    if (cost < bestCost) {
-                        bestCost  = cost;
-                        bestAxis  = axis;
-                        // World-space split plane position: boundary between bin s and s+1
-                        bestSplit = cMin[axis] + float(s + 1) / scale;
-                    }
-                }
-            }
-        }
-
-        if (bestAxis < 0) {
-            // SAH found no profitable split — make a leaf (may exceed MAX_LEAF_TRIS)
-            nodes[nodeIdx].leftFirst = first;
-            nodes[nodeIdx].triCount  = count;
-            return;
-        }
-
-        // Partition primOrder[first..first+count) around bestSplit on bestAxis
-        auto* begin = primOrder.data() + first;
-        auto* end   = begin + count;
-        auto* mid   = std::partition(begin, end, [&](uint32_t t) {
-            return (&triData[t].cX)[bestAxis] < bestSplit;
-        });
-        uint32_t leftCount = static_cast<uint32_t>(mid - begin);
-
-        // Degenerate partition fallback
-        if (leftCount == 0 || leftCount == count) {
-            leftCount = count / 2;
-        }
-
-        uint32_t leftIdx = static_cast<uint32_t>(nodes.size());
-        nodes.push_back(BvhNode{});
-        nodes.push_back(BvhNode{});
-
-        nodes[nodeIdx].leftFirst = leftIdx;
-        nodes[nodeIdx].triCount  = 0;
-
-        buildNode(leftIdx,     first,            leftCount);
-        buildNode(leftIdx + 1, first + leftCount, count - leftCount);
-    }
-};
 
 // ---------------------------------------------------------------------------
 // Impl
 // ---------------------------------------------------------------------------
 struct CudaAccelStructure::Impl {
-    CudaBuffer<BvhNode>  bvhNodes;
-    CudaBuffer<uint32_t> triIndices;
-    CudaByteBuffer       posBuffer;    // packed float3 positions
+    CudaByteBuffer        posBuffer;       // packed float3, world-space at shutter-open
+    CudaByteBuffer        posBufferClose;  // packed float3, world-space at shutter-close
     CudaBuffer<GpuFloat3> normals;
     CudaBuffer<uint32_t>  indices;
     CudaBuffer<uint32_t>  triMeshIDs;
     CudaBuffer<uint32_t>  meshVertexOffsets;
     CudaBuffer<uint32_t>  meshIndexOffsets;
 
+#ifdef ANACAPA_ENABLE_OPTIX
+    // OptiX-built GAS storage.  Output buffer must outlive the handle.
+    CudaByteBuffer         asBuffer;
+    OptixTraversableHandle gasHandle = 0;
+#endif
+
     uint32_t totalVertices  = 0;
     uint32_t totalTriangles = 0;
     uint32_t numMeshes_     = 0;
+    bool     hasMotion      = false;
     bool     valid          = false;
 };
 
@@ -251,8 +67,6 @@ struct CudaAccelStructure::Impl {
 CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& pool)
     : m_impl(std::make_unique<Impl>())
 {
-    (void)ctx;  // stream not needed for host-side build + cudaMemcpy
-
     uint32_t numMeshes = static_cast<uint32_t>(pool.numMeshes());
     m_impl->numMeshes_ = numMeshes;
 
@@ -262,15 +76,21 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
     }
 
     // -----------------------------------------------------------------------
-    // Build concatenated CPU arrays
+    // Build concatenated CPU arrays.
+    // Vertex positions are baked to world-space.  When a mesh has motionKeys,
+    // the front and back keys' object-to-world transforms produce two
+    // keyframes (positions + positionsClose); otherwise both keyframes are
+    // identical and the GAS is built without motion options.
     // -----------------------------------------------------------------------
     uint32_t totalVerts = 0, totalTris = 0;
     for (uint32_t i = 0; i < numMeshes; ++i) {
         totalVerts += pool.mesh(i).numVertices();
         totalTris  += pool.mesh(i).numTriangles();
+        if (pool.mesh(i).hasMotion()) m_impl->hasMotion = true;
     }
 
-    std::vector<float>     positions(totalVerts * 3);
+    std::vector<float>     positions     (totalVerts * 3);  // world-space @ shutterOpen
+    std::vector<float>     positionsClose(totalVerts * 3);  // world-space @ shutterClose
     std::vector<GpuFloat3> normals  (totalVerts);
     std::vector<uint32_t>  indices  (totalTris * 3);
     std::vector<uint32_t>  triMeshIDs   (totalTris);
@@ -283,13 +103,36 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
         vertexOffsets[mi] = vBase;
         indexOffsets [mi] = tBase * 3;
 
+        const bool   meshMotion = m.hasMotion();
+        const Mat4f  xfOpen     = meshMotion ? m.motionKeys.front().objectToWorld : Mat4f{};
+        const Mat4f  xfClose    = meshMotion ? m.motionKeys.back ().objectToWorld : Mat4f{};
+        const Mat4f& ixfOpen    = meshMotion ? m.motionKeys.front().worldToObject : Mat4f{};
+
         for (uint32_t v = 0; v < m.numVertices(); ++v) {
-            positions[(vBase + v) * 3 + 0] = m.positions[v].x;
-            positions[(vBase + v) * 3 + 1] = m.positions[v].y;
-            positions[(vBase + v) * 3 + 2] = m.positions[v].z;
-            normals[vBase + v] = m.normals.empty()
-                ? GpuFloat3{0, 1, 0}
-                : GpuFloat3{m.normals[v].x, m.normals[v].y, m.normals[v].z};
+            const Vec3f p = m.positions[v];
+            Vec3f pOpen, pClose;
+            if (meshMotion) {
+                pOpen  = xfOpen .transformPoint(p);
+                pClose = xfClose.transformPoint(p);
+            } else {
+                pOpen  = p;
+                pClose = p;
+            }
+            positions     [(vBase + v) * 3 + 0] = pOpen.x;
+            positions     [(vBase + v) * 3 + 1] = pOpen.y;
+            positions     [(vBase + v) * 3 + 2] = pOpen.z;
+            positionsClose[(vBase + v) * 3 + 0] = pClose.x;
+            positionsClose[(vBase + v) * 3 + 1] = pClose.y;
+            positionsClose[(vBase + v) * 3 + 2] = pClose.z;
+
+            // Normal baked at shutter-open — acceptable for rigid motion.
+            Vec3f n = m.normals.empty() ? Vec3f{0, 1, 0} : m.normals[v];
+            if (meshMotion) {
+                n = ixfOpen.transformNormal(n);
+                float len = n.length();
+                if (len > 1e-6f) n = n * (1.f / len);
+            }
+            normals[vBase + v] = GpuFloat3{n.x, n.y, n.z};
         }
         for (uint32_t t = 0; t < m.numTriangles(); ++t) {
             indices[(tBase + t) * 3 + 0] = vBase + m.indices[t * 3 + 0];
@@ -305,20 +148,15 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
     m_impl->totalTriangles = totalTris;
 
     // -----------------------------------------------------------------------
-    // Build BVH on CPU
-    // -----------------------------------------------------------------------
-    BvhBuilder builder;
-    builder.positions = positions.data();
-    builder.indices   = indices.data();
-    builder.numTris   = totalTris;
-    builder.build();
-
-    // -----------------------------------------------------------------------
     // Upload to GPU
     // -----------------------------------------------------------------------
-    m_impl->posBuffer = CudaByteBuffer(totalVerts * 3 * sizeof(float));
-    m_impl->posBuffer.upload(reinterpret_cast<const uint8_t*>(positions.data()),
-                              totalVerts * 3 * sizeof(float));
+    const size_t vbBytes = totalVerts * 3 * sizeof(float);
+
+    m_impl->posBuffer = CudaByteBuffer(vbBytes);
+    m_impl->posBuffer.upload(reinterpret_cast<const uint8_t*>(positions.data()), vbBytes);
+
+    m_impl->posBufferClose = CudaByteBuffer(vbBytes);
+    m_impl->posBufferClose.upload(reinterpret_cast<const uint8_t*>(positionsClose.data()), vbBytes);
 
     m_impl->normals = CudaBuffer<GpuFloat3>(totalVerts);
     m_impl->normals.upload(normals);
@@ -335,15 +173,101 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
     m_impl->meshIndexOffsets = CudaBuffer<uint32_t>(numMeshes);
     m_impl->meshIndexOffsets.upload(indexOffsets);
 
-    m_impl->bvhNodes = CudaBuffer<BvhNode>(builder.nodes.size());
-    m_impl->bvhNodes.upload(builder.nodes);
+#ifdef ANACAPA_ENABLE_OPTIX
+    // -----------------------------------------------------------------------
+    // OptiX GAS — single triangle GAS over all meshes' world-space vertices.
+    // When any mesh has motion keys, build with two-keyframe motion options
+    // (vertexBuffers[0] = open, vertexBuffers[1] = close); otherwise build
+    // a static GAS with a single vertex buffer.  Per-mesh material dispatch
+    // happens via the existing triMeshIDs buffer (Step 4 will replace this
+    // with SBT records when the kernel is split).
+    // -----------------------------------------------------------------------
+    OptixDeviceContext optixCtx =
+        static_cast<OptixDeviceContext>(ctx.optixContext());
+    if (optixCtx) {
+        CUstream stream = static_cast<CUstream>(ctx.cuStream());
 
-    m_impl->triIndices = CudaBuffer<uint32_t>(builder.primOrder.size());
-    m_impl->triIndices.upload(builder.primOrder);
+        const CUdeviceptr vbOpen  = static_cast<CUdeviceptr>(m_impl->posBuffer.devPtr());
+        const CUdeviceptr vbClose = static_cast<CUdeviceptr>(m_impl->posBufferClose.devPtr());
+        const CUdeviceptr ibDev   = static_cast<CUdeviceptr>(m_impl->indices.devPtr());
+
+        CUdeviceptr vbArr[2] = { vbOpen, vbClose };
+
+        OptixBuildInput buildInput{};
+        buildInput.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+        auto& tri = buildInput.triangleArray;
+        tri.vertexFormat        = OPTIX_VERTEX_FORMAT_FLOAT3;
+        tri.vertexStrideInBytes = sizeof(float) * 3;
+        tri.numVertices         = totalVerts;
+        tri.vertexBuffers       = vbArr;  // first numKeys entries used
+        tri.indexFormat         = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
+        tri.indexStrideInBytes  = sizeof(uint32_t) * 3;
+        tri.numIndexTriplets    = totalTris;
+        tri.indexBuffer         = ibDev;
+
+        const uint32_t geomFlags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+        tri.flags         = geomFlags;
+        tri.numSbtRecords = 1;
+
+        OptixAccelBuildOptions accelOpts{};
+        accelOpts.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE
+                             | OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
+        accelOpts.operation  = OPTIX_BUILD_OPERATION_BUILD;
+        if (m_impl->hasMotion) {
+            accelOpts.motionOptions.numKeys   = 2;
+            accelOpts.motionOptions.timeBegin = 0.0f;
+            accelOpts.motionOptions.timeEnd   = 1.0f;
+            accelOpts.motionOptions.flags     = OPTIX_MOTION_FLAG_NONE;
+        } else {
+            accelOpts.motionOptions.numKeys = 1;
+        }
+
+        OptixAccelBufferSizes sizes{};
+        OPTIX_CHECK(optixAccelComputeMemoryUsage(
+            optixCtx, &accelOpts, &buildInput, /*numBuildInputs=*/1, &sizes));
+
+        // Temp buffer (freed after build) and a property slot to query the
+        // compacted size.
+        CudaByteBuffer tempBuf(sizes.tempSizeInBytes);
+        CudaByteBuffer outBufUncompacted(sizes.outputSizeInBytes);
+        CudaBuffer<uint64_t> compactedSizeBuf(1);
+
+        OptixAccelEmitDesc emit{};
+        emit.type   = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
+        emit.result = static_cast<CUdeviceptr>(compactedSizeBuf.devPtr());
+
+        OptixTraversableHandle handleUncompacted = 0;
+        OPTIX_CHECK(optixAccelBuild(
+            optixCtx, stream, &accelOpts, &buildInput, 1,
+            static_cast<CUdeviceptr>(tempBuf.devPtr()), sizes.tempSizeInBytes,
+            static_cast<CUdeviceptr>(outBufUncompacted.devPtr()), sizes.outputSizeInBytes,
+            &handleUncompacted, &emit, 1));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+
+        std::vector<uint64_t> compactedSizeHost(1);
+        compactedSizeBuf.download(compactedSizeHost);
+        const size_t compactedSize = static_cast<size_t>(compactedSizeHost[0]);
+
+        if (compactedSize > 0 && compactedSize < sizes.outputSizeInBytes) {
+            m_impl->asBuffer = CudaByteBuffer(compactedSize);
+            OPTIX_CHECK(optixAccelCompact(
+                optixCtx, stream, handleUncompacted,
+                static_cast<CUdeviceptr>(m_impl->asBuffer.devPtr()), compactedSize,
+                &m_impl->gasHandle));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+        } else {
+            // Compaction wouldn't help — keep the uncompacted buffer.
+            m_impl->asBuffer  = std::move(outBufUncompacted);
+            m_impl->gasHandle = handleUncompacted;
+        }
+        printf("[info]  CudaAccelStructure: OptiX GAS built (%s, %u verts, %u tris, %.2f KiB)\n",
+               m_impl->hasMotion ? "motion-aware" : "static",
+               totalVerts, totalTris,
+               m_impl->asBuffer.byteSize() / 1024.0);
+    }
+#endif
 
     m_impl->valid = true;
-    printf("[info]  CudaAccelStructure: BVH built — %u nodes, %u verts, %u tris\n",
-           static_cast<uint32_t>(builder.nodes.size()), totalVerts, totalTris);
 }
 
 CudaAccelStructure::~CudaAccelStructure() = default;
@@ -356,14 +280,21 @@ uint32_t CudaAccelStructure::totalVertices()  const { return m_impl->totalVertic
 uint32_t CudaAccelStructure::totalTriangles() const { return m_impl->totalTriangles; }
 uint32_t CudaAccelStructure::numMeshes()      const { return m_impl->numMeshes_; }
 
-uint64_t CudaAccelStructure::bvhBuffer()              const { return m_impl->bvhNodes.devPtr(); }
-uint64_t CudaAccelStructure::triIndexBuffer()         const { return m_impl->triIndices.devPtr(); }
 uint64_t CudaAccelStructure::positionBuffer()         const { return m_impl->posBuffer.devPtr(); }
+uint64_t CudaAccelStructure::positionBufferClose()    const { return m_impl->posBufferClose.devPtr(); }
 uint64_t CudaAccelStructure::normalBuffer()           const { return m_impl->normals.devPtr(); }
 uint64_t CudaAccelStructure::indexBuffer()            const { return m_impl->indices.devPtr(); }
 uint64_t CudaAccelStructure::triMeshIDBuffer()        const { return m_impl->triMeshIDs.devPtr(); }
 uint64_t CudaAccelStructure::meshVertexOffsetBuffer() const { return m_impl->meshVertexOffsets.devPtr(); }
 uint64_t CudaAccelStructure::meshIndexOffsetBuffer()  const { return m_impl->meshIndexOffsets.devPtr(); }
+bool     CudaAccelStructure::hasMotion()              const { return m_impl->hasMotion; }
+uint64_t CudaAccelStructure::traversableHandle()      const {
+#ifdef ANACAPA_ENABLE_OPTIX
+    return static_cast<uint64_t>(m_impl->gasHandle);
+#else
+    return 0;
+#endif
+}
 
 } // namespace anacapa
 

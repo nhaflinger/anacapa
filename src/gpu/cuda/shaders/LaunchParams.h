@@ -1,6 +1,8 @@
-// LaunchParams.h — struct passed as a kernel argument to shade().
-// Shared between host (CudaPathIntegrator.cu) and device (Shade.cu).
-// Only included from .cu translation units compiled by nvcc.
+// LaunchParams.h — host/device shared launch parameter block.
+//
+// Used as the OptiX __constant__ variable referenced by raygen / closesthit /
+// miss programs.  The host fills this struct, copies it into a device buffer,
+// and passes that buffer's address to optixLaunch.
 
 #pragma once
 #include "SharedTypes.h"
@@ -18,9 +20,11 @@ struct LaunchParams {
     const uint32_t*          triMeshIDs;      // device ptr — per-triangle meshID
     const uint32_t*          meshVertexOffsets; // device ptr — per-mesh vertex base
     const uint32_t*          meshIndexOffsets;  // device ptr — per-mesh index base (elements)
-    const float*             positions;       // device ptr — packed float3 vertex positions
-    const BvhNode*           bvh;            // device ptr — flat BVH node array
-    const uint32_t*          triIndices;     // device ptr — BVH-reordered triangle indices
     GpuSampleBatch           sampleBatch;
     cudaTextureObject_t      envTexture;      // 0 = no texture (use envLe fallback)
+
+    // OptiX traversable for the GAS (uint64 = OptixTraversableHandle).  Set
+    // to CudaAccelStructure::traversableHandle().  Read in raygen / shadow
+    // calls of optixTrace.
+    unsigned long long       handle;
 };

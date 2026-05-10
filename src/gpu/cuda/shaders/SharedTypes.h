@@ -118,7 +118,12 @@ struct GpuCameraParams {
     GpuFloat3 envRot1;
     GpuFloat3 envRot2;
     float     envIntensity;
-    float     _pad4, _pad5, _pad6;
+    // Normalized shutter open/close in [0, 1]; rays sample time uniformly.
+    // For static frames both are 0 and the ray time is irrelevant (the GAS
+    // is built without motion options).
+    float     shutterOpen;
+    float     shutterClose;
+    float     _pad4;
 };
 
 // ---------------------------------------------------------------------------
@@ -129,18 +134,6 @@ struct GpuAccumPixel {
     float sumLumSq;  // sum(luminance(sample)^2) — needed for variance-based adaptive sampling
 };
 
-// ---------------------------------------------------------------------------
-// BvhNode — 32-byte flat BVH2 node
-//
-// Internal node: triCount == 0, left child at bvh[leftFirst], right at bvh[leftFirst+1]
-// Leaf node:     triCount > 0, triangles in triIndices[leftFirst .. leftFirst+triCount)
-// ---------------------------------------------------------------------------
-struct BvhNode {
-    GpuFloat3 aabbMin;
-    uint32_t  leftFirst;
-    GpuFloat3 aabbMax;
-    uint32_t  triCount;
-};
 
 // ---------------------------------------------------------------------------
 // GpuSampleBatch — passed to the shade kernel instead of a bare sampleIndex.

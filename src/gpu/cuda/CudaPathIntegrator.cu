@@ -21,8 +21,17 @@
 
 #include <cuda_runtime.h>
 
+#ifdef ANACAPA_ENABLE_OPTIX
+#include <optix.h>
+#include <optix_stubs.h>
+#include <optix_stack_size.h>
+#endif
+
 #include <algorithm>
 #include <cstdio>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #define CUDA_CHECK(call) do { \
@@ -31,8 +40,14 @@
         fprintf(stderr, "[error] CUDA %s %s:%d\n", cudaGetErrorString(_e), __FILE__, __LINE__); \
 } while(0)
 
-// Forward declaration of the device kernel defined in shaders/Shade.cu
-extern "C" __global__ void shade(LaunchParams params);
+#ifdef ANACAPA_ENABLE_OPTIX
+#define OPTIX_CHECK(call) do { \
+    OptixResult _r = (call); \
+    if (_r != OPTIX_SUCCESS) \
+        fprintf(stderr, "[error] OptiX %d (%s) at %s:%d\n", \
+            int(_r), optixGetErrorName(_r), __FILE__, __LINE__); \
+} while(0)
+#endif
 
 namespace anacapa {
 
@@ -49,15 +64,25 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
     gm.type        = kMatLambertian;
     if (!mat) return gm;
 
+    // Sample emission and reflectance up front for every material — UsdPreview-
+    // Surface lights load as StandardSurfaceMaterial with emissive_color set, not
+    // as EmissiveMaterial, so a dynamic_cast alone misses them.
+    SurfaceInteraction si; si.n = si.ng = {0,0,1};
+    ShadingContext ctx(si, {0,0,1});
+    const Spectrum LeSamp  = mat->Le(ctx, {0,0,1});
+    const Spectrum albSamp = mat->reflectance(ctx);
+    gm.emissive  = {LeSamp.x,  LeSamp.y,  LeSamp.z};
+    gm.baseColor = {albSamp.x, albSamp.y, albSamp.z};
+
+    // Pure-emissive: an EmissiveMaterial subclass, or anything whose emission
+    // dominates a near-black albedo.  Treated as a delta light surface — the
+    // raygen adds Le and breaks without evaluating the BSDF.
     const EmissiveMaterial* em = dynamic_cast<const EmissiveMaterial*>(mat);
-    if (em) {
+    const float emMax  = std::max({LeSamp.x,  LeSamp.y,  LeSamp.z});
+    const float albMax = std::max({albSamp.x, albSamp.y, albSamp.z});
+    const bool emissionDominated = emMax > 1e-3f && albMax < 0.05f;
+    if (em || emissionDominated) {
         gm.type = kMatEmissive;
-        SurfaceInteraction si; si.n = si.ng = {0,0,1};
-        ShadingContext ctx(si, {0,0,1});
-        Spectrum Le = mat->Le(ctx, {0,0,1});
-        gm.emissive  = {Le.x, Le.y, Le.z};
-        Spectrum alb = mat->reflectance(ctx);
-        gm.baseColor = {alb.x, alb.y, alb.z};
         return gm;
     }
     {
@@ -186,9 +211,30 @@ struct CudaPathIntegrator::Impl {
     uint32_t maxDepth     = 6;
     bool     preparedOnce = false;
 
+#ifdef ANACAPA_ENABLE_OPTIX
+    // Pipeline state — created lazily on first render.  Lives until destructor.
+    OptixModule           optixModule    = nullptr;
+    OptixProgramGroup     pgRaygen       = nullptr;
+    OptixProgramGroup     pgMiss         = nullptr;
+    OptixProgramGroup     pgHit          = nullptr;
+    OptixPipeline         optixPipeline  = nullptr;
+    CudaByteBuffer        sbtRaygenBuf;
+    CudaByteBuffer        sbtMissBuf;
+    CudaByteBuffer        sbtHitBuf;
+    OptixShaderBindingTable sbt          = {};
+    CudaBuffer<LaunchParams> d_launchParams;  // single-element buffer in device mem
+    bool                  optixReady     = false;
+
+    bool buildOptixPipeline(OptixDeviceContext ctx);
+    void destroyOptixPipeline();
+#endif
+
     ~Impl() {
         if (envTex)   cudaDestroyTextureObject(envTex);
         if (envArray) cudaFreeArray(envArray);
+#ifdef ANACAPA_ENABLE_OPTIX
+        destroyOptixPipeline();
+#endif
     }
 
     void ensureAccum(uint32_t w, uint32_t h) {
@@ -209,6 +255,154 @@ struct CudaPathIntegrator::Impl {
                           uint32_t sampleStart, uint32_t sampleCount,
                           GpuAccumPixel* d_accum) const;
 };
+
+#ifdef ANACAPA_ENABLE_OPTIX
+
+namespace {
+// SBT records carry only the OptiX header for now.  Per-record material data
+// will be added when the SBT is used for material dispatch (Phase 6 step 6
+// in the original plan; not yet wired).
+struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) SbtRecord {
+    char header[OPTIX_SBT_RECORD_HEADER_SIZE];
+};
+}  // namespace
+
+bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
+{
+    if (optixReady) return true;
+
+    // ---- Read PTX from disk -------------------------------------------------
+    const std::string ptxPath = std::string(ANACAPA_PTX_DIR) + "/Shade.ptx";
+    std::ifstream ptxFile(ptxPath, std::ios::binary);
+    if (!ptxFile.is_open()) {
+        fprintf(stderr, "[error] CudaPathIntegrator: could not open '%s' — "
+                        "PTX target was not built\n", ptxPath.c_str());
+        return false;
+    }
+    std::stringstream ss;
+    ss << ptxFile.rdbuf();
+    const std::string ptxSrc = ss.str();
+
+    // ---- Module -------------------------------------------------------------
+    OptixModuleCompileOptions modOpts{};
+    modOpts.maxRegisterCount = OPTIX_COMPILE_DEFAULT_MAX_REGISTER_COUNT;
+    modOpts.optLevel         = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
+    modOpts.debugLevel       = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
+
+    OptixPipelineCompileOptions pipeOpts{};
+    pipeOpts.usesMotionBlur                   = 1;  // motion always allowed; static GAS still works
+    pipeOpts.traversableGraphFlags            = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
+    pipeOpts.numPayloadValues                 = 5;
+    pipeOpts.numAttributeValues               = 2;  // triangle barycentrics
+    pipeOpts.exceptionFlags                   = OPTIX_EXCEPTION_FLAG_NONE;
+    pipeOpts.pipelineLaunchParamsVariableName = "params";
+    pipeOpts.usesPrimitiveTypeFlags           = OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE;
+
+    char   log[4096];
+    size_t logSize = sizeof(log);
+    OPTIX_CHECK(optixModuleCreate(ctx, &modOpts, &pipeOpts,
+                                  ptxSrc.c_str(), ptxSrc.size(),
+                                  log, &logSize, &optixModule));
+
+    // ---- Program groups -----------------------------------------------------
+    OptixProgramGroupOptions pgOpts{};
+    OptixProgramGroupDesc    pgDesc{};
+
+    pgDesc.kind                     = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+    pgDesc.raygen.module            = optixModule;
+    pgDesc.raygen.entryFunctionName = "__raygen__rg";
+    logSize = sizeof(log);
+    OPTIX_CHECK(optixProgramGroupCreate(ctx, &pgDesc, 1, &pgOpts,
+                                        log, &logSize, &pgRaygen));
+
+    pgDesc = {};
+    pgDesc.kind                   = OPTIX_PROGRAM_GROUP_KIND_MISS;
+    pgDesc.miss.module            = optixModule;
+    pgDesc.miss.entryFunctionName = "__miss__ms";
+    logSize = sizeof(log);
+    OPTIX_CHECK(optixProgramGroupCreate(ctx, &pgDesc, 1, &pgOpts,
+                                        log, &logSize, &pgMiss));
+
+    pgDesc = {};
+    pgDesc.kind                         = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+    pgDesc.hitgroup.moduleCH            = optixModule;
+    pgDesc.hitgroup.entryFunctionNameCH = "__closesthit__ch";
+    logSize = sizeof(log);
+    OPTIX_CHECK(optixProgramGroupCreate(ctx, &pgDesc, 1, &pgOpts,
+                                        log, &logSize, &pgHit));
+
+    // ---- Pipeline -----------------------------------------------------------
+    OptixPipelineLinkOptions linkOpts{};
+    linkOpts.maxTraceDepth = 1;  // raygen is the only invoker; no recursion
+
+    OptixProgramGroup pgs[3] = { pgRaygen, pgMiss, pgHit };
+    logSize = sizeof(log);
+    OPTIX_CHECK(optixPipelineCreate(ctx, &pipeOpts, &linkOpts,
+                                    pgs, 3, log, &logSize, &optixPipeline));
+
+    // ---- Stack sizes --------------------------------------------------------
+    OptixStackSizes stackSizes{};
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgRaygen, &stackSizes, optixPipeline));
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgMiss,   &stackSizes, optixPipeline));
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgHit,    &stackSizes, optixPipeline));
+
+    uint32_t dcStackTrav = 0, dcStackState = 0, contStack = 0;
+    OPTIX_CHECK(optixUtilComputeStackSizes(&stackSizes,
+                                           /*maxTraceDepth=*/1,
+                                           /*maxCCDepth=*/0,
+                                           /*maxDCDepth=*/0,
+                                           &dcStackTrav, &dcStackState, &contStack));
+    OPTIX_CHECK(optixPipelineSetStackSize(optixPipeline,
+                                          dcStackTrav, dcStackState, contStack,
+                                          /*maxTraversableDepth=*/1));
+
+    // ---- Shader binding table -----------------------------------------------
+    SbtRecord raygenRec{}, missRec{}, hitRec{};
+    OPTIX_CHECK(optixSbtRecordPackHeader(pgRaygen, &raygenRec));
+    OPTIX_CHECK(optixSbtRecordPackHeader(pgMiss,   &missRec));
+    OPTIX_CHECK(optixSbtRecordPackHeader(pgHit,    &hitRec));
+
+    sbtRaygenBuf = CudaByteBuffer(sizeof(SbtRecord));
+    sbtRaygenBuf.upload(reinterpret_cast<const uint8_t*>(&raygenRec), sizeof(SbtRecord));
+
+    sbtMissBuf = CudaByteBuffer(sizeof(SbtRecord));
+    sbtMissBuf.upload(reinterpret_cast<const uint8_t*>(&missRec), sizeof(SbtRecord));
+
+    sbtHitBuf = CudaByteBuffer(sizeof(SbtRecord));
+    sbtHitBuf.upload(reinterpret_cast<const uint8_t*>(&hitRec), sizeof(SbtRecord));
+
+    sbt                              = {};
+    sbt.raygenRecord                 = sbtRaygenBuf.devPtr();
+    sbt.missRecordBase               = sbtMissBuf.devPtr();
+    sbt.missRecordStrideInBytes      = sizeof(SbtRecord);
+    sbt.missRecordCount              = 1;
+    sbt.hitgroupRecordBase           = sbtHitBuf.devPtr();
+    sbt.hitgroupRecordStrideInBytes  = sizeof(SbtRecord);
+    sbt.hitgroupRecordCount          = 1;
+
+    // ---- Launch params buffer (re-used across launches) ---------------------
+    d_launchParams = CudaBuffer<LaunchParams>(1);
+
+    optixReady = true;
+    printf("[info]  CudaPathIntegrator: OptiX pipeline ready\n");
+    return true;
+}
+
+void CudaPathIntegrator::Impl::destroyOptixPipeline()
+{
+    if (!optixReady) return;
+    if (optixPipeline) optixPipelineDestroy(optixPipeline);
+    if (pgHit)         optixProgramGroupDestroy(pgHit);
+    if (pgMiss)        optixProgramGroupDestroy(pgMiss);
+    if (pgRaygen)      optixProgramGroupDestroy(pgRaygen);
+    if (optixModule)   optixModuleDestroy(optixModule);
+    optixPipeline = nullptr;
+    pgHit = pgMiss = pgRaygen = nullptr;
+    optixModule = nullptr;
+    optixReady = false;
+}
+
+#endif  // ANACAPA_ENABLE_OPTIX
 
 // ---------------------------------------------------------------------------
 // Constructor
@@ -347,6 +541,11 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.cam.envRot0 = {envRot[0].x, envRot[0].y, envRot[0].z};
     p.cam.envRot1 = {envRot[1].x, envRot[1].y, envRot[1].z};
     p.cam.envRot2 = {envRot[2].x, envRot[2].y, envRot[2].z};
+    // Shutter range — accel was already built motion-aware iff any mesh has
+    // motion keys, so we always pass [0, 1] when motion is enabled.  When the
+    // GAS is static both values are 0 and rays sample a fixed time slice.
+    p.cam.shutterOpen  = accel->hasMotion() ? 0.0f : 0.0f;
+    p.cam.shutterClose = accel->hasMotion() ? 1.0f : 0.0f;
     if (scene.envLight) {
         static const Vec3f kDirs[] = {{0,1,0},{0.577f,0.577f,0.577f},{-0.577f,0.577f,0.577f},
                                       {0.577f,0.577f,-0.577f},{-0.577f,0.577f,-0.577f}};
@@ -365,12 +564,10 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.triMeshIDs        = reinterpret_cast<const uint32_t*>(accel->triMeshIDBuffer());
     p.meshVertexOffsets = reinterpret_cast<const uint32_t*>(accel->meshVertexOffsetBuffer());
     p.meshIndexOffsets  = reinterpret_cast<const uint32_t*>(accel->meshIndexOffsetBuffer());
-    p.positions         = reinterpret_cast<const float*>(accel->positionBuffer());
-    p.bvh               = reinterpret_cast<const BvhNode*>(accel->bvhBuffer());
-    p.triIndices        = reinterpret_cast<const uint32_t*>(accel->triIndexBuffer());
     p.sampleBatch.sampleStart = sampleStart;
     p.sampleBatch.batchSize   = sampleCount;
     p.envTexture        = envTex;
+    p.handle            = accel->traversableHandle();
 }
 
 // ---------------------------------------------------------------------------
@@ -387,17 +584,23 @@ bool CudaPathIntegrator::renderFrame(const SceneView& scene,
 
     cudaStream_t stream = static_cast<cudaStream_t>(m_impl->ctx->cuStream());
 
+#ifdef ANACAPA_ENABLE_OPTIX
+    if (!m_impl->buildOptixPipeline(
+            static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()))) {
+        return false;
+    }
+#else
+    fprintf(stderr, "[error] CudaPathIntegrator: built without ANACAPA_ENABLE_OPTIX\n");
+    return false;
+#endif
+
     // Use the persistent accum buffer — accumulates across calls.
     // clearAccum() should be called when starting a fresh render (new scene/camera).
     m_impl->ensureAccum(filmWidth, filmHeight);
     CudaBuffer<GpuAccumPixel>& d_accum = m_impl->d_accum;
 
-    dim3 block(16, 16, 1);
-    dim3 grid((filmWidth + 15) / 16, (filmHeight + 15) / 16, 1);
-
-    // Dispatch kBatchSize samples per kernel — each thread traces the full batch
-    // and accumulates locally before writing to the accum buffer, amortising
-    // launch and sync overhead across multiple samples per dispatch.
+    // Dispatch kBatchSize samples per launch — each thread traces the full
+    // batch and accumulates locally before writing to the accum buffer.
     constexpr uint32_t kBatchSize    = 4;
     constexpr uint32_t kMergeInterval = 4;  // flush to film every N dispatches
 
@@ -425,11 +628,19 @@ bool CudaPathIntegrator::renderFrame(const SceneView& scene,
             0, 0, filmWidth, filmHeight,
             sampleStart + s, thisBatch,
             d_accum.ptr());
-        shade<<<grid, block, 0, stream>>>(params);
+
+#ifdef ANACAPA_ENABLE_OPTIX
+        m_impl->d_launchParams.upload(&params, 1);
+        OPTIX_CHECK(optixLaunch(m_impl->optixPipeline, stream,
+                                m_impl->d_launchParams.devPtr(),
+                                sizeof(LaunchParams),
+                                &m_impl->sbt,
+                                filmWidth, filmHeight, /*depth=*/1));
+#endif
         CUDA_CHECK(cudaStreamSynchronize(stream));
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
-            fprintf(stderr, "[error] CudaPathIntegrator::renderFrame kernel: %s\n",
+            fprintf(stderr, "[error] CudaPathIntegrator::renderFrame: %s\n",
                     cudaGetErrorString(err));
             return false;
         }
@@ -457,6 +668,15 @@ void CudaPathIntegrator::renderTile(const SceneView& scene,
 
     cudaStream_t stream = static_cast<cudaStream_t>(m_impl->ctx->cuStream());
 
+#ifdef ANACAPA_ENABLE_OPTIX
+    if (!m_impl->buildOptixPipeline(
+            static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()))) {
+        return;
+    }
+#else
+    return;
+#endif
+
     uint32_t tileW = std::min(tile.width,  filmWidth  - tile.x0);
     uint32_t tileH = std::min(tile.height, filmHeight - tile.y0);
 
@@ -470,9 +690,14 @@ void CudaPathIntegrator::renderTile(const SceneView& scene,
         tile.sampleStart, tile.sampleCount,
         d_accum.ptr());
 
-    dim3 block(16, 16, 1);
-    dim3 grid((tileW + 15) / 16, (tileH + 15) / 16, 1);
-    shade<<<grid, block, 0, stream>>>(params);
+#ifdef ANACAPA_ENABLE_OPTIX
+    m_impl->d_launchParams.upload(&params, 1);
+    OPTIX_CHECK(optixLaunch(m_impl->optixPipeline, stream,
+                            m_impl->d_launchParams.devPtr(),
+                            sizeof(LaunchParams),
+                            &m_impl->sbt,
+                            tileW, tileH, /*depth=*/1));
+#endif
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     std::vector<GpuAccumPixel> h_accum;

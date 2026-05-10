@@ -1,15 +1,32 @@
-// Shade.cu — pure-CUDA path-tracing kernel.
+// Shade.cu — OptiX raygen / closesthit / miss programs.
 //
-// Replaces the OptiX raygen/closesthit/miss programs.  One thread per pixel,
-// full path-tracing loop using iterative BVH traversal for each bounce.
-// Material support: Lambertian, GGX, Emissive, Glass (same as before).
+// Compiled to PTX (see anacapa_compile_ptx in src/gpu/cuda/CMakeLists.txt) and
+// loaded at runtime by CudaPathIntegrator's pipeline.  The OptixDeviceContext
+// is created in CudaContext; the GAS in CudaAccelStructure provides the
+// traversable handle (single triangle GAS, motion-aware when any mesh has
+// motion keys).
+//
+// Programs:
+//   __raygen__rg     : pixel + sample loop, primary ray gen, bounce loop,
+//                      BSDF / NEE evaluation, accumulation.  Uses optixTrace
+//                      for both surface and shadow rays.
+//   __closesthit__ch : writes hit info (primIdx, barycentrics, t) via 5
+//                      payload registers.
+//   __miss__ms       : sets payload p0 = 0 to signal miss.
+//
+// Per-ray time is sampled in raygen as t = lerp(shutterOpen, shutterClose,
+// rand01()) and passed to optixTrace; the motion-aware GAS interpolates
+// triangle vertex positions in hardware.
 
+#include <optix.h>
 #include <cuda_runtime.h>
 #include <math_constants.h>
 #include <float.h>
 
 #include "SharedTypes.h"
 #include "LaunchParams.h"
+
+extern "C" __constant__ LaunchParams params;
 
 // ---------------------------------------------------------------------------
 // PCG random
@@ -27,7 +44,7 @@ static __forceinline__ __device__ float2 rand2(uint32_t& s) {
 }
 
 // ---------------------------------------------------------------------------
-// Math helpers
+// float3 math helpers
 // ---------------------------------------------------------------------------
 static __forceinline__ __device__ float3 make3(GpuFloat3 v) {
     return make_float3(v.x, v.y, v.z);
@@ -78,9 +95,6 @@ static __forceinline__ __device__ float3 refract(float3 i, float3 n, float eta) 
 static __forceinline__ __device__ float3 fmaxf3(float3 a, float3 b) {
     return make_float3(fmaxf(a.x,b.x), fmaxf(a.y,b.y), fmaxf(a.z,b.z));
 }
-static __forceinline__ __device__ float3 fminf3(float3 a, float3 b) {
-    return make_float3(fminf(a.x,b.x), fminf(a.y,b.y), fminf(a.z,b.z));
-}
 static __forceinline__ __device__ float  compmax(float3 v) {
     return fmaxf(v.x, fmaxf(v.y, v.z));
 }
@@ -89,146 +103,61 @@ static __forceinline__ __device__ float3 lerp3(float3 a, float3 b, float t) {
 }
 
 // ---------------------------------------------------------------------------
-// BVH traversal
+// optixTrace wrapper — surface query.  Payload layout:
+//   p0 = hit valid (0 or 1)
+//   p1 = primitive index (global triangle index in our single GAS)
+//   p2 = barycentric u (bits)
+//   p3 = barycentric v (bits)
+//   p4 = ray-t (bits)
+// On hit, meshID is looked up from params.triMeshIDs[primID] in the caller.
 // ---------------------------------------------------------------------------
-
-// AABB slab test — returns entry distance in tEntry (FLT_MAX on miss).
-static __forceinline__ __device__
-float rayAABBDist(float3 orig, float3 invDir, float tMin, float tMax,
-                  GpuFloat3 bMin, GpuFloat3 bMax)
-{
-    float t0x = (bMin.x - orig.x) * invDir.x;
-    float t1x = (bMax.x - orig.x) * invDir.x;
-    float lo = fminf(t0x, t1x), hi = fmaxf(t0x, t1x);
-
-    float t0y = (bMin.y - orig.y) * invDir.y;
-    float t1y = (bMax.y - orig.y) * invDir.y;
-    lo = fmaxf(lo, fminf(t0y, t1y));
-    hi = fminf(hi, fmaxf(t0y, t1y));
-
-    float t0z = (bMin.z - orig.z) * invDir.z;
-    float t1z = (bMax.z - orig.z) * invDir.z;
-    lo = fmaxf(lo, fminf(t0z, t1z));
-    hi = fminf(hi, fmaxf(t0z, t1z));
-
-    float entry = fmaxf(lo, tMin);
-    return (entry <= fminf(hi, tMax)) ? entry : FLT_MAX;
-}
-
-// Möller–Trumbore ray-triangle intersection.
-// Returns true and writes tHit, bary (u,v) if hit in [tMin, tMax).
-static __forceinline__ __device__
-bool rayTriangle(float3 orig, float3 dir, float tMin, float tMax,
-                 uint32_t triIdx,
-                 const float* positions, const uint32_t* indices,
-                 float& tHit, float2& bary)
-{
-    uint32_t i0 = indices[triIdx * 3 + 0];
-    uint32_t i1 = indices[triIdx * 3 + 1];
-    uint32_t i2 = indices[triIdx * 3 + 2];
-    float3 v0 = make_float3(positions[i0*3], positions[i0*3+1], positions[i0*3+2]);
-    float3 v1 = make_float3(positions[i1*3], positions[i1*3+1], positions[i1*3+2]);
-    float3 v2 = make_float3(positions[i2*3], positions[i2*3+1], positions[i2*3+2]);
-
-    float3 e1 = v1 - v0;
-    float3 e2 = v2 - v0;
-    float3 h  = cross(dir, e2);
-    float  a  = dot(e1, h);
-    if (fabsf(a) < 1e-8f) return false;
-
-    float  f  = 1.0f / a;
-    float3 s  = orig - v0;
-    float  u  = f * dot(s, h);
-    if (u < 0.0f || u > 1.0f) return false;
-
-    float3 q  = cross(s, e1);
-    float  v  = f * dot(dir, q);
-    if (v < 0.0f || u + v > 1.0f) return false;
-
-    float  t  = f * dot(e2, q);
-    if (t < tMin || t >= tMax) return false;
-
-    tHit = t;
-    bary = make_float2(u, v);
-    return true;
-}
-
 struct TraceResult {
-    uint32_t valid;   // 0 = miss
+    uint32_t valid;
     uint32_t meshID;
-    uint32_t primID;  // local triangle index within mesh
+    uint32_t primID;
     float2   bary;
     float    t;
 };
 
-// Iterative BVH traversal — returns the closest hit.
 static __forceinline__ __device__
-TraceResult bvhTrace(float3 orig, float3 dir, float tMin, float tMax,
-                     const BvhNode* bvh, const uint32_t* triIndices,
-                     const float* positions, const uint32_t* indices,
-                     const uint32_t* triMeshIDs, const uint32_t* meshIndexOffsets)
+TraceResult trace(float3 orig, float3 dir, float tMin, float tMax, float rayTime)
 {
-    float3 invDir = make_float3(1.0f / dir.x, 1.0f / dir.y, 1.0f / dir.z);
+    uint32_t p0 = 0, p1 = 0, p2 = 0, p3 = 0, p4 = 0;
+    optixTrace(
+        params.handle,
+        orig, dir,
+        tMin, tMax,
+        rayTime,
+        OptixVisibilityMask(0xFF),
+        OPTIX_RAY_FLAG_NONE,
+        /*SBToffset=*/0u,
+        /*SBTstride=*/1u,
+        /*missSBT=*/0u,
+        p0, p1, p2, p3, p4);
 
-    uint32_t stack[32];
-    int      top = 0;
-    stack[top++] = 0u;  // root
-
-    TraceResult result{};
-    result.valid = 0;
-    float tHit = tMax;
-
-    while (top > 0) {
-        uint32_t       nodeIdx = stack[--top];
-        const BvhNode& node    = bvh[nodeIdx];
-
-        if (rayAABBDist(orig, invDir, tMin, tHit, node.aabbMin, node.aabbMax) == FLT_MAX)
-            continue;
-
-        if (node.triCount > 0) {
-            // Leaf — test each triangle
-            for (uint32_t i = 0; i < node.triCount; ++i) {
-                uint32_t globalTriIdx = triIndices[node.leftFirst + i];
-                float    tTemp;
-                float2   tempBary;
-                if (rayTriangle(orig, dir, tMin, tHit, globalTriIdx,
-                                positions, indices, tTemp, tempBary)) {
-                    tHit           = tTemp;
-                    result.valid   = 1;
-                    result.meshID  = triMeshIDs[globalTriIdx];
-                    result.primID  = globalTriIdx - meshIndexOffsets[result.meshID] / 3;
-                    result.bary    = tempBary;
-                    result.t       = tTemp;
-                }
-            }
-        } else {
-            // Internal — test both children, push farther first (front-to-back LIFO)
-            uint32_t L = node.leftFirst, R = node.leftFirst + 1;
-            float tL = rayAABBDist(orig, invDir, tMin, tHit, bvh[L].aabbMin, bvh[L].aabbMax);
-            float tR = rayAABBDist(orig, invDir, tMin, tHit, bvh[R].aabbMin, bvh[R].aabbMax);
-            bool hitL = tL < FLT_MAX, hitR = tR < FLT_MAX;
-            if (hitL && hitR) {
-                if (tL < tR) { stack[top++] = R; stack[top++] = L; }
-                else          { stack[top++] = L; stack[top++] = R; }
-            } else if (hitL) { stack[top++] = L; }
-            else if (hitR)   { stack[top++] = R; }
-        }
+    TraceResult r{};
+    r.valid = p0;
+    if (p0) {
+        r.primID = p1;
+        r.bary.x = __uint_as_float(p2);
+        r.bary.y = __uint_as_float(p3);
+        r.t      = __uint_as_float(p4);
+        r.meshID = params.triMeshIDs[p1];
     }
-    return result;
+    return r;
 }
 
 // ---------------------------------------------------------------------------
 // Geometry helpers
 // ---------------------------------------------------------------------------
 static __forceinline__ __device__
-float3 interpolateNormal(uint32_t primId, float2 bary,
+float3 interpolateNormal(uint32_t globalPrimId, float2 bary,
                          const GpuFloat3* normals,
-                         const uint32_t*  indices,
-                         uint32_t         indexOffset)
+                         const uint32_t*  indices)
 {
-    uint32_t i0 = indices[indexOffset + primId * 3 + 0];
-    uint32_t i1 = indices[indexOffset + primId * 3 + 1];
-    uint32_t i2 = indices[indexOffset + primId * 3 + 2];
+    uint32_t i0 = indices[globalPrimId * 3 + 0];
+    uint32_t i1 = indices[globalPrimId * 3 + 1];
+    uint32_t i2 = indices[globalPrimId * 3 + 2];
     float3 n0 = make3(normals[i0]);
     float3 n1 = make3(normals[i1]);
     float3 n2 = make3(normals[i2]);
@@ -287,42 +216,39 @@ static __forceinline__ __device__ float fresnelDielectric(float cosI, float eta)
 // ---------------------------------------------------------------------------
 // Environment map
 // ---------------------------------------------------------------------------
-static __forceinline__ __device__
-float3 evalEnvmap(float3 wo, const LaunchParams& p) {
-    float3 r0 = make3(p.cam.envRot0);
-    float3 r1 = make3(p.cam.envRot1);
-    float3 r2 = make3(p.cam.envRot2);
+static __forceinline__ __device__ float3 evalEnvmap(float3 wo) {
+    float3 r0 = make3(params.cam.envRot0);
+    float3 r1 = make3(params.cam.envRot1);
+    float3 r2 = make3(params.cam.envRot2);
     float3 local = make_float3(dot(r0, wo), dot(r1, wo), dot(r2, wo));
     float theta = acosf(fmaxf(-1.0f, fminf(1.0f, local.y)));
     float phi   = atan2f(local.x, local.z);
     if (phi < 0.0f) phi += 2.0f * CUDART_PI_F;
     float u = phi  / (2.0f * CUDART_PI_F);
     float v = theta / CUDART_PI_F;
-    float4 c = tex2D<float4>(p.envTexture, u, v);
+    float4 c = tex2D<float4>(params.envTexture, u, v);
     return fmaxf3(make_float3(0.0f, 0.0f, 0.0f),
-                  make_float3(c.x, c.y, c.z)) * p.cam.envIntensity;
+                  make_float3(c.x, c.y, c.z)) * params.cam.envIntensity;
 }
 
 // ---------------------------------------------------------------------------
-// Shadow transmittance — steps through glass, returns (0,0,0) if blocked
+// Shadow transmittance — steps through glass; returns (0,0,0) if blocked.
+// Uses optixTrace; the rayTime is constant across the loop (one shutter
+// sample per primary ray, propagated through bounces).
 // ---------------------------------------------------------------------------
 static __forceinline__ __device__
-float3 shadowTransmittance(float3 origin, float3 dir, float tMax,
-                           const LaunchParams& p)
+float3 shadowTransmittance(float3 origin, float3 dir, float tMax, float rayTime)
 {
     float3 T    = make_float3(1.0f, 1.0f, 1.0f);
     float3 orig = origin;
     float  remaining = tMax;
 
     for (int step = 0; step < 8; ++step) {
-        TraceResult hit = bvhTrace(orig, dir, 1e-4f, remaining,
-                                   p.bvh, p.triIndices,
-                                   p.positions, p.indices,
-                                   p.triMeshIDs, p.meshIndexOffsets);
+        TraceResult hit = trace(orig, dir, 1e-4f, remaining, rayTime);
         if (!hit.valid) break;
 
-        uint32_t matIdx = (hit.meshID < p.numMaterials) ? hit.meshID : 0u;
-        GpuMaterial mat = p.materials[matIdx];
+        uint32_t matIdx = (hit.meshID < params.numMaterials) ? hit.meshID : 0u;
+        GpuMaterial mat = params.materials[matIdx];
 
         if (mat.type == kMatGlass) {
             T *= mat.transmission;
@@ -344,13 +270,13 @@ static __forceinline__ __device__
 float3 sampleDirect(float3 hitPos, float3 n, float3 wo,
                     uint32_t matType, float3 baseColor,
                     float roughness, float metalness,
-                    uint32_t& rng, const LaunchParams& p)
+                    uint32_t& rng, float rayTime)
 {
-    if (p.numLights == 0) return make_float3(0.0f, 0.0f, 0.0f);
+    if (params.numLights == 0) return make_float3(0.0f, 0.0f, 0.0f);
 
-    uint32_t lightIdx = uint32_t(rand01(rng) * float(p.numLights)) % p.numLights;
-    const GpuLight& light = p.lights[lightIdx];
-    float lightPick = 1.0f / float(p.numLights);
+    uint32_t lightIdx = uint32_t(rand01(rng) * float(params.numLights)) % params.numLights;
+    const GpuLight& light = params.lights[lightIdx];
+    float lightPick = 1.0f / float(params.numLights);
 
     float3 Li   = make_float3(0.0f, 0.0f, 0.0f);
     float3 wi   = make_float3(0.0f, 0.0f, 0.0f);
@@ -398,7 +324,7 @@ float3 sampleDirect(float3 hitPos, float3 n, float3 wo,
         tMax = 1e9f;
         float cosW = fmaxf(1e-7f, dot(n, wi));
         pdfL = (cosW / CUDART_PI_F) * lightPick;
-        Li   = (p.envTexture != 0) ? evalEnvmap(wi, p) : make3(p.cam.envLe);
+        Li   = (params.envTexture != 0) ? evalEnvmap(wi) : make3(params.cam.envLe);
     } else {
         return make_float3(0.0f, 0.0f, 0.0f);
     }
@@ -407,7 +333,7 @@ float3 sampleDirect(float3 hitPos, float3 n, float3 wo,
     if (cosI <= 0.0f || pdfL <= 0.0f) return make_float3(0.0f, 0.0f, 0.0f);
 
     float3 shadowOrigin = hitPos + n * 1e-4f;
-    float3 Tr = shadowTransmittance(shadowOrigin, wi, tMax, p);
+    float3 Tr = shadowTransmittance(shadowOrigin, wi, tMax, rayTime);
     if (compmax(Tr) <= 0.0f) return make_float3(0.0f, 0.0f, 0.0f);
 
     float3 f = make_float3(0.0f, 0.0f, 0.0f);
@@ -433,193 +359,201 @@ float3 sampleDirect(float3 hitPos, float3 n, float3 wo,
     return f * Li * Tr * cosI * (1.0f / pdfL);
 }
 
-// ---------------------------------------------------------------------------
-// Main path-tracing kernel — one thread per pixel, loops over all samples.
-// __launch_bounds__ tells nvcc to target >=4 blocks/SM with 256 threads/block,
-// which encourages register allocation that keeps occupancy high.
-// ---------------------------------------------------------------------------
-extern "C" __global__
-__launch_bounds__(256, 4)
-void shade(LaunchParams params)
+// ===========================================================================
+// OptiX programs
+// ===========================================================================
+
+extern "C" __global__ void __raygen__rg()
 {
-    uint32_t tx = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t ty = blockIdx.y * blockDim.y + threadIdx.y;
+    const uint3 idx = optixGetLaunchIndex();
+    const uint32_t tx = idx.x;
+    const uint32_t ty = idx.y;
     if (tx >= params.cam.tileWidth || ty >= params.cam.tileHeight) return;
 
-    uint32_t px = params.cam.tileX0 + tx;
-    uint32_t py = params.cam.tileY0 + ty;
+    const uint32_t px = params.cam.tileX0 + tx;
+    const uint32_t py = params.cam.tileY0 + ty;
     if (px >= params.cam.imageWidth || py >= params.cam.imageHeight) return;
 
-    uint32_t pixelIdx       = ty * params.cam.tileWidth + tx;
-    uint32_t globalPixelIdx = py * params.cam.imageWidth + px;
-    uint32_t nSamples  = params.sampleBatch.batchSize;
+    const uint32_t pixelIdx       = ty * params.cam.tileWidth + tx;
+    const uint32_t globalPixelIdx = py * params.cam.imageWidth + px;
+    const uint32_t nSamples       = params.sampleBatch.batchSize;
 
-    float3 origin = make3(params.cam.origin);
-    float3 horiz  = make3(params.cam.horizontal);
-    float3 vert   = make3(params.cam.vertical);
-    float3 ll     = make3(params.cam.lowerLeft);
+    const float3 origin = make3(params.cam.origin);
+    const float3 horiz  = make3(params.cam.horizontal);
+    const float3 vert   = make3(params.cam.vertical);
+    const float3 ll     = make3(params.cam.lowerLeft);
 
     float rAcc = 0.0f, gAcc = 0.0f, bAcc = 0.0f, lumSqAcc = 0.0f;
 
     for (uint32_t s = 0; s < nSamples; ++s) {
+        uint32_t rng = pcg(pcg(globalPixelIdx) ^
+                           ((params.sampleBatch.sampleStart + s) * 2654435761u));
 
-    uint32_t rng = pcg(pcg(globalPixelIdx) ^ ((params.sampleBatch.sampleStart + s) * 2654435761u));
+        // Per-primary-ray shutter time.  Same value used for every bounce of
+        // this primary so a single time slice is rendered consistently.
+        float rayTime = params.cam.shutterOpen;
+        if (params.cam.shutterClose > params.cam.shutterOpen) {
+            rayTime = params.cam.shutterOpen
+                    + rand01(rng) * (params.cam.shutterClose - params.cam.shutterOpen);
+        }
 
-    // Camera ray
-    float jx = rand01(rng);
-    float jy = rand01(rng);
-    float u  = (float(px) + jx) / float(params.cam.imageWidth);
-    float v  = (float(params.cam.imageHeight - 1 - py) + jy) / float(params.cam.imageHeight);
+        // Camera ray
+        float jx = rand01(rng);
+        float jy = rand01(rng);
+        float u  = (float(px) + jx) / float(params.cam.imageWidth);
+        float v  = (float(params.cam.imageHeight - 1 - py) + jy) / float(params.cam.imageHeight);
 
-    float3 rayOrig = origin;
-    float3 rayDir  = normalize(ll + u * horiz + v * vert - origin);
+        float3 rayOrig = origin;
+        float3 rayDir  = normalize(ll + u * horiz + v * vert - origin);
 
-    float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
-    float3 L          = make_float3(0.0f, 0.0f, 0.0f);
-    uint32_t glassDepth = 0;
+        float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
+        float3 L          = make_float3(0.0f, 0.0f, 0.0f);
+        uint32_t glassDepth = 0;
+        // True for the primary ray and after any delta (glass) bounce — those
+        // segments aren't seen by NEE at the previous hit, so direct emission
+        // must be added on contact instead.
+        bool specularBounce = true;
 
-    for (uint32_t bounce = 0; bounce <= params.cam.maxDepth; ++bounce) {
-        TraceResult hit = bvhTrace(rayOrig, rayDir, 1e-4f, 1e10f,
-                                   params.bvh, params.triIndices,
-                                   params.positions, params.indices,
-                                   params.triMeshIDs, params.meshIndexOffsets);
+        for (uint32_t bounce = 0; bounce <= params.cam.maxDepth; ++bounce) {
+            TraceResult hit = trace(rayOrig, rayDir, 1e-4f, 1e10f, rayTime);
 
-        if (!hit.valid) {
-            // Miss — environment
-            float3 envColor;
-            if (params.cam.hasEnvLight && params.envTexture != 0) {
-                envColor = evalEnvmap(rayDir, params);
-            } else if (params.cam.hasEnvLight) {
-                envColor = make3(params.cam.envLe);
-            } else {
-                float skyT = 0.5f * (rayDir.y + 1.0f);
-                envColor = lerp3(make_float3(1.0f, 1.0f, 1.0f),
-                                 make_float3(0.5f, 0.7f, 1.0f), skyT) * 0.5f;
+            if (!hit.valid) {
+                float3 envColor;
+                if (params.cam.hasEnvLight && params.envTexture != 0) {
+                    envColor = evalEnvmap(rayDir);
+                } else if (params.cam.hasEnvLight) {
+                    envColor = make3(params.cam.envLe);
+                } else {
+                    float skyT = 0.5f * (rayDir.y + 1.0f);
+                    envColor = lerp3(make_float3(1.0f, 1.0f, 1.0f),
+                                     make_float3(0.5f, 0.7f, 1.0f), skyT) * 0.5f;
+                }
+                L += throughput * envColor;
+                break;
             }
-            L += throughput * envColor;
-            break;
-        }
 
-        float3 hitPos = rayOrig + rayDir * hit.t;
+            float3 hitPos = rayOrig + rayDir * hit.t;
 
-        uint32_t idxOff = params.meshIndexOffsets[hit.meshID];
-        float3 geomN = interpolateNormal(hit.primID, hit.bary,
-                                          params.normals, params.indices, idxOff);
-        float3 n = geomN;
-        if (dot(-1.0f * rayDir, n) < 0.0f) n = -1.0f * n;
+            float3 geomN = interpolateNormal(hit.primID, hit.bary,
+                                             params.normals, params.indices);
+            float3 n = geomN;
+            if (dot(-1.0f * rayDir, n) < 0.0f) n = -1.0f * n;
 
-        uint32_t matIdx  = (hit.meshID < params.numMaterials) ? hit.meshID : 0u;
-        GpuMaterial mat  = params.materials[matIdx];
-        float3 baseColor = make3(mat.baseColor);
-        float3 emissive  = make3(mat.emissive);
+            uint32_t matIdx  = (hit.meshID < params.numMaterials) ? hit.meshID : 0u;
+            GpuMaterial mat  = params.materials[matIdx];
+            float3 baseColor = make3(mat.baseColor);
+            float3 emissive  = make3(mat.emissive);
 
-        if (mat.type == kMatEmissive) {
-            L += throughput * emissive;
-            break;
-        }
+            // Emission contribution for any material with non-zero Le.  Only
+            // applied on primary or post-specular segments so we don't double
+            // count with NEE, which already integrated direct light at the
+            // previous diffuse hit point.
+            if (specularBounce && compmax(emissive) > 0.0f)
+                L += throughput * emissive;
 
-        float3 wo = -1.0f * rayDir;
-        if (mat.type != kMatGlass) {
-            L += throughput * sampleDirect(hitPos, n, wo,
-                                           mat.type, baseColor,
-                                           mat.roughness, mat.metalness,
-                                           rng, params);
-        }
+            if (mat.type == kMatEmissive) break;
 
-        // Russian roulette
-        if (bounce >= 3) {
-            float q = fmaxf(0.05f, 1.0f - compmax(throughput));
-            if (rand01(rng) < q) break;
-            throughput *= (1.0f / (1.0f - q));
-        }
+            float3 wo = -1.0f * rayDir;
+            if (mat.type != kMatGlass) {
+                L += throughput * sampleDirect(hitPos, n, wo,
+                                               mat.type, baseColor,
+                                               mat.roughness, mat.metalness,
+                                               rng, rayTime);
+            }
 
-        // Sample next direction
-        float3 wi;
-        float  bsdfPdf;
-        float3 bsdfF;
+            // Russian roulette
+            if (bounce >= 3) {
+                float q = fmaxf(0.05f, 1.0f - compmax(throughput));
+                if (rand01(rng) < q) break;
+                throughput *= (1.0f / (1.0f - q));
+            }
 
-        if (mat.type == kMatGlass) {
-            bool   entering = dot(rayDir, geomN) < 0.0f;
-            float3 faceN    = entering ? geomN : -1.0f * geomN;
-            float  eta      = entering ? (1.0f / mat.specularIOR) : mat.specularIOR;
-            float  cosI     = dot(-1.0f * rayDir, faceN);
-            float  Fr       = fresnelDielectric(cosI, 1.0f / eta);
+            // Sample next direction
+            float3 wi;
+            float  bsdfPdf;
+            float3 bsdfF;
 
-            if (rand01(rng) < Fr) {
-                wi = reflect(rayDir, faceN);
-                rayOrig = hitPos + faceN * 1e-4f;
-            } else {
-                wi = refract(rayDir, faceN, eta);
-                if (dot(wi, wi) < 0.5f) {
+            if (mat.type == kMatGlass) {
+                bool   entering = dot(rayDir, geomN) < 0.0f;
+                float3 faceN    = entering ? geomN : -1.0f * geomN;
+                float  eta      = entering ? (1.0f / mat.specularIOR) : mat.specularIOR;
+                float  cosI     = dot(-1.0f * rayDir, faceN);
+                float  Fr       = fresnelDielectric(cosI, 1.0f / eta);
+
+                if (rand01(rng) < Fr) {
                     wi = reflect(rayDir, faceN);
                     rayOrig = hitPos + faceN * 1e-4f;
                 } else {
-                    rayOrig = hitPos - faceN * 1e-4f;
+                    wi = refract(rayDir, faceN, eta);
+                    if (dot(wi, wi) < 0.5f) {
+                        wi = reflect(rayDir, faceN);
+                        rayOrig = hitPos + faceN * 1e-4f;
+                    } else {
+                        rayOrig = hitPos - faceN * 1e-4f;
+                    }
                 }
-            }
-            // Delta BSDF: f/pdf = 1, throughput unchanged.
-            // Glass hits don't count against bounce budget — use a separate limiter.
-            rayDir = normalize(wi);
-            if (++glassDepth >= 16) break;
-            if (bounce > 0) --bounce;
-            continue;
+                rayDir = normalize(wi);
+                specularBounce = true;  // glass is delta — next hit's emission needs to be added
+                if (++glassDepth >= 16) break;
+                if (bounce > 0) --bounce;
+                continue;
 
-        } else if (mat.type == kMatGGX && mat.roughness < 0.95f) {
-            float  alpha  = mat.roughness * mat.roughness;
-            float  alpha2 = alpha * alpha;
-            float3 F0     = lerp3(make_float3(0.04f, 0.04f, 0.04f), baseColor, mat.metalness);
+            } else if (mat.type == kMatGGX && mat.roughness < 0.95f) {
+                float  alpha  = mat.roughness * mat.roughness;
+                float  alpha2 = alpha * alpha;
+                float3 F0     = lerp3(make_float3(0.04f, 0.04f, 0.04f), baseColor, mat.metalness);
 
-            float lumSpec = (F0.x + F0.y + F0.z) / 3.0f;
-            float lumDiff = (1.0f - mat.metalness) * (baseColor.x + baseColor.y + baseColor.z) / 3.0f;
-            float pSpec   = lumSpec / fmaxf(1e-4f, lumSpec + lumDiff);
-            float pDiff   = 1.0f - pSpec;
+                float lumSpec = (F0.x + F0.y + F0.z) / 3.0f;
+                float lumDiff = (1.0f - mat.metalness) * (baseColor.x + baseColor.y + baseColor.z) / 3.0f;
+                float pSpec   = lumSpec / fmaxf(1e-4f, lumSpec + lumDiff);
+                float pDiff   = 1.0f - pSpec;
 
-            float3 wh;
-            if (rand01(rng) < pSpec) {
-                float3 wmLocal = sampleGGX(rand2(rng), alpha2);
-                wh = toWorld(wmLocal, n);
-                if (dot(wh, n) < 0.0f) wh = -1.0f * wh;
-                wi = reflect(-1.0f * wo, wh);
+                float3 wh;
+                if (rand01(rng) < pSpec) {
+                    float3 wmLocal = sampleGGX(rand2(rng), alpha2);
+                    wh = toWorld(wmLocal, n);
+                    if (dot(wh, n) < 0.0f) wh = -1.0f * wh;
+                    wi = reflect(-1.0f * wo, wh);
+                } else {
+                    wi = cosineSampleHemisphere(rand2(rng), n);
+                    wh = normalize(wo + wi);
+                }
+                if (dot(wi, n) <= 0.0f) break;
+
+                float cosII = dot(n, wi);
+                float cosO  = dot(n, wo);
+                float cosH  = fmaxf(0.0f, dot(n, wh));
+                float D     = ggxD(cosH, alpha2);
+                float G     = ggxG1(cosO, alpha2) * ggxG1(cosII, alpha2);
+                float3 F    = schlick(fmaxf(0.0f, dot(wi, wh)), F0);
+                float3 spec = D * G * F * (1.0f / fmaxf(1e-7f, 4.0f * cosO * cosII));
+                float3 diff = (1.0f - mat.metalness) * baseColor * (1.0f / CUDART_PI_F);
+                bsdfF = diff + spec;
+
+                float ggxPdf = D * cosH / fmaxf(1e-7f, 4.0f * dot(wo, wh));
+                float cosPdf = cosII / CUDART_PI_F;
+                bsdfPdf = pSpec * ggxPdf + pDiff * cosPdf;
             } else {
-                wi = cosineSampleHemisphere(rand2(rng), n);
-                wh = normalize(wo + wi);
+                wi      = cosineSampleHemisphere(rand2(rng), n);
+                bsdfPdf = fmaxf(1e-7f, dot(n, wi)) / CUDART_PI_F;
+                bsdfF   = baseColor * (1.0f / CUDART_PI_F);
             }
-            if (dot(wi, n) <= 0.0f) break;
 
-            float cosII = dot(n, wi);
-            float cosO  = dot(n, wo);
-            float cosH  = fmaxf(0.0f, dot(n, wh));
-            float D     = ggxD(cosH, alpha2);
-            float G     = ggxG1(cosO, alpha2) * ggxG1(cosII, alpha2);
-            float3 F    = schlick(fmaxf(0.0f, dot(wi, wh)), F0);
-            float3 spec = D * G * F * (1.0f / fmaxf(1e-7f, 4.0f * cosO * cosII));
-            float3 diff = (1.0f - mat.metalness) * baseColor * (1.0f / CUDART_PI_F);
-            bsdfF = diff + spec;
+            float cosI = dot(n, wi);
+            if (cosI <= 0.0f || bsdfPdf <= 0.0f) break;
+            throughput *= bsdfF * cosI * (1.0f / bsdfPdf);
 
-            float ggxPdf = D * cosH / fmaxf(1e-7f, 4.0f * dot(wo, wh));
-            float cosPdf = cosII / CUDART_PI_F;
-            bsdfPdf = pSpec * ggxPdf + pDiff * cosPdf;
-        } else {
-            wi      = cosineSampleHemisphere(rand2(rng), n);
-            bsdfPdf = fmaxf(1e-7f, dot(n, wi)) / CUDART_PI_F;
-            bsdfF   = baseColor * (1.0f / CUDART_PI_F);
+            rayOrig = hitPos + n * 1e-4f;
+            rayDir  = normalize(wi);
+            specularBounce = false;  // diffuse/glossy bounce — NEE handled direct light
         }
 
-        float cosI = dot(n, wi);
-        if (cosI <= 0.0f || bsdfPdf <= 0.0f) break;
-        throughput *= bsdfF * cosI * (1.0f / bsdfPdf);
-
-        rayOrig = hitPos + n * 1e-4f;
-        rayDir  = normalize(wi);
+        rAcc += L.x;
+        gAcc += L.y;
+        bAcc += L.z;
+        float lum = 0.2126f * L.x + 0.7152f * L.y + 0.0722f * L.z;
+        lumSqAcc += lum * lum;
     }
-
-    rAcc += L.x;
-    gAcc += L.y;
-    bAcc += L.z;
-    float lum = 0.2126f * L.x + 0.7152f * L.y + 0.0722f * L.z;
-    lumSqAcc += lum * lum;
-
-    } // end sample loop
 
     GpuAccumPixel& out = params.accum[pixelIdx];
     out.r        += rAcc;
@@ -627,4 +561,21 @@ void shade(LaunchParams params)
     out.b        += bAcc;
     out.weight   += float(nSamples);
     out.sumLumSq += lumSqAcc;
+}
+
+extern "C" __global__ void __closesthit__ch()
+{
+    const uint32_t prim  = optixGetPrimitiveIndex();
+    const float2   bary  = optixGetTriangleBarycentrics();
+    const float    tHit  = optixGetRayTmax();
+    optixSetPayload_0(1u);
+    optixSetPayload_1(prim);
+    optixSetPayload_2(__float_as_uint(bary.x));
+    optixSetPayload_3(__float_as_uint(bary.y));
+    optixSetPayload_4(__float_as_uint(tHit));
+}
+
+extern "C" __global__ void __miss__ms()
+{
+    optixSetPayload_0(0u);
 }

@@ -12,13 +12,12 @@ namespace anacapa {
 class CudaContext;
 
 // ---------------------------------------------------------------------------
-// CudaAccelStructure — flat BVH2 over all scene triangles.
+// CudaAccelStructure — OptiX GAS over all scene triangles.
 //
-// Built on the CPU using recursive median-split then uploaded to the GPU.
-// Geometry is assumed to be world-space (same assumption as Metal backend).
-//
-// Also uploads vertex attributes (positions, normals) and globalized indices
-// so the shade kernel can test intersections and interpolate hit data.
+// Builds a single triangle GAS, motion-aware when any mesh has motion keys
+// (vertex buffers at shutter-open and shutter-close).  Owns the world-space
+// vertex / normal / index buffers used both for the GAS build and for
+// shading-time attribute fetch in the OptiX programs.
 // ---------------------------------------------------------------------------
 class CudaAccelStructure {
 public:
@@ -28,14 +27,21 @@ public:
     bool isValid() const;
 
     // Device pointers (raw uint64 = CUdeviceptr)
-    uint64_t bvhBuffer()               const;  // BvhNode*   — flat node array
-    uint64_t triIndexBuffer()          const;  // uint32_t*  — BVH-reordered triangle indices
-    uint64_t positionBuffer()          const;  // float*     — packed float3, all meshes
-    uint64_t normalBuffer()            const;  // GpuFloat3* — all meshes concatenated
+    uint64_t positionBuffer()          const;  // float*     — packed float3, world-space at shutter-open
+    uint64_t positionBufferClose()     const;  // float*     — packed float3, world-space at shutter-close
+    uint64_t normalBuffer()            const;  // GpuFloat3* — all meshes concatenated (baked at open)
     uint64_t indexBuffer()             const;  // uint32_t*  — globalized triangle indices
     uint64_t triMeshIDBuffer()         const;  // uint32_t*  — per-triangle meshID
     uint64_t meshVertexOffsetBuffer()  const;  // uint32_t*  — per-mesh vertex base
     uint64_t meshIndexOffsetBuffer()   const;  // uint32_t*  — per-mesh index base (elements)
+
+    // OptiX traversable handle (returned uint64 = OptixTraversableHandle).
+    // Zero unless ANACAPA_ENABLE_OPTIX was set at build time.
+    uint64_t traversableHandle()       const;
+
+    // True if any mesh has motion keys (=> OptiX GAS was built motion-aware
+    // and positionBufferClose() differs from positionBuffer()).
+    bool     hasMotion()               const;
 
     uint32_t totalVertices()  const;
     uint32_t totalTriangles() const;

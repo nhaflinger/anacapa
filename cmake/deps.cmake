@@ -230,3 +230,49 @@ if(ANACAPA_ENABLE_METAL)
     find_library(FOUNDATION_LIB   Foundation REQUIRED)
     find_library(QUARTZCORE_LIB   QuartzCore REQUIRED)
 endif()
+
+# ---------------------------------------------------------------------------
+# OptiX (optional — Phase 6, requires CUDA)
+#
+# Header-only SDK; the ray-tracing engine ships inside the NVIDIA driver.
+# Default search path: ~/optix  (downloaded from developer.nvidia.com/optix)
+# Override with: cmake -DOptiX_INSTALL_DIR=/path/to/optix-sdk
+# ---------------------------------------------------------------------------
+if(ANACAPA_ENABLE_CUDA AND ANACAPA_ENABLE_OPTIX)
+    set(OptiX_INSTALL_DIR "$ENV{HOME}/optix" CACHE PATH "NVIDIA OptiX SDK root")
+
+    # If the SDK was extracted with its versioned subdirectory intact (the
+    # default of the .sh installer), descend into it.
+    if(NOT EXISTS "${OptiX_INSTALL_DIR}/include/optix.h")
+        file(GLOB _optix_subdir
+             RELATIVE "${OptiX_INSTALL_DIR}"
+             "${OptiX_INSTALL_DIR}/NVIDIA-OptiX-SDK-*")
+        foreach(_sub IN LISTS _optix_subdir)
+            if(EXISTS "${OptiX_INSTALL_DIR}/${_sub}/include/optix.h")
+                set(OptiX_INSTALL_DIR "${OptiX_INSTALL_DIR}/${_sub}"
+                    CACHE PATH "NVIDIA OptiX SDK root" FORCE)
+                break()
+            endif()
+        endforeach()
+    endif()
+
+    if(NOT EXISTS "${OptiX_INSTALL_DIR}/include/optix.h")
+        message(FATAL_ERROR
+            "ANACAPA_ENABLE_OPTIX: cannot find optix.h under "
+            "${OptiX_INSTALL_DIR}/include.\n"
+            "Either install the OptiX SDK to ~/optix, or pass "
+            "-DOptiX_INSTALL_DIR=/path/to/sdk, or disable with "
+            "-DANACAPA_ENABLE_OPTIX=OFF.")
+    endif()
+    # Extract version from optix.h (OPTIX_VERSION = major*10000 + minor*100 + micro)
+    file(STRINGS "${OptiX_INSTALL_DIR}/include/optix.h" _optix_version_line
+         REGEX "^#define OPTIX_VERSION +[0-9]+")
+    if(_optix_version_line MATCHES "OPTIX_VERSION +([0-9]+)")
+        set(_optix_v ${CMAKE_MATCH_1})
+        math(EXPR _optix_major "${_optix_v} / 10000")
+        math(EXPR _optix_minor "(${_optix_v} / 100) % 100")
+        message(STATUS "OptiX SDK ${_optix_major}.${_optix_minor} found at ${OptiX_INSTALL_DIR}")
+    else()
+        message(STATUS "OptiX SDK found at ${OptiX_INSTALL_DIR}")
+    endif()
+endif()
