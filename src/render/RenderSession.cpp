@@ -573,7 +573,19 @@ void RenderSession::render() {
     std::condition_variable previewCV;
     std::thread          previewThread;
 
-    const bool doPreview = !m_settings.pngPath.empty();
+    // Determine the progressive preview target:
+    //   --png path  → sRGB-encoded PNG (display-ready, legacy)
+    //   --output *.exr (no --png) → linear EXR written to the output path
+    const bool hasPng = !m_settings.pngPath.empty();
+    const bool hasExrOut = [&] {
+        const auto& p = m_settings.outputPath;
+        if (p.size() < 4) return false;
+        std::string ext = p.substr(p.size() - 4);
+        for (auto& c : ext) c = static_cast<char>(std::tolower((unsigned char)c));
+        return ext == ".exr";
+    }();
+    const bool doPreview = hasPng || hasExrOut;
+
     if (doPreview) {
         previewThread = std::thread([&] {
             constexpr int kIntervalMs = 500;
@@ -583,13 +595,20 @@ void RenderSession::render() {
                                    [&] { return previewStop.load(); });
                 if (m_film->isDirty()) {
                     m_film->clearDirty();
-                    m_film->writePNG(m_settings.pngPath, m_settings.exposure);
+                    if (hasPng)
+                        m_film->writePNG(m_settings.pngPath, m_settings.exposure);
+                    else
+                        m_film->writeEXRPreview(m_settings.outputPath);
                 }
                 if (previewStop.load()) break;
             }
         });
-        spdlog::info("Progressive preview: writing PNG every 500 ms to '{}'",
-                     m_settings.pngPath);
+        if (hasPng)
+            spdlog::info("Progressive preview: writing PNG every 500 ms to '{}'",
+                         m_settings.pngPath);
+        else
+            spdlog::info("Progressive preview: writing EXR every 500 ms to '{}'",
+                         m_settings.outputPath);
     }
 
     // Helper: render a list of tiles and merge into Film.

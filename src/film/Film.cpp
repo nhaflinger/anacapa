@@ -271,4 +271,35 @@ bool Film::writePNG(const std::string& path, float exposure) const {
     return std::rename(tmp.c_str(), path.c_str()) == 0;
 }
 
+// ---------------------------------------------------------------------------
+// writeEXRPreview — beauty-only linear EXR for progressive viewer updates.
+// Atomic write (temp file → rename) so the viewer never sees a partial file.
+// ---------------------------------------------------------------------------
+bool Film::writeEXRPreview(const std::string& path) const {
+    using namespace OIIO;
+    const uint32_t N = m_width * m_height;
+
+    std::vector<float> pixels(N * 3);
+    for (uint32_t i = 0; i < N; ++i) {
+        Spectrum c = m_pixels[i].resolve();
+        pixels[i*3+0] = c.x;
+        pixels[i*3+1] = c.y;
+        pixels[i*3+2] = c.z;
+    }
+
+    ImageSpec spec(static_cast<int>(m_width), static_cast<int>(m_height),
+                   3, TypeDesc::FLOAT);
+    spec.attribute("compression", "none");  // fastest for progressive preview
+    spec.channelnames = {"R", "G", "B"};
+
+    const std::string tmp = path + ".writing.exr";
+    auto out = ImageOutput::create(tmp);
+    if (!out) return false;
+    if (!out->open(tmp, spec)) return false;
+    bool ok = out->write_image(TypeDesc::FLOAT, pixels.data());
+    out->close();
+    if (!ok) { std::remove(tmp.c_str()); return false; }
+    return std::rename(tmp.c_str(), path.c_str()) == 0;
+}
+
 } // namespace anacapa

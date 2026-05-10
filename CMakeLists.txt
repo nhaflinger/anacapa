@@ -204,6 +204,7 @@ if(ANACAPA_ENABLE_VIEWER)
         SDL2::SDL2-static
         glad
         CLI11::CLI11
+        OpenImageIO::OpenImageIO
     )
     # OpenGL
     if(APPLE)

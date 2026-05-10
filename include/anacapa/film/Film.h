@@ -173,6 +173,10 @@ public:
     // sRGB gamma. exposure: EV adjustment applied before tone mapping (0 = none).
     bool writePNG(const std::string& path, float exposure = 0.f) const;
 
+    // Write a lightweight beauty-only EXR for progressive preview (no denoising,
+    // no AOVs).  Uses an atomic temp-file rename so readers never see a partial file.
+    bool writeEXRPreview(const std::string& path) const;
+
     // Raw resolved pixel access (for preview / post-processing)
     Spectrum getPixel(uint32_t x, uint32_t y) const;
 

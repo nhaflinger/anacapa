@@ -40,6 +40,8 @@ namespace OCIO = OCIO_NAMESPACE;
 #define STBI_ONLY_HDR
 #include "stb_image.h"
 
+#include <OpenImageIO/imageio.h>
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
@@ -532,14 +534,22 @@ static void processImage(const SlotState& s, bool useOcio)
 }
 
 // ---------------------------------------------------------------------------
-// Texture upload — handles both 8-bit sRGB and 32-bit HDR
+// Texture upload — EXR via OIIO (scene-linear float); PNG/JPEG/HDR via stb
 // ---------------------------------------------------------------------------
+static bool hasExtCI(const char* path, const char* ext)
+{
+    size_t plen = std::strlen(path), elen = std::strlen(ext);
+    if (plen < elen) return false;
+    const char* tail = path + plen - elen;
+    for (size_t i = 0; i < elen; ++i)
+        if (std::tolower((unsigned char)tail[i]) != std::tolower((unsigned char)ext[i]))
+            return false;
+    return true;
+}
+
 static bool uploadTextureToSlot(const char* path, SlotState& s)
 {
     if (s.srcTex) { glDeleteTextures(1, &s.srcTex); s.srcTex = 0; }
-
-    bool isHdr = stbi_is_hdr(path);
-    int  w, h, ch;
 
     GLuint tex;
     glGenTextures(1, &tex);
@@ -549,23 +559,58 @@ static bool uploadTextureToSlot(const char* path, SlotState& s)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    stbi_set_flip_vertically_on_load(1);
-    if (isHdr) {
-        float* data = stbi_loadf(path, &w, &h, &ch, 4);
-        if (!data) { glDeleteTextures(1, &tex); return false; }
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, data);
-        stbi_image_free(data);
+    bool ok = false;
+
+    if (hasExtCI(path, ".exr")) {
+        // EXR: load as scene-linear float via OIIO
+        auto inp = OIIO::ImageInput::open(path);
+        if (inp) {
+            const OIIO::ImageSpec& spec = inp->spec();
+            int w  = spec.width;
+            int h  = spec.height;
+            int nc = spec.nchannels;
+            std::vector<float> buf(w * h * 4, 0.f);
+            // Read into RGBA float, flipping vertically for OpenGL
+            if (nc >= 3) {
+                std::vector<float> row(w * 4);
+                for (int y = 0; y < h; ++y) {
+                    int flippedY = h - 1 - y;
+                    inp->read_scanline(y + spec.y, 0, OIIO::TypeDesc::FLOAT, row.data(),
+                                       4 * sizeof(float));
+                    std::memcpy(buf.data() + flippedY * w * 4, row.data(), w * 4 * sizeof(float));
+                }
+            }
+            inp->close();
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, buf.data());
+            s.texW  = w;
+            s.texH  = h;
+            s.isHdr = true;
+            ok = true;
+        }
     } else {
-        unsigned char* data = stbi_load(path, &w, &h, &ch, 4);
-        if (!data) { glDeleteTextures(1, &tex); return false; }
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-        stbi_image_free(data);
+        // PNG / JPEG / HDR — use stb_image
+        bool isHdr = stbi_is_hdr(path);
+        int  w, h, ch;
+        stbi_set_flip_vertically_on_load(1);
+        if (isHdr) {
+            float* data = stbi_loadf(path, &w, &h, &ch, 4);
+            if (data) {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, data);
+                stbi_image_free(data);
+                s.texW  = w; s.texH = h; s.isHdr = true; ok = true;
+            }
+        } else {
+            unsigned char* data = stbi_load(path, &w, &h, &ch, 4);
+            if (data) {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+                stbi_image_free(data);
+                s.texW  = w; s.texH = h; s.isHdr = false; ok = true;
+            }
+        }
     }
 
+    if (!ok) { glDeleteTextures(1, &tex); return false; }
     s.srcTex = tex;
-    s.texW   = w;
-    s.texH   = h;
-    s.isHdr  = isHdr;
     return true;
 }
 
@@ -707,7 +752,7 @@ int main(int argc, char** argv)
     // File browsers
     ImGui::FileBrowser openBrowser;
     openBrowser.SetTitle("Open Image");
-    openBrowser.SetTypeFilters({".png", ".jpg", ".jpeg", ".hdr"});
+    openBrowser.SetTypeFilters({".exr", ".png", ".jpg", ".jpeg", ".hdr"});
 
     ImGui::FileBrowser saveBrowser(ImGuiFileBrowserFlags_EnterNewFilename |
                                    ImGuiFileBrowserFlags_CreateNewDir);
