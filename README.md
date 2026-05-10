@@ -183,6 +183,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
   --write-aovs                               \
   --override-lights                          \
   --override-materials                       \
+  --debug-mesh       -1                      \
   --interactive                              \
   --firefly-clamp    10                      \
   --light-angle      2.0                     \
