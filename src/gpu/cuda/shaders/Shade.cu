@@ -264,6 +264,38 @@ float3 shadowTransmittance(float3 origin, float3 dir, float tMax, float rayTime)
 }
 
 // ---------------------------------------------------------------------------
+// MIS helpers
+// ---------------------------------------------------------------------------
+static __forceinline__ __device__
+float powerHeuristic(float pdfF, float pdfG) {
+    float f = pdfF, g = pdfG;
+    return (f * f) / (f * f + g * g + 1e-9f);
+}
+
+// Solid-angle PDF that the NEE rect-light strategy would use to sample
+// direction wi from hitPos toward this light.  Returns 0 if wi doesn't
+// land within the light's quad (so the strategy could not have produced
+// it) — that case contributes 0 to the MIS denominator.
+static __forceinline__ __device__
+float rectLightSolidAnglePdf(const GpuLight& light,
+                             float3 hitPos, float3 wi, float dist)
+{
+    float3 lightN = make3(light.normal);
+    float  cosL   = dot(-1.0f * wi, lightN);
+    if (cosL <= 0.0f) return 0.0f;
+    float3 toHit = hitPos - make3(light.position);
+    float3 uH    = make3(light.uHalf);
+    float3 vH    = make3(light.vHalf);
+    float  uLen  = sqrtf(dot(uH, uH));
+    float  vLen  = sqrtf(dot(vH, vH));
+    if (uLen < 1e-7f || vLen < 1e-7f) return 0.0f;
+    float uCoord = dot(toHit, uH * (1.0f / uLen));
+    float vCoord = dot(toHit, vH * (1.0f / vLen));
+    if (fabsf(uCoord) > uLen || fabsf(vCoord) > vLen) return 0.0f;
+    return (dist * dist) / (cosL * light.area);
+}
+
+// ---------------------------------------------------------------------------
 // Direct light sampling
 // ---------------------------------------------------------------------------
 static __forceinline__ __device__
@@ -409,10 +441,14 @@ extern "C" __global__ void __raygen__rg()
         float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
         float3 L          = make_float3(0.0f, 0.0f, 0.0f);
         uint32_t glassDepth = 0;
-        // True for the primary ray and after any delta (glass) bounce — those
-        // segments aren't seen by NEE at the previous hit, so direct emission
-        // must be added on contact instead.
-        bool specularBounce = true;
+        // MIS state: prevWasDelta=true on the first hit and after any delta
+        // (glass) bounce so emitter Le on that vertex gets weight=1 (no NEE
+        // was attempted at the previous vertex, no double-count risk).
+        // Otherwise weight = powerHeuristic(prevBsdfPdf, lightSolidAnglePdf)
+        // balances emitter-on-bounce against NEE for the same vertex.
+        float  prevBsdfPdf  = 0.0f;
+        float3 prevN        = make_float3(0.0f, 0.0f, 0.0f);
+        bool   prevWasDelta = true;
 
         for (uint32_t bounce = 0; bounce <= params.cam.maxDepth; ++bounce) {
             TraceResult hit = trace(rayOrig, rayDir, 1e-4f, 1e10f, rayTime);
@@ -429,7 +465,21 @@ extern "C" __global__ void __raygen__rg()
                 } else if (params.cam.hasEnvLight) {
                     envColor = make3(params.cam.envLe);
                 }
-                L += throughput * envColor;
+                if (compmax(envColor) > 0.0f) {
+                    float weight = 1.0f;
+                    if (!prevWasDelta && bounce > 0) {
+                        // NEE dome-sampling PDF: cosine-hemisphere * uniform light pick
+                        float lpdf = 0.0f;
+                        for (uint32_t li = 0; li < params.numLights; ++li) {
+                            if (params.lights[li].type == kLightDome) {
+                                float cosW = fmaxf(0.0f, dot(rayDir, prevN));
+                                lpdf += (cosW / CUDART_PI_F) / float(params.numLights);
+                            }
+                        }
+                        if (lpdf > 0.0f) weight = powerHeuristic(prevBsdfPdf, lpdf);
+                    }
+                    L += throughput * envColor * weight;
+                }
                 break;
             }
 
@@ -445,14 +495,27 @@ extern "C" __global__ void __raygen__rg()
             float3 baseColor = make3(mat.baseColor);
             float3 emissive  = make3(mat.emissive);
 
-            // Emission contribution for any material with non-zero Le.  Only
-            // applied on primary or post-specular segments so we don't double
-            // count with NEE, which already integrated direct light at the
-            // previous diffuse hit point.
-            if (specularBounce && compmax(emissive) > 0.0f)
-                L += throughput * emissive;
-
-            if (mat.type == kMatEmissive) break;
+            // Emitter Le with MIS weight against NEE (rect-light) sampling.
+            // prevWasDelta=true on the first hit and after any delta bounce
+            // gets weight=1.  Otherwise the weight is the power heuristic
+            // between the BSDF PDF that produced this ray and the rect-light
+            // PDF, summed over all rect lights with uniform selection.
+            if (mat.type == kMatEmissive) {
+                float weight = 1.0f;
+                if (!prevWasDelta && bounce > 0) {
+                    float lpdf = 0.0f;
+                    for (uint32_t li = 0; li < params.numLights; ++li) {
+                        if (params.lights[li].type == kLightRect) {
+                            float spdf = rectLightSolidAnglePdf(
+                                params.lights[li], hitPos, rayDir, hit.t);
+                            if (spdf > 0.0f) lpdf += spdf / float(params.numLights);
+                        }
+                    }
+                    if (lpdf > 0.0f) weight = powerHeuristic(prevBsdfPdf, lpdf);
+                }
+                L += throughput * emissive * weight;
+                break;
+            }
 
             float3 wo = -1.0f * rayDir;
             if (mat.type != kMatGlass) {
@@ -494,7 +557,10 @@ extern "C" __global__ void __raygen__rg()
                     }
                 }
                 rayDir = normalize(wi);
-                specularBounce = true;  // glass is delta — next hit's emission needs to be added
+                // Glass is delta: emitter Le on next hit gets weight=1.
+                prevBsdfPdf  = 1.0f;
+                prevN        = faceN;
+                prevWasDelta = true;
                 if (++glassDepth >= 16) break;
                 if (bounce > 0) --bounce;
                 continue;
@@ -546,7 +612,12 @@ extern "C" __global__ void __raygen__rg()
 
             rayOrig = hitPos + n * 1e-4f;
             rayDir  = normalize(wi);
-            specularBounce = false;  // diffuse/glossy bounce — NEE handled direct light
+            // Diffuse / glossy bounce: emitter Le at next vertex must be
+            // MIS-weighted against the NEE strategy that just sampled the
+            // same vertex.
+            prevBsdfPdf  = bsdfPdf;
+            prevN        = n;
+            prevWasDelta = false;
         }
 
         rAcc += L.x;
