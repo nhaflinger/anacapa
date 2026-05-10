@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
        ->default_val("path");
 
     app.add_option("--firefly-clamp", settings.fireflyClamp,
-                   "BDPT: max luminance per strategy contribution (0=off, default=10)")
+                   "Max luminance per path sample; applies to path, BDPT, and GPU integrators (0=off, default=10)")
        ->default_val(10.f);
 
     app.add_option("--light-angle", settings.lightAngle,

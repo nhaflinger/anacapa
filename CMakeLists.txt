@@ -228,21 +228,28 @@ endif()
 
 # ---------------------------------------------------------------------------
 # Blender addon — zip tools/anacapa_renderer/ for install via Blender UI
+# Excludes __pycache__ and .pyc files.  Rebuilds whenever any .py file changes.
 # ---------------------------------------------------------------------------
 set(_addon_src_dir "${CMAKE_CURRENT_SOURCE_DIR}/tools/anacapa_renderer")
 set(_addon_zip     "${CMAKE_BINARY_DIR}/bin/anacapa_renderer.zip")
+set(_addon_py_files
+    "${_addon_src_dir}/__init__.py"
+    "${_addon_src_dir}/engine.py"
+    "${_addon_src_dir}/export.py"
+    "${_addon_src_dir}/operators.py"
+    "${_addon_src_dir}/properties.py"
+    "${_addon_src_dir}/ui.py"
+    "${_addon_src_dir}/blender_prep_for_usd_export.py"
+)
 add_custom_command(
     OUTPUT  "${_addon_zip}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/bin"
-    COMMAND ${CMAKE_COMMAND} -E chdir "${CMAKE_CURRENT_SOURCE_DIR}/tools"
-            ${CMAKE_COMMAND} -E tar "cf" "${_addon_zip}" --format=zip anacapa_renderer
-    DEPENDS
-        "${_addon_src_dir}/__init__.py"
-        "${_addon_src_dir}/engine.py"
-        "${_addon_src_dir}/export.py"
-        "${_addon_src_dir}/operators.py"
-        "${_addon_src_dir}/properties.py"
-        "${_addon_src_dir}/ui.py"
+    COMMAND ${CMAKE_COMMAND} -E rm -f "${_addon_zip}"
+    COMMAND python3
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/package_addon.py"
+        "${_addon_zip}"
+        ${_addon_py_files}
+    DEPENDS ${_addon_py_files}
     COMMENT "Packaging Blender addon → bin/anacapa_renderer.zip"
 )
 add_custom_target(anacapa_blender ALL DEPENDS "${_addon_zip}")
