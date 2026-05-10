@@ -102,7 +102,8 @@ int main(int argc, char** argv) {
 
 
     app.add_option("--png", settings.pngPath,
-                   "Write an ACES-tonemapped sRGB PNG for easy comparison (e.g. out.png)");
+                   "Write an sRGB-encoded PNG for easy comparison (exposure + sRGB "
+                   "gamma only, no tone mapping; e.g. out.png)");
     app.add_option("--exposure", settings.exposure,
                    "EV exposure adjustment for --png output (default 0)")
        ->default_val(0.f);

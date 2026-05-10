@@ -62,7 +62,7 @@ struct RenderSettings {
     bool           interactive     = false; // Use GPU (Metal) backend when available
     bool           overrideLights    = false; // Replace scene lights with a simple white directional
     bool           overrideMaterials = false; // Replace all scene materials with white Lambertian
-    std::string    pngPath;                   // If set, write ACES-tonemapped PNG alongside EXR
+    std::string    pngPath;                   // If set, write sRGB-encoded PNG alongside EXR (no tone mapping)
     float          exposure          = 0.f;   // EV adjustment for PNG output
     DenoiseOptions denoise;
 
