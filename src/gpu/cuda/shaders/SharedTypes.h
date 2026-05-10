@@ -125,6 +125,7 @@ struct GpuCameraParams {
     float     shutterClose;
     uint32_t  envMapWidth;    // CDF table width  (0 = no HDRI importance sampling)
     uint32_t  envMapHeight;   // CDF table height
+    float     fireflyClamp;   // max luminance per path sample; 0 = disabled
 };
 
 // ---------------------------------------------------------------------------

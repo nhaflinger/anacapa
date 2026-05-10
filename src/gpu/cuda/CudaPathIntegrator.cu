@@ -217,6 +217,7 @@ struct CudaPathIntegrator::Impl {
     uint32_t numMaterials = 0;
     uint32_t numLights    = 0;
     uint32_t maxDepth     = 6;
+    float    fireflyClamp = 10.f;
     bool     preparedOnce = false;
 
 #ifdef ANACAPA_ENABLE_OPTIX
@@ -436,6 +437,10 @@ void CudaPathIntegrator::clearAccum() {
     m_impl->clearAccum();
 }
 
+void CudaPathIntegrator::setFireflyClamp(float v) {
+    m_impl->fireflyClamp = v;
+}
+
 // ---------------------------------------------------------------------------
 // prepare() — build accel, upload materials/lights/HDRI
 // ---------------------------------------------------------------------------
@@ -595,6 +600,7 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.envConditionalCdf = d_envConditionalCdf.isValid() ? d_envConditionalCdf.ptr() : nullptr;
     p.cam.envMapWidth   = envCdfWidth;
     p.cam.envMapHeight  = envCdfHeight;
+    p.cam.fireflyClamp  = fireflyClamp;
     p.handle            = accel->traversableHandle();
 }
 

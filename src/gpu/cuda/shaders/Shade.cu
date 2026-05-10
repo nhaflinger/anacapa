@@ -739,10 +739,18 @@ extern "C" __global__ void __raygen__rg()
             prevWasDelta = false;
         }
 
+        // Firefly clamp: scale L down if its luminance exceeds the threshold.
+        // Done before per-pixel accumulation so the variance tracker (lumSq)
+        // sees the clamped value too.
+        float lum = 0.2126f * L.x + 0.7152f * L.y + 0.0722f * L.z;
+        if (params.cam.fireflyClamp > 0.0f && lum > params.cam.fireflyClamp) {
+            float k = params.cam.fireflyClamp / lum;
+            L = L * k;
+            lum = params.cam.fireflyClamp;
+        }
         rAcc += L.x;
         gAcc += L.y;
         bAcc += L.z;
-        float lum = 0.2126f * L.x + 0.7152f * L.y + 0.0722f * L.z;
         lumSqAcc += lum * lum;
     }
 

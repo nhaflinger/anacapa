@@ -395,15 +395,19 @@ static bool ocioRebuildShader()
 static void ocioInit()
 {
     try {
-        // Try $OCIO env var first, then fall back to built-in ACES CG config
+        // Try $OCIO env var first, then fall back to OCIO's built-in studio
+        // config — same content as the Blender 4.x bundled config: AgX (and
+        // AgX Log / Punchy), Filmic / Filmic Log, ACES 1.0 / 2.0, Khronos PBR
+        // Neutral, False Color, Raw, Standard.  The CG config we used before
+        // had ACES views only, missing Filmic and AgX.
         bool fromEnv = (std::getenv("OCIO") != nullptr);
         if (fromEnv) {
             g_ocioConfig    = OCIO::GetCurrentConfig();
             g_ocioConfigName = std::getenv("OCIO");
         } else {
             g_ocioConfig    = OCIO::Config::CreateFromBuiltinConfig(
-                                  "ocio://cg-config-v2.1.0_aces-v1.3_ocio-v2.3");
-            g_ocioConfigName = "Built-in ACES CG";
+                                  "ocio://studio-config-v2.2.0_aces-v1.3_ocio-v2.4");
+            g_ocioConfigName = "Built-in Studio";
         }
 
         int n = g_ocioConfig->getNumDisplays();

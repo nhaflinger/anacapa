@@ -41,6 +41,13 @@ public:
 
     bool isValid() const;
 
+    // Per-sample luminance ceiling.  When > 0, samples whose luminance
+    // exceeds this threshold are scaled down to this value before being
+    // added to the accumulation buffer.  Suppresses the bright outliers
+    // ("fireflies") common to BDPT/path tracing in scenes with small lights
+    // or strong caustics.  0 disables clamping.  Mirrors --firefly-clamp.
+    void setFireflyClamp(float v);
+
     // Zero the persistent accumulation buffer.
     // Call before starting a fresh render (scene/camera change) so stale
     // samples from the previous render do not bleed into the new one.

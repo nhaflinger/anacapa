@@ -518,6 +518,7 @@ void RenderSession::render() {
         auto cudaIntegrator = std::make_unique<CudaPathIntegrator>();
         if (cudaIntegrator->isValid()) {
             spdlog::info("Interactive mode: using CUDA GPU backend");
+            cudaIntegrator->setFireflyClamp(m_settings.fireflyClamp);
             m_integrator = std::move(cudaIntegrator);
         } else {
             spdlog::warn("--interactive: CUDA backend unavailable, "
