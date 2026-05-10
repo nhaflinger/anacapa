@@ -5,19 +5,21 @@
 #include <anacapa/shading/ILight.h>
 #include <anacapa/accel/IAccelerationStructure.h>
 #include <anacapa/sampling/ISampler.h>
+#include "LightSampler.h"
 
 namespace anacapa {
 
 // ---------------------------------------------------------------------------
 // PathIntegrator — unidirectional path tracer with next-event estimation
 //
-// This is the Phase 1 reference integrator. It provides:
-//   1. A known-correct baseline to validate the BVH and shading stack
-//   2. A comparison target to verify BDPT produces equal-mean estimates
-//
-// Algorithm: For each pixel sample, trace a camera path of up to maxDepth
-// bounces. At each bounce, sample the BSDF and also perform direct light
-// sampling (next-event estimation) with MIS using the power heuristic.
+// MIS strategy (balance/power heuristic):
+//   Direct lighting  : one light selected via power-weighted alias table;
+//                      contribution MIS-weighted against the BSDF PDF.
+//   Emitter Le       : path-continuation hits tracked with prevBsdfPdf so
+//                      every emitter hit (not only specular) adds Le with
+//                      the correct weight against the NEE light-sampling PDF.
+//   BSDF sampling    : path-continuation ray; emitter hits handled in the
+//                      main loop — no separate BSDF branch in estimateDirect.
 // ---------------------------------------------------------------------------
 class PathIntegrator : public IIntegrator {
 public:
@@ -25,8 +27,7 @@ public:
         : m_maxDepth(maxDepth), m_minDepth(minDepth) {}
 
     void prepare(const SceneView& scene) override {
-        // Build alias table for light selection (uniform for now)
-        m_lightCount = static_cast<uint32_t>(scene.lights.size());
+        m_lightSampler.build(scene.lights);
     }
 
     void renderTile(const SceneView& scene,
@@ -39,13 +40,11 @@ public:
     void setDebugMeshID(int32_t id) override { m_debugMeshID = id; }
 
 private:
-    // outAlbedo/outNormal are filled with first-hit surface data for denoising
     Spectrum Li(const Ray& ray, const SceneView& scene,
-                ISampler& sampler, uint32_t depth,
+                ISampler& sampler,
                 Spectrum& outAlbedo, Vec3f& outNormal) const;
 
-    // Direct lighting: sample one light, return MIS-weighted contribution.
-    // sceneTime is stamped on shadow rays for temporal consistency.
+    // Light sampling only — no BSDF branch (emitter Le is handled in Li).
     Spectrum estimateDirect(const SurfaceInteraction& si,
                              const IMaterial& mat,
                              Vec3f wo,
@@ -54,16 +53,20 @@ private:
                              ISampler& sampler,
                              float sceneTime) const;
 
+    // Combined PDF of reaching direction wi from point `from` via the NEE
+    // light sampler (selection probability × light's solid-angle PDF).
+    float emitterPdf(Vec3f from, Vec3f wi, const SceneView& scene) const;
+
     static float powerHeuristic(float nF, float pdfF,
                                   float nG, float pdfG) {
         float f = nF * pdfF, g = nG * pdfG;
         return (f * f) / (f*f + g*g);
     }
 
-    uint32_t m_maxDepth  = 8;
-    uint32_t m_minDepth  = 2;
-    uint32_t m_lightCount = 0;
-    int32_t  m_debugMeshID = -1;
+    uint32_t     m_maxDepth    = 8;
+    uint32_t     m_minDepth    = 2;
+    int32_t      m_debugMeshID = -1;
+    LightSampler m_lightSampler;
 };
 
 } // namespace anacapa
