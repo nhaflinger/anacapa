@@ -53,6 +53,12 @@ struct MetalPathIntegrator::Impl {
     uint32_t      envCdfWidth          = 0;
     uint32_t      envCdfHeight         = 0;
 
+    // GGX energy-compensation LUTs (uploaded once, reused across launches)
+    id<MTLBuffer> specAlbedoLUTBuf    = nil;  // N_COS * N_R floats
+    id<MTLBuffer> specAvgAlbedoLUTBuf = nil;  // N_R floats
+    uint32_t      specLUTCosBins      = 0;
+    uint32_t      specLUTRoughBins    = 0;
+
     uint32_t numMaterials = 0;
     uint32_t numLights    = 0;
     uint32_t maxDepth     = 6;
@@ -116,6 +122,7 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
     gm.roughness  = 1.f;
     gm.metalness  = 0.f;
     gm.specularIOR = 1.5f;
+    gm.specular    = 0.5f;   // matches MaterialX standard_surface default
     gm.type = kMatLambertian;
 
     if (!mat) return gm;
@@ -167,7 +174,26 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
         }
     }
 
-    // StandardSurfaceMaterial — GGX by flags
+    // StandardSurfaceMaterial — promote to kMatGGX (including diffuse-flagged
+    // ones like Cornell walls) so the layered eval picks up Disney retro-reflection,
+    // spec/diff balance, and Kulla-Conty multi-scatter compensation on the GPU.
+    {
+        const StandardSurfaceMaterial* ssm = dynamic_cast<const StandardSurfaceMaterial*>(mat);
+        if (ssm) {
+            gm.type = kMatGGX;
+            SurfaceInteraction si; si.n = si.ng = {0,0,1};
+            ShadingContext ctx(si, {0,0,1});
+            Spectrum alb = mat->reflectance(ctx);
+            gm.baseColor   = {alb.x, alb.y, alb.z};
+            gm.roughness   = ssm->params().roughness.value;
+            gm.metalness   = ssm->params().metalness.value;
+            gm.specular    = ssm->params().specular.value;
+            gm.specularIOR = ssm->params().specular_IOR;
+            return gm;
+        }
+    }
+
+    // Non-StandardSurface glossy (OslMaterial, etc.) — GGX by flags
     if (mat->flags() & BSDFFlag_Glossy) {
         gm.type = kMatGGX;
         SurfaceInteraction si; si.n = si.ng = {0,0,1};
@@ -395,6 +421,22 @@ void MetalPathIntegrator::prepare(const SceneView& scene) {
         spdlog::info("MetalPathIntegrator: uploaded {}x{} HDRI env texture + CDF tables", ew, eh);
     }
 
+    // GGX energy-compensation LUTs — uploaded once, reused across renders.
+    if (!m_impl->specAlbedoLUTBuf) {
+        int N_COS = specAlbedoLUTCosBins();
+        int N_R   = specAlbedoLUTRoughnessBins();
+        size_t lutBytes    = static_cast<size_t>(N_COS) * N_R * sizeof(float);
+        size_t avgLutBytes = static_cast<size_t>(N_R) * sizeof(float);
+        m_impl->specAlbedoLUTBuf = [dev newBufferWithBytes:specAlbedoLUTData()
+                                                    length:lutBytes
+                                                   options:MTLResourceStorageModeShared];
+        m_impl->specAvgAlbedoLUTBuf = [dev newBufferWithBytes:specAvgAlbedoLUTData()
+                                                       length:avgLutBytes
+                                                      options:MTLResourceStorageModeShared];
+        m_impl->specLUTCosBins   = static_cast<uint32_t>(N_COS);
+        m_impl->specLUTRoughBins = static_cast<uint32_t>(N_R);
+    }
+
     // 1×1 white fallback texture (used when no dome light is present)
     {
         MTLTextureDescriptor* td = [MTLTextureDescriptor
@@ -484,9 +526,11 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     }
     camParams.shutterOpen  = cam.shutterOpen;
     camParams.shutterClose = cam.shutterClose;
-    camParams.envMapWidth  = m_impl->envCdfWidth;
-    camParams.envMapHeight = m_impl->envCdfHeight;
-    camParams.fireflyClamp = m_impl->fireflyClamp;
+    camParams.envMapWidth    = m_impl->envCdfWidth;
+    camParams.envMapHeight   = m_impl->envCdfHeight;
+    camParams.fireflyClamp   = m_impl->fireflyClamp;
+    camParams.specLUTCosBins   = m_impl->specLUTCosBins;
+    camParams.specLUTRoughBins = m_impl->specLUTRoughBins;
 
     // Use the persistent accum buffer — allocates only on first call or size change.
     // clearAccum() should be called when starting a fresh render (new scene/camera).
@@ -558,6 +602,9 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
         // HDRI importance sampling CDF tables (nil when no dome light loaded)
         [enc setBuffer:m_impl->envMarginalCdfBuf    offset:0 atIndex:13];
         [enc setBuffer:m_impl->envConditionalCdfBuf offset:0 atIndex:14];
+        // GGX energy-compensation LUTs
+        [enc setBuffer:m_impl->specAlbedoLUTBuf    offset:0 atIndex:15];
+        [enc setBuffer:m_impl->specAvgAlbedoLUTBuf offset:0 atIndex:16];
         [enc setTexture:envTex atIndex:0];
         [enc useResource:tlas usage:MTLResourceUsageRead];
         for (void* blasVoid : m_impl->accel->blasHandles())
@@ -647,9 +694,11 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
     }
     camParams.shutterOpen  = cam.shutterOpen;
     camParams.shutterClose = cam.shutterClose;
-    camParams.envMapWidth  = m_impl->envCdfWidth;
-    camParams.envMapHeight = m_impl->envCdfHeight;
-    camParams.fireflyClamp = m_impl->fireflyClamp;
+    camParams.envMapWidth    = m_impl->envCdfWidth;
+    camParams.envMapHeight   = m_impl->envCdfHeight;
+    camParams.fireflyClamp   = m_impl->fireflyClamp;
+    camParams.specLUTCosBins   = m_impl->specLUTCosBins;
+    camParams.specLUTRoughBins = m_impl->specLUTRoughBins;
 
     // Tile-sized accum buffer (gid is local; shader writes gid.y*tileW+gid.x)
     size_t accumBytes   = tileW * tileH * sizeof(GpuAccumPixel);
@@ -710,6 +759,11 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
             [enc setBuffer:m_impl->envMarginalCdfBuf    offset:0 atIndex:13];
         if (m_impl->envConditionalCdfBuf)
             [enc setBuffer:m_impl->envConditionalCdfBuf offset:0 atIndex:14];
+        // GGX energy-compensation LUTs
+        if (m_impl->specAlbedoLUTBuf)
+            [enc setBuffer:m_impl->specAlbedoLUTBuf    offset:0 atIndex:15];
+        if (m_impl->specAvgAlbedoLUTBuf)
+            [enc setBuffer:m_impl->specAvgAlbedoLUTBuf offset:0 atIndex:16];
 
         // Environment texture (index 0); fallback 1×1 white if no HDRI loaded
         id<MTLTexture> envTex = m_impl->envTexture

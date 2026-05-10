@@ -186,6 +186,107 @@ static float rectLightSolidAnglePdf(const device GpuLight& light,
 }
 
 // ---------------------------------------------------------------------------
+// Energy-compensation LUT helpers — mirror the CPU StandardSurface tables
+// ---------------------------------------------------------------------------
+
+// Bilinear lookup of E_spec(cosO, roughness) from the 2D spec-albedo LUT.
+static float specAlbedoLookup(float cosO, float roughness,
+                               constant GpuCameraParams& cam,
+                               const device float* lut) {
+    if (cam.specLUTCosBins == 0 || lut == nullptr) return 0.0f;
+    uint N_COS = cam.specLUTCosBins;
+    uint N_R   = cam.specLUTRoughBins;
+    cosO      = clamp(cosO,      0.0f, 1.0f);
+    roughness = clamp(roughness, 0.0f, 1.0f);
+    float fc  = cosO      * float(N_COS - 1);
+    float fr  = roughness * float(N_R   - 1);
+    uint  ic0 = min(N_COS - 1, uint(fc));
+    uint  ir0 = min(N_R   - 1, uint(fr));
+    uint  ic1 = min(N_COS - 1, ic0 + 1);
+    uint  ir1 = min(N_R   - 1, ir0 + 1);
+    float tc  = fc - float(ic0);
+    float tr  = fr - float(ir0);
+    float v00 = lut[ic0 * N_R + ir0];
+    float v01 = lut[ic0 * N_R + ir1];
+    float v10 = lut[ic1 * N_R + ir0];
+    float v11 = lut[ic1 * N_R + ir1];
+    return (v00 * (1.0f - tc) + v10 * tc) * (1.0f - tr)
+         + (v01 * (1.0f - tc) + v11 * tc) * tr;
+}
+
+// 1D lookup of cosine-weighted average E_spec — Kulla-Conty denominator.
+static float specAvgAlbedoLookup(float roughness,
+                                  constant GpuCameraParams& cam,
+                                  const device float* avgLut) {
+    if (cam.specLUTRoughBins == 0 || avgLut == nullptr) return 0.0f;
+    uint  N_R = cam.specLUTRoughBins;
+    roughness = clamp(roughness, 0.0f, 1.0f);
+    float fr  = roughness * float(N_R - 1);
+    uint  i0  = min(N_R - 1, uint(fr));
+    uint  i1  = min(N_R - 1, i0 + 1);
+    float t   = fr - float(i0);
+    return avgLut[i0] * (1.0f - t) + avgLut[i1] * t;
+}
+
+// Kulla-Conty multi-scatter GGX compensation.
+static float3 evalGGXMs(float cosO, float cosI, float roughness, float3 F_ms,
+                         constant GpuCameraParams& cam,
+                         const device float* lut, const device float* avgLut) {
+    if (cosO <= 0.0f || cosI <= 0.0f) return float3(0.0f);
+    float Eo = specAlbedoLookup(cosO, roughness, cam, lut);
+    float Ei = specAlbedoLookup(cosI, roughness, cam, lut);
+    float Ea = specAvgAlbedoLookup(roughness, cam, avgLut);
+    if (Ea >= 0.999f) return float3(0.0f);
+    float k = (1.0f - Eo) * (1.0f - Ei) / (M_PI_F * (1.0f - Ea));
+    return F_ms * k;
+}
+
+// Disney/Burley diffuse with roughness-dependent retro-reflection.
+static float3 disneyDiffuseLobe(float3 wo, float3 wi, float3 n,
+                                 float3 baseColor, float roughness) {
+    float cosI = max(0.0f, dot(n, wi));
+    float cosO = max(0.0f, dot(n, wo));
+    float3 wh  = normalize(wo + wi);
+    float cosD = max(0.0f, dot(wi, wh));
+    float Fd90   = 0.5f + 2.0f * cosD * cosD * roughness;
+    float Fview  = 1.0f + (Fd90 - 1.0f) * pow(1.0f - cosO, 5.0f);
+    float Flight = 1.0f + (Fd90 - 1.0f) * pow(1.0f - cosI, 5.0f);
+    return baseColor * (1.0f / M_PI_F) * Fview * Flight;
+}
+
+// Layered StandardSurface BSDF — single GGX spec lobe + Disney diffuse with
+// energy-conserving spec/diff balance and Kulla-Conty multi-scatter correction.
+static float3 evalLayeredBSDF(float3 wo, float3 wi, float3 n,
+                               float3 baseColor, float roughness,
+                               float metalness, float specular,
+                               constant GpuCameraParams& cam,
+                               const device float* specLUT,
+                               const device float* specAvgLUT) {
+    float3 wh    = normalize(wo + wi);
+    float  cosH  = max(0.0f, dot(n, wh));
+    float  cosO  = max(0.0f, dot(n, wo));
+    float  cosII = max(0.0f, dot(n, wi));
+    if (cosO <= 0.0f || cosII <= 0.0f) return float3(0.0f);
+
+    float  alpha  = max(1e-4f, roughness * roughness);
+    float  a2     = alpha * alpha;
+    float  D      = ggxD(cosH, a2);
+    float  G      = ggxG1(cosO, a2) * ggxG1(cosII, a2);
+    float  vdotH  = max(0.0f, dot(wi, wh));
+    float  invDen = 1.0f / max(1e-7f, 4.0f * cosO * cosII);
+
+    float3 F0   = mix(float3(0.04f), baseColor, metalness);
+    float3 spec = D * G * schlick(vdotH, F0) * invDen
+                + evalGGXMs(cosO, cosII, roughness, F0, cam, specLUT, specAvgLUT);
+
+    float  E_spec = specAlbedoLookup(cosO, roughness, cam, specLUT);
+    float  diffW  = (1.0f - metalness) * (1.0f - specular * E_spec);
+    float3 diff   = disneyDiffuseLobe(wo, wi, n, baseColor, roughness) * diffW;
+
+    return diff + spec;
+}
+
+// ---------------------------------------------------------------------------
 // HDRI importance sampling helpers
 // ---------------------------------------------------------------------------
 
@@ -335,6 +436,7 @@ static float3 sampleDirect(
     float3                          baseColor,
     float                           roughness,
     float                           metalness,
+    float                           specular,
     float                           rayTime,
     const device GpuLight*          lights,
     uint                            numLights,
@@ -348,7 +450,9 @@ static float3 sampleDirect(
     constant GpuCameraParams&       cam,
     texture2d<float, access::sample> envTex,
     const device float*             envMarginalCdf,
-    const device float*             envConditionalCdf)
+    const device float*             envConditionalCdf,
+    const device float*             specAlbedoLUT,
+    const device float*             specAvgAlbedoLUT)
 {
     if (numLights == 0) return float3(0);
 
@@ -438,23 +542,8 @@ static float3 sampleDirect(
     if (matType == kMatLambertian) {
         f = baseColor * (1.0f / M_PI_F);
     } else if (matType == kMatGGX) {
-        float3 wh  = normalize(wo + wi);
-        float  cosH = max(0.0f, dot(n, wh));
-        float  cosO = max(0.0f, dot(n, wo));
-        float  cosII = max(0.0f, dot(n, wi));
-        // Clamp roughness to 0.2 floor for NEE eval only — very tight lobes sampled
-        // from a random light direction produce huge D values (fireflies) without MIS.
-        // The bounce path uses the real roughness with importance sampling where it's safe.
-        float  neeRoughness = max(roughness, 0.2f);
-        float  alpha  = neeRoughness * neeRoughness;
-        float  alpha2 = alpha * alpha;
-        float  D  = ggxD(cosH, alpha2);
-        float  G  = ggxG1(cosO, alpha2) * ggxG1(cosII, alpha2);
-        float3 F0 = mix(float3(0.04f), baseColor, metalness);
-        float3 F  = schlick(dot(wi, wh), F0);
-        float3 specular = D * G * F / max(1e-7f, 4.0f * cosO * cosII);
-        float3 diffuse  = (1.0f - metalness) * baseColor * (1.0f / M_PI_F);
-        f = diffuse + specular;
+        f = evalLayeredBSDF(wo, wi, n, baseColor, roughness, metalness, specular,
+                            cam, specAlbedoLUT, specAvgAlbedoLUT);
     }
     // Glass is delta — no area PDF can be evaluated, skip direct lighting
 
@@ -480,6 +569,8 @@ kernel void shade(
     acceleration_structure<instancing, primitive_motion> accelStruct [[ buffer(12) ]],
     const device float*                     envMarginalCdf    [[ buffer(13) ]],
     const device float*                     envConditionalCdf [[ buffer(14) ]],
+    const device float*                     specAlbedoLUT     [[ buffer(15) ]],
+    const device float*                     specAvgAlbedoLUT  [[ buffer(16) ]],
     texture2d<float, access::sample>        envTexture        [[ texture(0) ]],
     uint2                                   gid               [[ thread_position_in_grid ]])
 {
@@ -628,13 +719,14 @@ kernel void shade(
         if (mat.type != kMatGlass) {
             L += throughput * sampleDirect(hitPos, n, wo,
                                            mat.type, baseColor,
-                                           mat.roughness, mat.metalness,
+                                           mat.roughness, mat.metalness, mat.specular,
                                            rayTime,
                                            lights, numLights,
                                            materials, numMaterials,
                                            normals, indices, meshIndexOffsets,
                                            rng, accelStruct, cam, envTexture,
-                                           envMarginalCdf, envConditionalCdf);
+                                           envMarginalCdf, envConditionalCdf,
+                                           specAlbedoLUT, specAvgAlbedoLUT);
         }
 
         // Russian roulette after bounce 3
@@ -726,20 +818,25 @@ kernel void shade(
             float cosO  = dot(n, wo);
             float cosH  = max(0.0f, dot(n, wh));
             float D     = ggxD(cosH, alpha2);
-            float G     = ggxG1(cosO, alpha2) * ggxG1(cosI, alpha2);
-            float3 F    = schlick(max(0.0f, dot(wi, wh)), F0);
-            float3 spec = D * G * F / max(1e-7f, 4.0f * cosO * cosI);
-            float3 diff = (1.0f - mat.metalness) * baseColor * (1.0f / M_PI_F);
-            bsdfF = diff + spec;
+
+            bsdfF = evalLayeredBSDF(wo, wi, n, baseColor, mat.roughness,
+                                    mat.metalness, mat.specular,
+                                    cam, specAlbedoLUT, specAvgAlbedoLUT);
 
             float ggxPdf = D * cosH / max(1e-7f, 4.0f * dot(wo, wh));
             float cosPdf = cosI / M_PI_F;
             bsdfPdf = pSpec * ggxPdf + pDiff * cosPdf;
         } else {
-            // Cosine hemisphere (Lambertian or very rough GGX)
-            wi       = cosineSampleHemisphere(rand2(rng), n);
-            bsdfPdf  = max(1e-7f, dot(n, wi)) / M_PI_F;
-            bsdfF    = baseColor / M_PI_F;
+            // Cosine hemisphere (Lambertian or very rough kMatGGX)
+            wi      = cosineSampleHemisphere(rand2(rng), n);
+            bsdfPdf = max(1e-7f, dot(n, wi)) / M_PI_F;
+            if (mat.type == kMatGGX) {
+                bsdfF = evalLayeredBSDF(wo, wi, n, baseColor, mat.roughness,
+                                        mat.metalness, mat.specular,
+                                        cam, specAlbedoLUT, specAvgAlbedoLUT);
+            } else {
+                bsdfF = baseColor / M_PI_F;
+            }
         }
 
         float cosI = dot(n, wi);

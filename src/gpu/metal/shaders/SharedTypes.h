@@ -72,7 +72,9 @@ struct GpuMaterial {
     uint32_t        type;         // GpuMaterialType
     float           specularIOR;  // IOR for glass; unused for other types
     float           transmission; // 0 = opaque, 1 = fully transmissive
-    float           _pad0;
+    // Specular layer strength [0,1] — MaterialX standard_surface `specular` knob.
+    // Multiplies the dielectric Fresnel in the energy-conserving spec/diff balance.
+    float           specular;
 };
 
 // ---------------------------------------------------------------------------
@@ -133,6 +135,8 @@ struct GpuCameraParams {
     uint32_t  envMapWidth;    // CDF table width  (0 = no HDRI importance sampling)
     uint32_t  envMapHeight;   // CDF table height
     float     fireflyClamp;   // max luminance per path sample; 0 = disabled
+    uint32_t  specLUTCosBins;   // 0 = no LUT uploaded
+    uint32_t  specLUTRoughBins;
 };
 
 // ---------------------------------------------------------------------------
