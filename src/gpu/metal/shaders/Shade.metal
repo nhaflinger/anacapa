@@ -551,6 +551,48 @@ static float3 sampleDirect(
 }
 
 // ---------------------------------------------------------------------------
+// Pixel filter helpers (MSL does not support lambdas)
+// ---------------------------------------------------------------------------
+static void sampleFilterAxis(float u,
+                              const device float* cdf,
+                              const device float* signs,
+                              int N, float R,
+                              thread float& outX,
+                              thread float& outSign) {
+    const float binW = (2.0f * R) / float(N);
+    int lo = 0, hi = N;
+    while (lo < hi) {
+        int mid = (lo + hi) >> 1;
+        if (cdf[mid + 1] <= u) lo = mid + 1; else hi = mid;
+    }
+    int   bin = (lo < N) ? lo : (N - 1);
+    float c0  = cdf[bin];
+    float c1  = cdf[bin + 1];
+    float t   = (c1 > c0) ? (u - c0) / (c1 - c0) : 0.5f;
+    outX    = -R + (float(bin) + t) * binW;
+    outSign = signs[bin];
+}
+
+static void samplePixelFilter(float u1, float u2,
+                               constant GpuCameraParams& cam,
+                               const device float* cdf,
+                               const device float* signs,
+                               thread float& dx,
+                               thread float& dy,
+                               thread float& weight) {
+    if (cam.pixelFilterBins == 0) {
+        dx = u1 - 0.5f;
+        dy = u2 - 0.5f;
+        weight = 1.0f;
+        return;
+    }
+    float sx, sgX, sy, sgY;
+    sampleFilterAxis(u1, cdf, signs, (int)cam.pixelFilterBins, cam.pixelFilterRadius, sx, sgX);
+    sampleFilterAxis(u2, cdf, signs, (int)cam.pixelFilterBins, cam.pixelFilterRadius, sy, sgY);
+    dx = sx; dy = sy; weight = sgX * sgY;
+}
+
+// ---------------------------------------------------------------------------
 // Main kernel
 // ---------------------------------------------------------------------------
 kernel void shade(
@@ -598,39 +640,6 @@ kernel void shade(
     float  batchLumSq  = 0.0f;
     float  batchWeight = 0.0f;
 
-    // Pixel filter (separable, importance-sampled).  Falls back to box-1.0
-    // when the host hasn't bound the tables (pixelFilterBins == 0).
-    auto sampleFilter = [&](float u1, float u2, thread float& dx,
-                             thread float& dy, thread float& weight) {
-        if (cam.pixelFilterBins == 0) {
-            dx = u1 - 0.5f;
-            dy = u2 - 0.5f;
-            weight = 1.0f;
-            return;
-        }
-        const int   N = (int)cam.pixelFilterBins;
-        const float R = cam.pixelFilterRadius;
-        const float binW = (2.0f * R) / float(N);
-        // Inverse-CDF sample for one axis.
-        auto sampleAxis = [&](float u, thread float& outX, thread float& outSign) {
-            int lo = 0, hi = N;
-            while (lo < hi) {
-                int mid = (lo + hi) >> 1;
-                if (pixelFilterCdf[mid + 1] <= u) lo = mid + 1; else hi = mid;
-            }
-            int   bin = (lo < N) ? lo : (N - 1);
-            float c0  = pixelFilterCdf[bin];
-            float c1  = pixelFilterCdf[bin + 1];
-            float t   = (c1 > c0) ? (u - c0) / (c1 - c0) : 0.5f;
-            outX     = -R + (float(bin) + t) * binW;
-            outSign  = pixelFilterSigns[bin];
-        };
-        float sx, sgX, sy, sgY;
-        sampleAxis(u1, sx, sgX);
-        sampleAxis(u2, sy, sgY);
-        dx = sx; dy = sy; weight = sgX * sgY;
-    };
-
     for (uint s = 0; s < batch.batchSize; ++s) {
         uint sampleIndex = batch.sampleStart + s;
 
@@ -643,7 +652,7 @@ kernel void shade(
         // Pixel reconstruction filter — importance-sampled jitter with
         // ±1 sign weight for filters with negative lobes.
         float fdx, fdy, fw;
-        sampleFilter(rand01(rng), rand01(rng), fdx, fdy, fw);
+        samplePixelFilter(rand01(rng), rand01(rng), cam, pixelFilterCdf, pixelFilterSigns, fdx, fdy, fw);
         float jx = 0.5f + fdx;
         float jy = 0.5f + fdy;
 
