@@ -509,7 +509,11 @@ private:
         // OIIO 2.x: destroy the raw pointer we still own.  OIIO 3+: the
         // shared_ptr (m_textureSystem) handles its own teardown — leaving
         // m_texRaw null in that case so nothing to do here.
+#if OIIO_VERSION_MAJOR >= 3
+        if (m_textureSystem) OSL::TextureSystem::destroy(m_textureSystem);
+#else
         if (m_texRaw) OSL::TextureSystem::destroy(m_texRaw);
+#endif
     }
 
     OslRendererServices  m_services;
