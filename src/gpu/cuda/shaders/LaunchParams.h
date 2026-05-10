@@ -23,6 +23,12 @@ struct LaunchParams {
     GpuSampleBatch           sampleBatch;
     cudaTextureObject_t      envTexture;      // 0 = no texture (use envLe fallback)
 
+    // HDRI importance-sampling CDFs (when present — see cam.envMapWidth/Height).
+    // marginal:    H+1 floats sampling the latitude (theta) axis
+    // conditional: H * (W+1) floats — per-row CDFs across longitude (phi)
+    const float*             envMarginalCdf;
+    const float*             envConditionalCdf;
+
     // OptiX traversable for the GAS (uint64 = OptixTraversableHandle).  Set
     // to CudaAccelStructure::traversableHandle().  Read in raygen / shadow
     // calls of optixTrace.

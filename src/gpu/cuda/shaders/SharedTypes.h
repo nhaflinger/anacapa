@@ -123,7 +123,8 @@ struct GpuCameraParams {
     // is built without motion options).
     float     shutterOpen;
     float     shutterClose;
-    float     _pad4;
+    uint32_t  envMapWidth;    // CDF table width  (0 = no HDRI importance sampling)
+    uint32_t  envMapHeight;   // CDF table height
 };
 
 // ---------------------------------------------------------------------------

@@ -206,6 +206,14 @@ struct CudaPathIntegrator::Impl {
     Vec3f               envRot[3]  = {{1,0,0},{0,1,0},{0,0,1}};
     float               envIntensity = 1.0f;
 
+    // HDRI importance sampling — CDF tables (empty when no DomeLight or no
+    // texture present).  envCdfWidth/Height = 0 signals the GPU to fall
+    // back to the cosine-hemisphere prior.
+    CudaBuffer<float>   d_envMarginalCdf;
+    CudaBuffer<float>   d_envConditionalCdf;
+    uint32_t            envCdfWidth  = 0;
+    uint32_t            envCdfHeight = 0;
+
     uint32_t numMaterials = 0;
     uint32_t numLights    = 0;
     uint32_t maxDepth     = 6;
@@ -462,6 +470,10 @@ void CudaPathIntegrator::prepare(const SceneView& scene) {
     // HDRI texture
     if (m_impl->envTex)   { cudaDestroyTextureObject(m_impl->envTex); m_impl->envTex = 0; }
     if (m_impl->envArray) { cudaFreeArray(m_impl->envArray); m_impl->envArray = nullptr; }
+    m_impl->d_envMarginalCdf    = CudaBuffer<float>{};
+    m_impl->d_envConditionalCdf = CudaBuffer<float>{};
+    m_impl->envCdfWidth  = 0;
+    m_impl->envCdfHeight = 0;
 
     const DomeLight* dome = nullptr;
     for (const ILight* l : scene.lights)
@@ -500,7 +512,19 @@ void CudaPathIntegrator::prepare(const SceneView& scene) {
         m_impl->envRot[1]    = r1;
         m_impl->envRot[2]    = r2;
         m_impl->envIntensity = dome->intensity();
-        printf("[info]  CudaPathIntegrator: uploaded %dx%d HDRI env texture\n", ew, eh);
+
+        // HDRI importance sampling — upload the marginal + conditional CDF
+        // tables.  Sizes: marginal=(H+1), conditional=H*(W+1).
+        const auto& margCdf = dome->marginalCdf();
+        const auto  condCdf = dome->flatConditionalCdf();
+        m_impl->d_envMarginalCdf = CudaBuffer<float>(margCdf.size());
+        m_impl->d_envMarginalCdf.upload(margCdf);
+        m_impl->d_envConditionalCdf = CudaBuffer<float>(condCdf.size());
+        m_impl->d_envConditionalCdf.upload(condCdf);
+        m_impl->envCdfWidth  = static_cast<uint32_t>(ew);
+        m_impl->envCdfHeight = static_cast<uint32_t>(eh);
+
+        printf("[info]  CudaPathIntegrator: uploaded %dx%d HDRI env texture + CDF tables\n", ew, eh);
     }
 
     printf("[info]  CudaPathIntegrator::prepare - %u materials, %u lights, %zu verts, %zu tris\n",
@@ -567,6 +591,10 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.sampleBatch.sampleStart = sampleStart;
     p.sampleBatch.batchSize   = sampleCount;
     p.envTexture        = envTex;
+    p.envMarginalCdf    = d_envMarginalCdf.isValid()    ? d_envMarginalCdf.ptr()    : nullptr;
+    p.envConditionalCdf = d_envConditionalCdf.isValid() ? d_envConditionalCdf.ptr() : nullptr;
+    p.cam.envMapWidth   = envCdfWidth;
+    p.cam.envMapHeight  = envCdfHeight;
     p.handle            = accel->traversableHandle();
 }
 

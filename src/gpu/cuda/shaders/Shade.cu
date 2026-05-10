@@ -232,6 +232,102 @@ static __forceinline__ __device__ float3 evalEnvmap(float3 wo) {
 }
 
 // ---------------------------------------------------------------------------
+// HDRI importance sampling — mirrors the Metal version
+// ---------------------------------------------------------------------------
+
+// Binary search into a normalized 1D CDF of (n+1) floats.  Returns bin
+// index in [0,n), remapped u in [0,1), and bin probability (= pdf).
+static __forceinline__ __device__
+uint32_t sampleCDF1D(const float* cdf, uint32_t n, float u,
+                     float& uRemapped, float& prob)
+{
+    uint32_t lo = 0, hi = n;
+    while (lo < hi) {
+        uint32_t mid = (lo + hi) >> 1;
+        if (cdf[mid + 1] <= u) lo = mid + 1;
+        else                   hi = mid;
+    }
+    uint32_t idx = (lo < n - 1) ? lo : n - 1;
+    float    binProb = cdf[idx + 1] - cdf[idx];
+    uRemapped = (binProb > 1e-7f)
+              ? fminf(fmaxf((u - cdf[idx]) / binProb, 0.0f), 1.0f - 1e-7f)
+              : 0.0f;
+    prob = binProb;
+    return idx;
+}
+
+// Solid-angle PDF for sampling world direction `dir` from the HDRI
+// importance distribution.  Returns 0 outside the texture's domain.
+static __forceinline__ __device__
+float evalEnvPdf(float3 dir,
+                 const float* marginalCdf,
+                 const float* conditionalCdf)
+{
+    float3 r0 = make3(params.cam.envRot0);
+    float3 r1 = make3(params.cam.envRot1);
+    float3 r2 = make3(params.cam.envRot2);
+    float3 local = make_float3(dot(r0, dir), dot(r1, dir), dot(r2, dir));
+
+    float theta = acosf(fmaxf(-1.0f, fminf(1.0f, local.y)));
+    float phi   = atan2f(local.x, local.z);
+    if (phi < 0.0f) phi += 2.0f * CUDART_PI_F;
+
+    uint32_t W = params.cam.envMapWidth;
+    uint32_t H = params.cam.envMapHeight;
+    uint32_t col = (uint32_t)(phi / (2.0f * CUDART_PI_F) * float(W));
+    uint32_t row = (uint32_t)(theta / CUDART_PI_F * float(H));
+    if (col >= W) col = W - 1u;
+    if (row >= H) row = H - 1u;
+
+    float sinTheta = fmaxf(sinf(theta), 1e-6f);
+    float pdfRow   = marginalCdf[row + 1] - marginalCdf[row];
+    float pdfCol   = conditionalCdf[row * (W + 1) + col + 1]
+                   - conditionalCdf[row * (W + 1) + col];
+    return (pdfRow * pdfCol * float(W * H))
+           / (2.0f * CUDART_PI_F * CUDART_PI_F * sinTheta);
+}
+
+// Sample a direction from the 2D HDRI importance distribution.  Returns
+// world-space direction; writes solid-angle PDF to `pdfOut`.
+static __forceinline__ __device__
+float3 sampleEnvDirection(float2 u,
+                          const float* marginalCdf,
+                          const float* conditionalCdf,
+                          float& pdfOut)
+{
+    uint32_t W = params.cam.envMapWidth;
+    uint32_t H = params.cam.envMapHeight;
+
+    float    uRow, probRow, uCol, probCol;
+    uint32_t row = sampleCDF1D(marginalCdf,                   H, u.y, uRow, probRow);
+    uint32_t col = sampleCDF1D(conditionalCdf + row * (W + 1), W, u.x, uCol, probCol);
+
+    float v     = (float(row) + uRow) / float(H);
+    float uu    = (float(col) + uCol) / float(W);
+    float theta = v * CUDART_PI_F;
+    float phi   = uu * 2.0f * CUDART_PI_F;
+    float sinT  = sinf(theta);
+    float cosT  = cosf(theta);
+
+    // envmap-local direction → world.  cam.envRot rows map world→env, so
+    // the transpose maps env→world.
+    float3 envDir = make_float3(sinT * sinf(phi), cosT, sinT * cosf(phi));
+    float3 r0 = make3(params.cam.envRot0);
+    float3 r1 = make3(params.cam.envRot1);
+    float3 r2 = make3(params.cam.envRot2);
+    float3 worldDir = make_float3(
+        r0.x * envDir.x + r1.x * envDir.y + r2.x * envDir.z,
+        r0.y * envDir.x + r1.y * envDir.y + r2.y * envDir.z,
+        r0.z * envDir.x + r1.z * envDir.y + r2.z * envDir.z);
+
+    float sinTabs = fmaxf(sinT, 1e-6f);
+    pdfOut = (probRow * probCol * float(W * H))
+           / (2.0f * CUDART_PI_F * CUDART_PI_F * sinTabs);
+    if (pdfOut <= 0.0f) pdfOut = 1e-7f;
+    return worldDir;
+}
+
+// ---------------------------------------------------------------------------
 // Shadow transmittance — steps through glass; returns (0,0,0) if blocked.
 // Uses optixTrace; the rayTime is constant across the loop (one shutter
 // sample per primary ray, propagated through bounces).
@@ -352,10 +448,22 @@ float3 sampleDirect(float3 hitPos, float3 n, float3 wo,
         Li   = make3(light.Le);
 
     } else if (light.type == kLightDome) {
-        wi   = cosineSampleHemisphere(rand2(rng), n);
+        // HDRI importance sampling when CDF tables are present, otherwise
+        // fall back to a cosine-hemisphere prior.
+        if (params.cam.envMapWidth > 0 && params.envMarginalCdf != nullptr
+                && params.envConditionalCdf != nullptr) {
+            float envPdf = 0.0f;
+            wi = sampleEnvDirection(rand2(rng),
+                                    params.envMarginalCdf,
+                                    params.envConditionalCdf,
+                                    envPdf);
+            pdfL = envPdf * lightPick;
+        } else {
+            wi   = cosineSampleHemisphere(rand2(rng), n);
+            float cosW = fmaxf(1e-7f, dot(n, wi));
+            pdfL = (cosW / CUDART_PI_F) * lightPick;
+        }
         tMax = 1e9f;
-        float cosW = fmaxf(1e-7f, dot(n, wi));
-        pdfL = (cosW / CUDART_PI_F) * lightPick;
         Li   = (params.envTexture != 0) ? evalEnvmap(wi) : make3(params.cam.envLe);
     } else {
         return make_float3(0.0f, 0.0f, 0.0f);
@@ -468,12 +576,23 @@ extern "C" __global__ void __raygen__rg()
                 if (compmax(envColor) > 0.0f) {
                     float weight = 1.0f;
                     if (!prevWasDelta && bounce > 0) {
-                        // NEE dome-sampling PDF: cosine-hemisphere * uniform light pick
+                        // NEE dome-sampling PDF.  HDRI importance sampling when CDFs
+                        // are uploaded; otherwise the cosine-hemisphere prior.
                         float lpdf = 0.0f;
                         for (uint32_t li = 0; li < params.numLights; ++li) {
                             if (params.lights[li].type == kLightDome) {
-                                float cosW = fmaxf(0.0f, dot(rayDir, prevN));
-                                lpdf += (cosW / CUDART_PI_F) / float(params.numLights);
+                                float domePdf;
+                                if (params.cam.envMapWidth > 0
+                                        && params.envMarginalCdf != nullptr
+                                        && params.envConditionalCdf != nullptr) {
+                                    domePdf = evalEnvPdf(rayDir,
+                                                         params.envMarginalCdf,
+                                                         params.envConditionalCdf);
+                                } else {
+                                    float cosW = fmaxf(0.0f, dot(rayDir, prevN));
+                                    domePdf = cosW / CUDART_PI_F;
+                                }
+                                lpdf += domePdf / float(params.numLights);
                             }
                         }
                         if (lpdf > 0.0f) weight = powerHeuristic(prevBsdfPdf, lpdf);
