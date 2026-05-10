@@ -61,6 +61,7 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
     gm.roughness   = 1.f;
     gm.metalness   = 0.f;
     gm.specularIOR = 1.5f;
+    gm.specular    = 0.5f;       // matches MaterialX standard_surface default
     gm.type        = kMatLambertian;
     if (!mat) return gm;
 
@@ -109,6 +110,23 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
             gm.baseColor = {alb.x, alb.y, alb.z};
             return gm;
         }
+    }
+    // Any StandardSurfaceMaterial (including diffuse-flagged ones — Cornell
+    // walls land here) goes through the GGX layered model so the GPU shader
+    // can apply the same spec/diff balance + Disney retro-reflection +
+    // Kulla-Conty multi-scatter compensation as the CPU's evalCombined.
+    if (const StandardSurfaceMaterial* ssm =
+            dynamic_cast<const StandardSurfaceMaterial*>(mat)) {
+        gm.type = kMatGGX;
+        SurfaceInteraction si; si.n = si.ng = {0,0,1};
+        ShadingContext ctx(si, {0,0,1});
+        Spectrum alb = mat->reflectance(ctx);
+        gm.baseColor   = {alb.x, alb.y, alb.z};
+        gm.roughness   = ssm->params().roughness.value;
+        gm.metalness   = ssm->params().metalness.value;
+        gm.specular    = ssm->params().specular.value;
+        gm.specularIOR = ssm->params().specular_IOR;
+        return gm;
     }
     if (mat->flags() & BSDFFlag_Glossy) {
         gm.type = kMatGGX;
@@ -213,6 +231,15 @@ struct CudaPathIntegrator::Impl {
     CudaBuffer<float>   d_envConditionalCdf;
     uint32_t            envCdfWidth  = 0;
     uint32_t            envCdfHeight = 0;
+
+    // GGX dielectric energy-compensation LUTs, mirroring StandardSurface's CPU
+    // tables.  specAlbedo: 32x32 floats indexed [cos * N_R + rough].
+    // specAvgAlbedo: 32 floats indexed by roughness.  Uploaded once in
+    // prepare() and reused across launches.
+    CudaBuffer<float>   d_specAlbedoLUT;
+    CudaBuffer<float>   d_specAvgAlbedoLUT;
+    uint32_t            specLUTCosBins   = 0;
+    uint32_t            specLUTRoughBins = 0;
 
     uint32_t numMaterials = 0;
     uint32_t numLights    = 0;
@@ -472,6 +499,19 @@ void CudaPathIntegrator::prepare(const SceneView& scene) {
     m_impl->d_lights.upload(gpuLights);
     m_impl->numLights = static_cast<uint32_t>(scene.lights.size());
 
+    // GGX energy-compensation LUTs — uploaded once.  The accessors return
+    // pointers into a function-local static, so re-uploading is harmless.
+    if (!m_impl->d_specAlbedoLUT.isValid()) {
+        const int N_COS = specAlbedoLUTCosBins();
+        const int N_R   = specAlbedoLUTRoughnessBins();
+        m_impl->d_specAlbedoLUT = CudaBuffer<float>(size_t(N_COS) * N_R);
+        m_impl->d_specAlbedoLUT.upload(specAlbedoLUTData(), size_t(N_COS) * N_R);
+        m_impl->d_specAvgAlbedoLUT = CudaBuffer<float>(N_R);
+        m_impl->d_specAvgAlbedoLUT.upload(specAvgAlbedoLUTData(), N_R);
+        m_impl->specLUTCosBins   = static_cast<uint32_t>(N_COS);
+        m_impl->specLUTRoughBins = static_cast<uint32_t>(N_R);
+    }
+
     // HDRI texture
     if (m_impl->envTex)   { cudaDestroyTextureObject(m_impl->envTex); m_impl->envTex = 0; }
     if (m_impl->envArray) { cudaFreeArray(m_impl->envArray); m_impl->envArray = nullptr; }
@@ -601,6 +641,10 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.cam.envMapWidth   = envCdfWidth;
     p.cam.envMapHeight  = envCdfHeight;
     p.cam.fireflyClamp  = fireflyClamp;
+    p.specAlbedoLUT     = d_specAlbedoLUT.isValid()    ? d_specAlbedoLUT.ptr()    : nullptr;
+    p.specAvgAlbedoLUT  = d_specAvgAlbedoLUT.isValid() ? d_specAvgAlbedoLUT.ptr() : nullptr;
+    p.specLUTCosBins    = specLUTCosBins;
+    p.specLUTRoughBins  = specLUTRoughBins;
     p.handle            = accel->traversableHandle();
 }
 

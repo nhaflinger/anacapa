@@ -221,6 +221,21 @@ inline float specAvgAlbedoDielectric(float roughness) {
     return lut.eAvg[i0] * (1.f - t) + lut.eAvg[i1] * t;
 }
 
+// LUT data accessors used by GPU backends to upload the same E_spec /
+// E_avg tables to device memory.  v[] is 32*32 = 1024 floats indexed as
+// [cos_idx * N_R + roughness_idx]; eAvg[] is 32 floats indexed by
+// roughness only.  Both are computed once at program startup.
+inline const float* specAlbedoLUTData() {
+    static const detail::SpecAlbedoLUT lut;
+    return lut.v;
+}
+inline const float* specAvgAlbedoLUTData() {
+    static const detail::SpecAlbedoLUT lut;
+    return lut.eAvg;
+}
+inline int specAlbedoLUTCosBins()       { return detail::SpecAlbedoLUT::N_COS; }
+inline int specAlbedoLUTRoughnessBins() { return detail::SpecAlbedoLUT::N_R;   }
+
 // Kulla-Conty multi-scatter compensation BRDF.  Adds the energy that
 // single-scatter GGX loses to inter-microfacet masking back into the spec
 // lobe.  The closer the surface gets to fully rough, the larger this term

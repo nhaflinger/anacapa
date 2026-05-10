@@ -66,7 +66,11 @@ struct GpuMaterial {
     uint32_t   type;
     float      specularIOR;
     float      transmission;
-    float      _pad0;
+    // Specular layer strength in [0,1].  Matches MaterialX standard_surface's
+    // `specular` knob — multiplies the dielectric Fresnel.  Defaults to 0.5
+    // for UsdPreviewSurface, 1.0 for explicit metals, 0 for non-glossy.
+    // Used by the energy-conserving spec/diff balance in the GPU shader.
+    float      specular;
 };
 
 // ---------------------------------------------------------------------------

@@ -29,6 +29,15 @@ struct LaunchParams {
     const float*             envMarginalCdf;
     const float*             envConditionalCdf;
 
+    // Energy-compensation LUTs for the GGX dielectric spec lobe, mirroring
+    // the StandardSurface CPU tables.  Same layout: specAlbedo is 32x32
+    // floats [cos_idx * 32 + roughness_idx]; specAvgAlbedo is 32 floats
+    // indexed by roughness only.  Built once on the host and uploaded.
+    const float*             specAlbedoLUT;
+    const float*             specAvgAlbedoLUT;
+    uint32_t                 specLUTCosBins;
+    uint32_t                 specLUTRoughBins;
+
     // OptiX traversable for the GAS (uint64 = OptixTraversableHandle).  Set
     // to CudaAccelStructure::traversableHandle().  Read in raygen / shadow
     // calls of optixTrace.
