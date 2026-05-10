@@ -28,20 +28,32 @@ void PathIntegrator::renderTile(const SceneView& scene,
             Spectrum accumAlbedo = {};
             Vec3f    accumNormal = {};
             uint32_t aovCount    = 0;
+            float    weightSum   = 0.f;
             float    sumLumSq    = 0.f;
 
             for (uint32_t s = 0; s < tile.sampleCount; ++s) {
                 sampler.startPixelSample(px, py, tile.sampleStart + s);
-                Vec2f jitter = sampler.get2D();
-                Vec2f lens   = sampler.get2D();
+                Vec2f filt = sampler.get2D();
+                Vec2f lens = sampler.get2D();
                 float timeU  = sampler.get1D();
-                Ray ray = cam.generateRay(px, py, jitter.x, jitter.y, lens.x, lens.y, timeU);
+
+                // Pixel-filter importance sampling.  Falls back to a unit
+                // box (legacy behaviour) when no filter is bound.
+                float jx = filt.x, jy = filt.y, fw = 1.f;
+                if (m_pixelFilter) {
+                    auto fs = m_pixelFilter->sample(filt.x, filt.y);
+                    jx = 0.5f + fs.dx;
+                    jy = 0.5f + fs.dy;
+                    fw = fs.weight;
+                }
+                Ray ray = cam.generateRay(px, py, jx, jy, lens.x, lens.y, timeU);
 
                 Spectrum albedo = {};
                 Vec3f    normal = {};
                 Spectrum sample = Li(ray, scene, sampler, albedo, normal);
                 if (sample.isFinite()) {
-                    accum += sample;
+                    accum     += sample * fw;
+                    weightSum += fw;
                     float lum = luminance(sample);
                     sumLumSq += lum * lum;
                 }
@@ -50,8 +62,13 @@ void PathIntegrator::renderTile(const SceneView& scene,
                 ++aovCount;
             }
 
-            float invSPP = 1.f / static_cast<float>(tile.sampleCount);
-            localTile.add(tx, ty, accum * invSPP, static_cast<float>(tile.sampleCount));
+            // Deposit the signed-weighted estimator into the tile.  When
+            // weightSum is 0 (extremely rare; only possible with negative-
+            // lobe filters cancelling exactly) we drop the pixel for this
+            // batch — variance is preserved through subsequent batches.
+            if (weightSum != 0.f) {
+                localTile.add(tx, ty, accum * (1.f / weightSum), weightSum);
+            }
             localTile.addLumSq(tx, ty, sumLumSq);
 
             if (aovCount > 0) {

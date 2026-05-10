@@ -113,6 +113,19 @@ int main(int argc, char** argv) {
     app.add_flag("--write-aovs", settings.denoise.writeAOVs,
                  "Include albedo and normals layers in the output EXR");
 
+    std::string filterName = "mitchell";
+    app.add_option("--filter", filterName,
+                   "Pixel reconstruction filter: box, triangle, gaussian, "
+                   "mitchell (default), blackman-harris, catmull-rom, lanczos. "
+                   "Mitchell-Netravali is a good general default; blackman-harris "
+                   "matches Cycles' look.")
+       ->default_val("mitchell");
+    app.add_option("--filter-width", settings.pixelFilterRadius,
+                   "Pixel filter radius in pixel units. 0 = use the filter's "
+                   "default (Box=0.5, Triangle=1.0, Gaussian=1.5, Mitchell=2.0, "
+                   "Blackman-Harris=1.5, Catmull-Rom=2.0, Lanczos=4.0).")
+       ->default_val(0.f);
+
     CLI11_PARSE(app, argc, argv);
 
     settings.frameSet = (frameOpt->count() > 0);
@@ -121,6 +134,11 @@ int main(int argc, char** argv) {
         settings.integrator = anacapa::IntegratorType::Path;
     else
         settings.integrator = anacapa::IntegratorType::BDPT;
+
+    if (!anacapa::parsePixelFilterName(filterName, settings.pixelFilter)) {
+        spdlog::warn("Unknown --filter '{}'; using mitchell", filterName);
+        settings.pixelFilter = anacapa::PixelFilterType::Mitchell;
+    }
 
     spdlog::set_level(spdlog::level::info);
 

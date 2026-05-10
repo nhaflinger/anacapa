@@ -2,6 +2,7 @@
 
 #include <anacapa/core/Types.h>
 #include <anacapa/film/Film.h>
+#include <anacapa/film/PixelFilter.h>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -200,6 +201,12 @@ public:
     // Indirect bounces are unaffected.  Used to isolate a single mesh's
     // pixels and test its shading in isolation.
     virtual void setDebugMeshID(int32_t /*id*/) {}
+
+    // Pixel reconstruction filter — used to importance-sample the per-pixel
+    // jitter.  Pointer is non-owning and must outlive the integrator.
+    // Default no-op leaves the integrator on whatever fallback (box-1.0)
+    // it had before pixel filters were introduced.
+    virtual void setPixelFilter(const PixelFilter* /*filter*/) {}
 };
 
 } // namespace anacapa

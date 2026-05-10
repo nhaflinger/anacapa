@@ -48,6 +48,31 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
     adaptive_base_spp: bpy.props.IntProperty(
         name="Base SPP", description="0 = auto (spp/4, min 16)", default=0, min=0)
 
+    # Film — pixel reconstruction filter
+    pixel_filter: bpy.props.EnumProperty(
+        name="Pixel Filter",
+        description="Reconstruction filter applied when projecting samples to "
+                    "pixels. Mitchell-Netravali is a balanced default; "
+                    "Blackman-Harris matches Cycles' look",
+        items=[
+            ("box",             "Box",             "Single-pixel box (no AA — fastest, blockiest)"),
+            ("triangle",        "Triangle",        "Tent filter (linear)"),
+            ("gaussian",        "Gaussian",        "Truncated Gaussian"),
+            ("mitchell",        "Mitchell-Netravali", "Cubic with mild ringing — production default"),
+            ("blackman-harris", "Blackman-Harris", "Smooth window — Cycles-style"),
+            ("catmull-rom",     "Catmull-Rom",     "Sharper cubic with stronger ringing"),
+            ("lanczos",         "Lanczos",         "Windowed sinc — sharpest, can ring"),
+        ],
+        default="mitchell",
+    )
+    filter_width: bpy.props.FloatProperty(
+        name="Filter Width",
+        description="Filter radius in pixels. 0 = use the filter's default "
+                    "(Box=0.5, Triangle=1.0, Gaussian=1.5, Mitchell=2.0, "
+                    "Blackman-Harris=1.5, Catmull-Rom=2.0, Lanczos=4.0)",
+        default=0.0, min=0.0, soft_max=8.0,
+    )
+
     # Environment
     env_path: bpy.props.StringProperty(
         name="Environment Map",

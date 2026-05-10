@@ -224,6 +224,8 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 | `--interactive` | off | Use GPU backend for fast preview — Metal on Apple Silicon, CUDA on NVIDIA |
 | `--png` | — | Write ACES-tonemapped sRGB PNG alongside the EXR |
 | `--exposure` | `0` | EV exposure adjustment for `--png` output (stops; positive = brighter) |
+| `--filter` | `mitchell` | Pixel reconstruction filter: `box`, `triangle`, `gaussian`, `mitchell`, `blackman-harris`, `catmull-rom`, `lanczos`. Mitchell-Netravali is a balanced default; `blackman-harris` matches Cycles' look |
+| `--filter-width` | `0` (auto) | Filter radius in pixels. `0` = use the filter's default (Box=0.5, Triangle=1.0, Gaussian=1.5, Mitchell=2.0, Blackman-Harris=1.5, Catmull-Rom=2.0, Lanczos=4.0) |
 | `--override-lights` | off | Replace all scene lights with a single white directional light (isolate material issues) |
 | `--override-materials` | off | Replace all scene materials with white Lambertian (isolate lighting issues) |
 | `--debug-mesh INT` | -1 (off) | Primary rays that hit any other mesh ID return black; only the target mesh is shaded.  Indirect bounces unaffected. |
@@ -233,6 +235,15 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 `--fstop` and `--focus-distance` both must be provided to enable depth of field. They override the USD camera values when present; if neither is set the camera falls back to pinhole.
 
 `--shutter-open`/`--shutter-close` override the motion blur shutter. When omitted, the shutter is derived from the stage's `startTimeCode`, `endTimeCode`, and `timeCodesPerSecond` automatically. Set both to 0 to disable motion blur on an animated scene.
+
+`--filter` selects the pixel reconstruction filter. Each per-pixel sample is importance-sampled from the filter's footprint (PBRT-v4 style) and accumulated into a single pixel — no splatting, so the filter has zero impact on tile/adaptive performance. Filters with negative lobes (`mitchell`, `catmull-rom`, `lanczos`) carry signed sample weights so the resulting estimator converges to the correct `(∫f L) / (∫f)`. The CPU and both GPU backends (CUDA + Metal) all sample from the same CDF tables.
+
+| When you'd pick it | Filter |
+| --- | --- |
+| Default; balanced AA + sharpness | `mitchell` |
+| Cycles-look (smooth, no ringing) | `blackman-harris` |
+| Maximum sharpness, tolerable ringing | `lanczos` or `catmull-rom` |
+| No reconstruction; fastest, blockiest | `box 0.5` |
 
 ## Choosing an Integrator
 
@@ -356,6 +367,16 @@ The Anacapa Blender addon provides a fully integrated render pipeline — from B
 Copy the `anacapa_renderer/` folder to your Blender addons directory and enable it in Preferences → Add-ons. Set the path to the `anacapa` binary in the addon preferences.
 
 ### Rendering from Blender
+
+The addon adds these panels to **Properties → Render** when the Anacapa engine is active:
+
+| Panel | Controls |
+| --- | --- |
+| **Sampling** | Samples per pixel, integrator (`path` / `bdpt`), max depth, GPU compute, tile size, threads (with **Adaptive Sampling** sub-panel) |
+| **Film** | Pixel reconstruction filter (Box / Triangle / Gaussian / Mitchell-Netravali / Blackman-Harris / Catmull-Rom / Lanczos) and filter width |
+| **Lighting** | HDRI env map, env intensity, light angle, firefly clamp, override-lights/materials |
+| **Camera** | Depth of field (f-stop, focus distance), motion blur, USD camera prim path |
+| **Output** | Denoise toggle, AOV layers, EXR output path (with `$F` frame token), Export Scene operator |
 
 1. Set the render engine to **Anacapa** in Properties → Render
 2. Configure sampling, integrator, lighting, and output in the Anacapa panels

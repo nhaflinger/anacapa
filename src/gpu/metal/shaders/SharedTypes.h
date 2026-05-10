@@ -137,6 +137,13 @@ struct GpuCameraParams {
     float     fireflyClamp;   // max luminance per path sample; 0 = disabled
     uint32_t  specLUTCosBins;   // 0 = no LUT uploaded
     uint32_t  specLUTRoughBins;
+
+    // Pixel reconstruction filter — separable inverse-CDF tables.
+    // pixelFilterBins == 0 disables and the kernel falls back to a unit
+    // box-1.0 jitter (legacy behaviour).  CDF/sign buffers are bound
+    // separately in the kernel argument table.
+    uint32_t  pixelFilterBins;
+    float     pixelFilterRadius;
 };
 
 // ---------------------------------------------------------------------------

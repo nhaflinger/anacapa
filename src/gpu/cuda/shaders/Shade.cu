@@ -601,6 +601,63 @@ float3 sampleDirect(float3 hitPos, float3 n, float3 wo,
     return f * Li * Tr * cosI * (1.0f / pdfL);
 }
 
+// ---------------------------------------------------------------------------
+// Pixel reconstruction filter — separable inverse-CDF sampling
+//
+// Mirrors PixelFilter::sample1D() on the CPU.  Returns sub-pixel offset
+// in [-radius, radius] plus the sign at the chosen bin (±1 for filters
+// with negative lobes; +1 for all-positive filters).  When the host
+// hasn't bound a filter (pixelFilterBins == 0) we fall back to a uniform
+// [0, 1) box-1.0 jitter.
+// ---------------------------------------------------------------------------
+struct PixelFilterSample {
+    float dx;
+    float dy;
+    float weight;
+};
+
+static __forceinline__ __device__
+void samplePixelFilterAxis(float u, float& outX, float& outSign)
+{
+    const int   N    = (int)params.pixelFilterBins;
+    const float R    = params.pixelFilterRadius;
+    // Binary search for the upper bound bin
+    int lo = 0, hi = N;
+    while (lo < hi) {
+        int mid = (lo + hi) >> 1;
+        if (params.pixelFilterCdf[mid + 1] <= u) lo = mid + 1; else hi = mid;
+    }
+    int   bin  = (lo < N) ? lo : (N - 1);
+    float c0   = params.pixelFilterCdf[bin];
+    float c1   = params.pixelFilterCdf[bin + 1];
+    float t    = (c1 > c0) ? (u - c0) / (c1 - c0) : 0.5f;
+    float binW = (2.0f * R) / float(N);
+    outX       = -R + (float(bin) + t) * binW;
+    outSign    = params.pixelFilterSigns[bin];
+}
+
+static __forceinline__ __device__
+PixelFilterSample samplePixelFilter(float u1, float u2)
+{
+    PixelFilterSample s;
+    if (params.pixelFilterBins == 0
+        || params.pixelFilterCdf == nullptr
+        || params.pixelFilterSigns == nullptr) {
+        // Fallback: legacy box-1.0 jitter centred on the pixel.
+        s.dx     = u1 - 0.5f;
+        s.dy     = u2 - 0.5f;
+        s.weight = 1.0f;
+        return s;
+    }
+    float sx, sgX, sy, sgY;
+    samplePixelFilterAxis(u1, sx, sgX);
+    samplePixelFilterAxis(u2, sy, sgY);
+    s.dx     = sx;
+    s.dy     = sy;
+    s.weight = sgX * sgY;
+    return s;
+}
+
 // ===========================================================================
 // OptiX programs
 // ===========================================================================
@@ -626,6 +683,7 @@ extern "C" __global__ void __raygen__rg()
     const float3 ll     = make3(params.cam.lowerLeft);
 
     float rAcc = 0.0f, gAcc = 0.0f, bAcc = 0.0f, lumSqAcc = 0.0f;
+    float weightAcc = 0.0f;
 
     for (uint32_t s = 0; s < nSamples; ++s) {
         uint32_t rng = pcg(pcg(globalPixelIdx) ^
@@ -639,9 +697,12 @@ extern "C" __global__ void __raygen__rg()
                     + rand01(rng) * (params.cam.shutterClose - params.cam.shutterOpen);
         }
 
-        // Camera ray
-        float jx = rand01(rng);
-        float jy = rand01(rng);
+        // Pixel reconstruction filter — importance-sampled sub-pixel
+        // jitter with per-sample sign weight (±1 for negative-lobe filters).
+        PixelFilterSample fs = samplePixelFilter(rand01(rng), rand01(rng));
+        float jx = 0.5f + fs.dx;
+        float jy = 0.5f + fs.dy;
+        float fw = fs.weight;
         float u  = (float(px) + jx) / float(params.cam.imageWidth);
         float v  = (float(params.cam.imageHeight - 1 - py) + jy) / float(params.cam.imageHeight);
 
@@ -862,17 +923,18 @@ extern "C" __global__ void __raygen__rg()
             L = L * k;
             lum = params.cam.fireflyClamp;
         }
-        rAcc += L.x;
-        gAcc += L.y;
-        bAcc += L.z;
-        lumSqAcc += lum * lum;
+        rAcc      += L.x * fw;
+        gAcc      += L.y * fw;
+        bAcc      += L.z * fw;
+        weightAcc += fw;
+        lumSqAcc  += lum * lum;
     }
 
     GpuAccumPixel& out = params.accum[pixelIdx];
     out.r        += rAcc;
     out.g        += gAcc;
     out.b        += bAcc;
-    out.weight   += float(nSamples);
+    out.weight   += weightAcc;
     out.sumLumSq += lumSqAcc;
 }
 

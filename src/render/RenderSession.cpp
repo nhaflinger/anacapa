@@ -543,7 +543,15 @@ void RenderSession::render() {
     m_baseSampler = std::make_unique<HaltonSampler>(m_settings.samplesPerPixel);
     m_threadPool  = std::make_unique<ThreadPool>(m_settings.numThreads);
 
+    // Pixel reconstruction filter — built once and pointed at the integrator.
+    // Lives on the session so its CDF tables stay alive for the whole render.
+    m_pixelFilter = std::make_unique<PixelFilter>(m_settings.pixelFilter,
+                                                    m_settings.pixelFilterRadius);
+    spdlog::info("Pixel filter: {} (radius {:.2f})",
+                 pixelFilterName(m_pixelFilter->type()), m_pixelFilter->radius());
+
     m_integrator->setDebugMeshID(m_settings.debugMeshID);
+    m_integrator->setPixelFilter(m_pixelFilter.get());
     m_integrator->prepare(m_scene);
 
     std::vector<TileRequest> tiles;

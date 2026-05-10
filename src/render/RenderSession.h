@@ -1,6 +1,7 @@
 #pragma once
 
-#include <anacapa/film/Film.h>      // Film, DenoiseOptions
+#include <anacapa/film/Film.h>          // Film, DenoiseOptions
+#include <anacapa/film/PixelFilter.h>   // PixelFilterType
 #include <anacapa/integrator/IIntegrator.h>
 #include <anacapa/accel/GeometryPool.h>
 #include <anacapa/accel/CurvePool.h>
@@ -66,6 +67,11 @@ struct RenderSettings {
     float          exposure          = 0.f;   // EV adjustment for PNG output
     DenoiseOptions denoise;
 
+    // Pixel reconstruction filter — replaces the legacy box-1.0 jitter.
+    // pixelFilterRadius == 0 means "use the type's default radius".
+    PixelFilterType pixelFilter      = PixelFilterType::Mitchell;
+    float           pixelFilterRadius = 0.f;
+
     // Debug: when >= 0, primary rays that hit a different mesh return black.
     // Useful for isolating which pixels belong to a given mesh, and for testing
     // that mesh's shading in isolation.  Indirect bounces are unaffected.
@@ -107,6 +113,7 @@ private:
     std::unique_ptr<IIntegrator>          m_integrator;
     std::unique_ptr<ISampler>             m_baseSampler;
     std::unique_ptr<ThreadPool>           m_threadPool;
+    std::unique_ptr<PixelFilter>          m_pixelFilter;
 
     // Shutter interval from the scene file (overridden by RenderSettings if set)
     float m_sceneShutterOpen  = 0.f;

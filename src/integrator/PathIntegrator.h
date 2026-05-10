@@ -36,6 +36,7 @@ public:
                     TileBuffer& localTile) override;
 
     void setDebugMeshID(int32_t id) override { m_debugMeshID = id; }
+    void setPixelFilter(const PixelFilter* f) override { m_pixelFilter = f; }
 
 private:
     Spectrum Li(const Ray& ray, const SceneView& scene,
@@ -61,10 +62,11 @@ private:
         return (f * f) / (f*f + g*g);
     }
 
-    uint32_t m_maxDepth     = 8;
-    uint32_t m_minDepth     = 2;
-    float    m_fireflyClamp = 10.f;
-    int32_t  m_debugMeshID  = -1;
+    uint32_t            m_maxDepth     = 8;
+    uint32_t            m_minDepth     = 2;
+    float               m_fireflyClamp = 10.f;
+    int32_t             m_debugMeshID  = -1;
+    const PixelFilter*  m_pixelFilter  = nullptr;  // owned by RenderSession
 };
 
 } // namespace anacapa

@@ -487,16 +487,24 @@ void BDPTIntegrator::renderTile(const SceneView& scene,
             Spectrum accumAlbedo  = {};
             Vec3f    accumNormal  = {};
             uint32_t aovCount     = 0;
+            float    weightSum    = 0.f;
             float    sumLumSq     = 0.f;
 
             for (uint32_t s = 0; s < tile.sampleCount; ++s) {
                 sampler.startPixelSample(px, py, tile.sampleStart + s);
 
                 // --- Camera subpath ---
-                Vec2f jitter = sampler.get2D();
-                Vec2f lens   = sampler.get2D();
-                float timeU  = sampler.get1D();
-                Ray primaryRay = cam.generateRay(px, py, jitter.x, jitter.y, lens.x, lens.y, timeU);
+                Vec2f filt = sampler.get2D();
+                Vec2f lens = sampler.get2D();
+                float timeU = sampler.get1D();
+                float jx = filt.x, jy = filt.y, fw = 1.f;
+                if (m_pixelFilter) {
+                    auto fs = m_pixelFilter->sample(filt.x, filt.y);
+                    jx = 0.5f + fs.dx;
+                    jy = 0.5f + fs.dy;
+                    fw = fs.weight;
+                }
+                Ray primaryRay = cam.generateRay(px, py, jx, jy, lens.x, lens.y, timeU);
                 // Pinhole camera: area PDF = 1 (we treat it as a single point)
                 traceCameraSubpath(scene, primaryRay, 1.f, sampler, camPath);
 
@@ -559,13 +567,15 @@ void BDPTIntegrator::renderTile(const SceneView& scene,
                     }
                 }
 
-                pixelL += sampleL;
+                pixelL    += sampleL * fw;
+                weightSum += fw;
                 float lum = luminance(sampleL);
                 sumLumSq += lum * lum;
             }
 
-            float invSPP = 1.f / static_cast<float>(tile.sampleCount);
-            localTile.add(tx, ty, pixelL * invSPP, static_cast<float>(tile.sampleCount));
+            if (weightSum != 0.f) {
+                localTile.add(tx, ty, pixelL * (1.f / weightSum), weightSum);
+            }
             localTile.addLumSq(tx, ty, sumLumSq);
 
             if (aovCount > 0) {

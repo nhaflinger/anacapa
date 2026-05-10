@@ -48,6 +48,11 @@ public:
     // or strong caustics.  0 disables clamping.  Mirrors --firefly-clamp.
     void setFireflyClamp(float v);
 
+    // Bind the host-side PixelFilter so its CDF tables are uploaded to
+    // device memory and used by raygen for sub-pixel jitter.  Pointer is
+    // non-owning and must outlive the integrator.
+    void setPixelFilter(const PixelFilter* f) override;
+
     // Zero the persistent accumulation buffer.
     // Call before starting a fresh render (scene/camera change) so stale
     // samples from the previous render do not bleed into the new one.

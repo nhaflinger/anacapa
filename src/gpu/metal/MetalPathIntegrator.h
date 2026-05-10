@@ -50,6 +50,11 @@ public:
 
     void setFireflyClamp(float v);
 
+    // Bind the host-side PixelFilter; CDF tables are uploaded to a Metal
+    // buffer and bound at indices 17/18 in the shade kernel.  Pointer is
+    // non-owning and must outlive the integrator.
+    void setPixelFilter(const PixelFilter* f) override;
+
     // Zero the persistent accumulation buffer.
     // Call before starting a fresh render (scene/camera change) so stale
     // samples from the previous render do not bleed into the new one.

@@ -241,6 +241,15 @@ struct CudaPathIntegrator::Impl {
     uint32_t            specLUTCosBins   = 0;
     uint32_t            specLUTRoughBins = 0;
 
+    // Pixel reconstruction filter — host PixelFilter pointer, uploaded
+    // CDF/sign tables.  pixelFilterBins == 0 means raygen falls back to
+    // a unit box-1.0 jitter (legacy behaviour).
+    const PixelFilter*  pixelFilter        = nullptr;
+    CudaBuffer<float>   d_pixelFilterCdf;
+    CudaBuffer<float>   d_pixelFilterSigns;
+    uint32_t            pixelFilterBins    = 0;
+    float               pixelFilterRadius  = 0.f;
+
     uint32_t numMaterials = 0;
     uint32_t numLights    = 0;
     uint32_t maxDepth     = 6;
@@ -468,6 +477,25 @@ void CudaPathIntegrator::setFireflyClamp(float v) {
     m_impl->fireflyClamp = v;
 }
 
+void CudaPathIntegrator::setPixelFilter(const PixelFilter* f) {
+    m_impl->pixelFilter = f;
+    if (!f) {
+        m_impl->d_pixelFilterCdf   = CudaBuffer<float>{};
+        m_impl->d_pixelFilterSigns = CudaBuffer<float>{};
+        m_impl->pixelFilterBins    = 0;
+        m_impl->pixelFilterRadius  = 0.f;
+        return;
+    }
+    const auto& cdf   = f->cdf();
+    const auto& signs = f->signs();
+    m_impl->d_pixelFilterCdf = CudaBuffer<float>(cdf.size());
+    m_impl->d_pixelFilterCdf.upload(cdf);
+    m_impl->d_pixelFilterSigns = CudaBuffer<float>(signs.size());
+    m_impl->d_pixelFilterSigns.upload(signs);
+    m_impl->pixelFilterBins   = static_cast<uint32_t>(signs.size());
+    m_impl->pixelFilterRadius = f->radius();
+}
+
 // ---------------------------------------------------------------------------
 // prepare() — build accel, upload materials/lights/HDRI
 // ---------------------------------------------------------------------------
@@ -645,6 +673,10 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.specAvgAlbedoLUT  = d_specAvgAlbedoLUT.isValid() ? d_specAvgAlbedoLUT.ptr() : nullptr;
     p.specLUTCosBins    = specLUTCosBins;
     p.specLUTRoughBins  = specLUTRoughBins;
+    p.pixelFilterCdf    = d_pixelFilterCdf.isValid()   ? d_pixelFilterCdf.ptr()   : nullptr;
+    p.pixelFilterSigns  = d_pixelFilterSigns.isValid() ? d_pixelFilterSigns.ptr() : nullptr;
+    p.pixelFilterBins   = pixelFilterBins;
+    p.pixelFilterRadius = pixelFilterRadius;
     p.handle            = accel->traversableHandle();
 }
 

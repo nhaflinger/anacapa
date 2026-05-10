@@ -985,6 +985,12 @@ def build_command(executable, usd_path, settings, width, height, output_path,
     if settings.write_aovs:
         cmd.append("--write-aovs")
 
+    # Film / pixel reconstruction filter
+    if getattr(settings, 'pixel_filter', None):
+        cmd += ["--filter", settings.pixel_filter]
+    if getattr(settings, 'filter_width', 0.0) > 0.0:
+        cmd += ["--filter-width", str(settings.filter_width)]
+
     if settings.camera_path:
         cmd += ["--camera", settings.camera_path]
 

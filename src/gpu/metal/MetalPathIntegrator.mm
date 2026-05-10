@@ -59,6 +59,14 @@ struct MetalPathIntegrator::Impl {
     uint32_t      specLUTCosBins      = 0;
     uint32_t      specLUTRoughBins    = 0;
 
+    // Pixel reconstruction filter — host pointer + uploaded CDF/sign tables.
+    // pixelFilterBins == 0 disables and the kernel falls back to box-1.0.
+    const PixelFilter* pixelFilter        = nullptr;
+    id<MTLBuffer>      pixelFilterCdfBuf  = nil;
+    id<MTLBuffer>      pixelFilterSignBuf = nil;
+    uint32_t           pixelFilterBins    = 0;
+    float              pixelFilterRadius  = 0.f;
+
     uint32_t numMaterials = 0;
     uint32_t numLights    = 0;
     uint32_t maxDepth     = 6;
@@ -318,6 +326,28 @@ void MetalPathIntegrator::setFireflyClamp(float v) {
     m_impl->fireflyClamp = v;
 }
 
+void MetalPathIntegrator::setPixelFilter(const PixelFilter* f) {
+    m_impl->pixelFilter = f;
+    if (!f) {
+        m_impl->pixelFilterCdfBuf  = nil;
+        m_impl->pixelFilterSignBuf = nil;
+        m_impl->pixelFilterBins    = 0;
+        m_impl->pixelFilterRadius  = 0.f;
+        return;
+    }
+    id<MTLDevice> dev = static_cast<id<MTLDevice>>(m_impl->ctx->device());
+    const auto& cdf   = f->cdf();
+    const auto& signs = f->signs();
+    m_impl->pixelFilterCdfBuf = [dev newBufferWithBytes:cdf.data()
+                                                 length:cdf.size() * sizeof(float)
+                                                options:MTLResourceStorageModeShared];
+    m_impl->pixelFilterSignBuf = [dev newBufferWithBytes:signs.data()
+                                                  length:signs.size() * sizeof(float)
+                                                 options:MTLResourceStorageModeShared];
+    m_impl->pixelFilterBins   = static_cast<uint32_t>(signs.size());
+    m_impl->pixelFilterRadius = f->radius();
+}
+
 // ---------------------------------------------------------------------------
 // prepare() — build accel structure, upload materials + lights
 // ---------------------------------------------------------------------------
@@ -531,6 +561,8 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     camParams.fireflyClamp   = m_impl->fireflyClamp;
     camParams.specLUTCosBins   = m_impl->specLUTCosBins;
     camParams.specLUTRoughBins = m_impl->specLUTRoughBins;
+    camParams.pixelFilterBins   = m_impl->pixelFilterBins;
+    camParams.pixelFilterRadius = m_impl->pixelFilterRadius;
 
     // Use the persistent accum buffer — allocates only on first call or size change.
     // clearAccum() should be called when starting a fresh render (new scene/camera).
@@ -605,6 +637,9 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
         // GGX energy-compensation LUTs
         [enc setBuffer:m_impl->specAlbedoLUTBuf    offset:0 atIndex:15];
         [enc setBuffer:m_impl->specAvgAlbedoLUTBuf offset:0 atIndex:16];
+        // Pixel filter CDF / sign tables (nil → kernel falls back to box-1.0)
+        [enc setBuffer:m_impl->pixelFilterCdfBuf   offset:0 atIndex:17];
+        [enc setBuffer:m_impl->pixelFilterSignBuf  offset:0 atIndex:18];
         [enc setTexture:envTex atIndex:0];
         [enc useResource:tlas usage:MTLResourceUsageRead];
         for (void* blasVoid : m_impl->accel->blasHandles())
@@ -699,6 +734,8 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
     camParams.fireflyClamp   = m_impl->fireflyClamp;
     camParams.specLUTCosBins   = m_impl->specLUTCosBins;
     camParams.specLUTRoughBins = m_impl->specLUTRoughBins;
+    camParams.pixelFilterBins   = m_impl->pixelFilterBins;
+    camParams.pixelFilterRadius = m_impl->pixelFilterRadius;
 
     // Tile-sized accum buffer (gid is local; shader writes gid.y*tileW+gid.x)
     size_t accumBytes   = tileW * tileH * sizeof(GpuAccumPixel);
@@ -764,6 +801,11 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
             [enc setBuffer:m_impl->specAlbedoLUTBuf    offset:0 atIndex:15];
         if (m_impl->specAvgAlbedoLUTBuf)
             [enc setBuffer:m_impl->specAvgAlbedoLUTBuf offset:0 atIndex:16];
+        // Pixel filter CDF / sign tables (nil → kernel falls back to box-1.0)
+        if (m_impl->pixelFilterCdfBuf)
+            [enc setBuffer:m_impl->pixelFilterCdfBuf  offset:0 atIndex:17];
+        if (m_impl->pixelFilterSignBuf)
+            [enc setBuffer:m_impl->pixelFilterSignBuf offset:0 atIndex:18];
 
         // Environment texture (index 0); fallback 1×1 white if no HDRI loaded
         id<MTLTexture> envTex = m_impl->envTexture

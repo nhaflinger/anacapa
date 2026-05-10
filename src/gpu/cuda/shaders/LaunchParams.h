@@ -38,6 +38,16 @@ struct LaunchParams {
     uint32_t                 specLUTCosBins;
     uint32_t                 specLUTRoughBins;
 
+    // Pixel-reconstruction filter — separable inverse-CDF tables shared
+    // with the CPU PixelFilter.  pixelFilterBins == 0 disables the filter
+    // (raygen falls back to a unit box-1.0 jitter, the legacy behaviour).
+    // pixelFilterCdf:    bins+1 floats, monotonic in [0,1]
+    // pixelFilterSigns:  bins floats, ±1 per bin
+    const float*             pixelFilterCdf;
+    const float*             pixelFilterSigns;
+    uint32_t                 pixelFilterBins;
+    float                    pixelFilterRadius;
+
     // OptiX traversable for the GAS (uint64 = OptixTraversableHandle).  Set
     // to CudaAccelStructure::traversableHandle().  Read in raygen / shadow
     // calls of optixTrace.

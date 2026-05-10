@@ -571,6 +571,8 @@ kernel void shade(
     const device float*                     envConditionalCdf [[ buffer(14) ]],
     const device float*                     specAlbedoLUT     [[ buffer(15) ]],
     const device float*                     specAvgAlbedoLUT  [[ buffer(16) ]],
+    const device float*                     pixelFilterCdf    [[ buffer(17) ]],
+    const device float*                     pixelFilterSigns  [[ buffer(18) ]],
     texture2d<float, access::sample>        envTexture        [[ texture(0) ]],
     uint2                                   gid               [[ thread_position_in_grid ]])
 {
@@ -594,6 +596,40 @@ kernel void shade(
     // Local accumulators — written once after the whole batch
     float3 batchL      = float3(0.0f);
     float  batchLumSq  = 0.0f;
+    float  batchWeight = 0.0f;
+
+    // Pixel filter (separable, importance-sampled).  Falls back to box-1.0
+    // when the host hasn't bound the tables (pixelFilterBins == 0).
+    auto sampleFilter = [&](float u1, float u2, thread float& dx,
+                             thread float& dy, thread float& weight) {
+        if (cam.pixelFilterBins == 0) {
+            dx = u1 - 0.5f;
+            dy = u2 - 0.5f;
+            weight = 1.0f;
+            return;
+        }
+        const int   N = (int)cam.pixelFilterBins;
+        const float R = cam.pixelFilterRadius;
+        const float binW = (2.0f * R) / float(N);
+        // Inverse-CDF sample for one axis.
+        auto sampleAxis = [&](float u, thread float& outX, thread float& outSign) {
+            int lo = 0, hi = N;
+            while (lo < hi) {
+                int mid = (lo + hi) >> 1;
+                if (pixelFilterCdf[mid + 1] <= u) lo = mid + 1; else hi = mid;
+            }
+            int   bin = (lo < N) ? lo : (N - 1);
+            float c0  = pixelFilterCdf[bin];
+            float c1  = pixelFilterCdf[bin + 1];
+            float t   = (c1 > c0) ? (u - c0) / (c1 - c0) : 0.5f;
+            outX     = -R + (float(bin) + t) * binW;
+            outSign  = pixelFilterSigns[bin];
+        };
+        float sx, sgX, sy, sgY;
+        sampleAxis(u1, sx, sgX);
+        sampleAxis(u2, sy, sgY);
+        dx = sx; dy = sy; weight = sgX * sgY;
+    };
 
     for (uint s = 0; s < batch.batchSize; ++s) {
         uint sampleIndex = batch.sampleStart + s;
@@ -604,9 +640,12 @@ kernel void shade(
         // Sample shutter time uniformly within [shutterOpen, shutterClose]
         float rayTime = cam.shutterOpen + rand01(rng) * (cam.shutterClose - cam.shutterOpen);
 
-        // Generate camera ray
-        float jx = rand01(rng);
-        float jy = rand01(rng);
+        // Pixel reconstruction filter — importance-sampled jitter with
+        // ±1 sign weight for filters with negative lobes.
+        float fdx, fdy, fw;
+        sampleFilter(rand01(rng), rand01(rng), fdx, fdy, fw);
+        float jx = 0.5f + fdx;
+        float jy = 0.5f + fdy;
 
         float u = (float(px) + jx) / float(cam.imageWidth);
         float v = (float(cam.imageHeight - 1 - py) + jy) / float(cam.imageHeight);
@@ -863,8 +902,9 @@ kernel void shade(
                 L *= cam.fireflyClamp / lum;
         }
 
-        // Accumulate this sample into batch locals
-        batchL += L;
+        // Accumulate this sample into batch locals (signed by filter weight)
+        batchL      += L * fw;
+        batchWeight += fw;
         float lum = 0.2126f * L.x + 0.7152f * L.y + 0.0722f * L.z;
         batchLumSq += lum * lum;
 
@@ -875,6 +915,6 @@ kernel void shade(
     px_out.r        += batchL.x;
     px_out.g        += batchL.y;
     px_out.b        += batchL.z;
-    px_out.weight   += float(batch.batchSize);
+    px_out.weight   += batchWeight;
     px_out.sumLumSq += batchLumSq;
 }

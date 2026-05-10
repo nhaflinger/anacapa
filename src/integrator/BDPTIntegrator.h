@@ -44,6 +44,8 @@ public:
                     ISampler& sampler,
                     TileBuffer& localTile) override;
 
+    void setPixelFilter(const PixelFilter* f) override { m_pixelFilter = f; }
+
 private:
     // Build the camera subpath starting from a primary ray.
     // Returns number of vertices written into `path`.
@@ -81,9 +83,10 @@ private:
     // Geometry term G(v_i, v_j) = |cos theta_i| * |cos theta_j| / dist²
     static float geometryTerm(Vec3f posA, Vec3f nA, Vec3f posB, Vec3f nB);
 
-    uint32_t    m_maxDepth = 8;
-    float       m_fireflyClamp = 10.f;
-    LightSampler m_lightSampler;
+    uint32_t           m_maxDepth = 8;
+    float              m_fireflyClamp = 10.f;
+    LightSampler       m_lightSampler;
+    const PixelFilter* m_pixelFilter = nullptr;  // owned by RenderSession
 
     // Camera stored at prepare() time — needed for (s,1) pixel projection
     Camera      m_camera;

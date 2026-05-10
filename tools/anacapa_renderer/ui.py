@@ -58,6 +58,30 @@ class ANACAPA_PT_adaptive(bpy.types.Panel):
 
 
 # ---------------------------------------------------------------------------
+# Film — pixel reconstruction filter
+# ---------------------------------------------------------------------------
+
+class ANACAPA_PT_film(bpy.types.Panel):
+    bl_label       = "Film"
+    bl_space_type  = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context     = "render"
+    COMPAT_ENGINES = {'ANACAPA'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.engine == 'ANACAPA'
+
+    def draw(self, context):
+        layout = self.layout
+        s = context.scene.anacapa
+        layout.use_property_split = True
+
+        layout.prop(s, "pixel_filter")
+        layout.prop(s, "filter_width")
+
+
+# ---------------------------------------------------------------------------
 # Lighting
 # ---------------------------------------------------------------------------
 
@@ -167,6 +191,7 @@ class ANACAPA_PT_output(bpy.types.Panel):
 _classes = [
     ANACAPA_PT_sampling,
     ANACAPA_PT_adaptive,
+    ANACAPA_PT_film,
     ANACAPA_PT_lighting,
     ANACAPA_PT_camera,
     ANACAPA_PT_output,
