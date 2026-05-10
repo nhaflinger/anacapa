@@ -318,22 +318,6 @@ void MetalPathIntegrator::prepare(const SceneView& scene) {
         if (l)
             gpuLights.push_back(extractGpuLight(l));
     }
-    // Compute power-weighted selection probabilities for MIS
-    // (power = luminance × area for area lights, luminance for directional/dome)
-    float totalPower = 0.f;
-    for (auto& gl : gpuLights) {
-        float lum = 0.2126f*gl.Le.x + 0.7152f*gl.Le.y + 0.0722f*gl.Le.z;
-        float power = (gl.type == kLightRect) ? lum * gl.area : lum;
-        gl.selectionPdf = power;
-        totalPower += power;
-    }
-    if (totalPower > 0.f) {
-        for (auto& gl : gpuLights) gl.selectionPdf /= totalPower;
-    } else if (!gpuLights.empty()) {
-        float uniform = 1.f / static_cast<float>(gpuLights.size());
-        for (auto& gl : gpuLights) gl.selectionPdf = uniform;
-    }
-
     m_impl->numLights = static_cast<uint32_t>(gpuLights.size());
     m_impl->lightBuf  = std::make_unique<MetalBuffer<GpuLight>>(
         (__bridge void*)dev, std::max((uint32_t)gpuLights.size(), 1u));

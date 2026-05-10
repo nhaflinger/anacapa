@@ -93,7 +93,7 @@ struct GpuLight {
     GpuFloat3   normal;       // rect normal / directional direction-to-light
     float       cosCone;      // directional: cos(halfAngle), 1=hard shadow; unused for others
     GpuFloat3   uHalf;        // rect half-extent u (rect only)
-    float       selectionPdf; // power-proportional probability of selecting this light via NEE
+    float       _pad1;
     GpuFloat3   vHalf;        // rect half-extent v (rect only)
     float       _pad2;
 };

@@ -217,32 +217,6 @@ static float3 shadowTransmittance(
     return T;
 }
 
-// Power-heuristic MIS weight: w = f² / (f² + g²)
-static float powerHeuristic(float pdfF, float pdfG) {
-    float f = pdfF, g = pdfG;
-    return (f * f) / (f * f + g * g + 1e-9f);
-}
-
-// Solid-angle PDF of sampling direction wi from fromPos toward a rect light.
-// Returns 0 if hitPos is not within the light's rectangle.
-static float rectLightSolidAnglePdf(const device GpuLight& light,
-                                     float3 hitPos, float3 wi, float dist)
-{
-    float3 lightN = float3(light.normal.x, light.normal.y, light.normal.z);
-    float cosL = dot(-wi, lightN);
-    if (cosL <= 0.0f) return 0.0f;
-    float3 toHit = hitPos - float3(light.position.x, light.position.y, light.position.z);
-    float3 uH = float3(light.uHalf.x, light.uHalf.y, light.uHalf.z);
-    float3 vH = float3(light.vHalf.x, light.vHalf.y, light.vHalf.z);
-    float uLen = length(uH);
-    float vLen = length(vH);
-    if (uLen < 1e-7f || vLen < 1e-7f) return 0.0f;
-    float uCoord = dot(toHit, uH * (1.0f / uLen));
-    float vCoord = dot(toHit, vH * (1.0f / vLen));
-    if (abs(uCoord) > uLen || abs(vCoord) > vLen) return 0.0f;
-    return (dist * dist) / (cosL * light.area);
-}
-
 static float3 sampleDirect(
     float3                          hitPos,
     float3                          n,
@@ -266,16 +240,9 @@ static float3 sampleDirect(
 {
     if (numLights == 0) return float3(0);
 
-    // Power-weighted light selection via linear CDF scan
-    float u1 = rand01(rng);
-    float cdf = 0.0f;
-    uint lightIdx = numLights - 1;
-    for (uint i = 0; i < numLights; ++i) {
-        cdf += lights[i].selectionPdf;
-        if (u1 < cdf) { lightIdx = i; break; }
-    }
+    uint lightIdx = uint(rand01(rng) * float(numLights)) % numLights;
     const device GpuLight& light = lights[lightIdx];
-    float lightPick = light.selectionPdf > 0.0f ? light.selectionPdf : (1.0f / float(numLights));
+    float lightPick = 1.0f / float(numLights);
 
     float3 Li    = float3(0);
     float3 wi    = float3(0);
@@ -437,15 +404,9 @@ kernel void shade(
         r.max_distance = 1e10f;
 
         // Path tracing loop
-        float3 throughput  = float3(1.0f);
-        float3 L           = float3(0.0f);
-        uint   glassDepth  = 0;
-        // MIS state: track the BSDF PDF of the ray that spawned the current vertex.
-        // prevWasDelta=true on first hit (camera ray) so emitter Le gets weight 1.
-        float  prevBsdfPdf  = 0.0f;
-        bool   prevWasDelta = true;
-        float3 prevPos      = float3(0.0f);
-        float3 prevN        = float3(0.0f);
+        float3 throughput = float3(1.0f);
+        float3 L          = float3(0.0f);
+        uint   glassDepth = 0;
 
     for (uint bounce = 0; bounce <= cam.maxDepth; ++bounce) {
 
@@ -453,27 +414,17 @@ kernel void shade(
             isect.intersect(r, accelStruct, 0xFF, rayTime);
 
         if (res.type == intersection_type::none) {
-            // Env / background light — apply MIS weight against NEE dome sampling PDF.
+            // Match the CPU PathIntegrator: scenes without an environment
+            // light produce black for escaped rays.  Earlier this branch
+            // synthesised a blue/white sky gradient, which leaked into
+            // closed-room indirect bounces (e.g. the Cornell box's open
+            // front face) and made GPU renders ~2× brighter and blue-shifted
+            // vs CPU.
             float3 envColor = float3(0.0f);
             if (cam.hasEnvLight) {
                 envColor = evalEnvmap(r.direction, cam, envTexture);
             }
-            if (envColor.x > 0.0f || envColor.y > 0.0f || envColor.z > 0.0f) {
-                float weight = 1.0f;
-                if (!prevWasDelta && bounce > 0) {
-                    // NEE dome PDF: cosine hemisphere from the previous surface normal
-                    float lpdf = 0.0f;
-                    for (uint li = 0; li < numLights; ++li) {
-                        if (lights[li].type == kLightDome) {
-                            float cosW = max(0.0f, dot(r.direction, prevN));
-                            lpdf += lights[li].selectionPdf * (cosW / M_PI_F);
-                        }
-                    }
-                    if (lpdf > 0.0f)
-                        weight = powerHeuristic(prevBsdfPdf, lpdf);
-                }
-                L += throughput * envColor * weight;
-            }
+            L += throughput * envColor;
             break;
         }
 
@@ -506,24 +457,9 @@ kernel void shade(
         float3 baseColor = float3(mat.baseColor.x, mat.baseColor.y, mat.baseColor.z);
         float3 emissive  = float3(mat.emissive.x,  mat.emissive.y,  mat.emissive.z);
 
-        // Emitter Le — add with MIS weight against NEE light-sampling PDF.
-        // prevWasDelta=true on first hit and after any delta bounce → weight=1 (no NEE was done).
+        // Emission
         if (mat.type == kMatEmissive) {
-            float weight = 1.0f;
-            if (!prevWasDelta && bounce > 0) {
-                // Sum over rect lights: check if hitPos lies on each, weight by selectionPdf
-                float lpdf = 0.0f;
-                for (uint li = 0; li < numLights; ++li) {
-                    if (lights[li].type == kLightRect) {
-                        float spdf = rectLightSolidAnglePdf(lights[li], hitPos, r.direction, t);
-                        if (spdf > 0.0f)
-                            lpdf += lights[li].selectionPdf * spdf;
-                    }
-                }
-                if (lpdf > 0.0f)
-                    weight = powerHeuristic(prevBsdfPdf, lpdf);
-            }
-            L += throughput * emissive * weight;
+            L += throughput * emissive;
             break;
         }
 
@@ -586,13 +522,6 @@ kernel void shade(
             r.min_distance = 1e-4f;
             r.max_distance = 1e10f;
             throughput *= bsdfF;
-
-            // Glass is a delta bounce: next emitter hit gets weight 1 (no NEE to cancel against).
-            prevPos      = hitPos;
-            prevN        = faceN;
-            prevBsdfPdf  = 1.0f;
-            prevWasDelta = true;
-
             // Glass hits don't count against bounce budget — refracting through a
             // dome's two surfaces plus any interior bounces would exhaust maxDepth
             // before the background is ever reached.  Use a separate glass limiter.
@@ -648,12 +577,6 @@ kernel void shade(
         float cosI = dot(n, wi);
         if (cosI <= 0.0f || bsdfPdf <= 0.0f) break;
         throughput *= bsdfF * cosI / bsdfPdf;
-
-        // Update MIS tracking before spawning next ray
-        prevPos      = hitPos;
-        prevN        = n;
-        prevBsdfPdf  = bsdfPdf;
-        prevWasDelta = false;
 
         // Spawn next ray
         r.origin       = hitPos + n * 1e-4f;
