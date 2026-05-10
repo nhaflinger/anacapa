@@ -506,8 +506,10 @@ private:
     }
     ~OslShadingSystem() {
         delete m_sys;
-        if (m_textureSystem)
-            OSL::TextureSystem::destroy(m_textureSystem);
+        // OIIO 2.x: destroy the raw pointer we still own.  OIIO 3+: the
+        // shared_ptr (m_textureSystem) handles its own teardown — leaving
+        // m_texRaw null in that case so nothing to do here.
+        if (m_texRaw) OSL::TextureSystem::destroy(m_texRaw);
     }
 
     OslRendererServices  m_services;
