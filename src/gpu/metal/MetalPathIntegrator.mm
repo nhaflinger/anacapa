@@ -47,6 +47,12 @@ struct MetalPathIntegrator::Impl {
     Vec3f          envRot[3]      = {{1,0,0},{0,1,0},{0,0,1}};
     float          envIntensity   = 1.0f;
 
+    // HDRI importance sampling CDF buffers (uploaded once per scene load)
+    id<MTLBuffer> envMarginalCdfBuf    = nil;  // (H+1) floats
+    id<MTLBuffer> envConditionalCdfBuf = nil;  // H*(W+1) floats
+    uint32_t      envCdfWidth          = 0;
+    uint32_t      envCdfHeight         = 0;
+
     uint32_t numMaterials = 0;
     uint32_t numLights    = 0;
     uint32_t maxDepth     = 6;
@@ -366,7 +372,22 @@ void MetalPathIntegrator::prepare(const SceneView& scene) {
         m_impl->envRot[2]     = r2;
         m_impl->envIntensity  = domeLight->intensity();
 
-        spdlog::info("MetalPathIntegrator: uploaded {}x{} HDRI env texture", ew, eh);
+        // Upload importance sampling CDF tables
+        {
+            const auto& margCdf = domeLight->marginalCdf();
+            m_impl->envMarginalCdfBuf = [dev newBufferWithBytes:margCdf.data()
+                                                         length:margCdf.size() * sizeof(float)
+                                                        options:MTLResourceStorageModeShared];
+
+            auto condCdf = domeLight->flatConditionalCdf();
+            m_impl->envConditionalCdfBuf = [dev newBufferWithBytes:condCdf.data()
+                                                            length:condCdf.size() * sizeof(float)
+                                                           options:MTLResourceStorageModeShared];
+            m_impl->envCdfWidth  = ew;
+            m_impl->envCdfHeight = eh;
+        }
+
+        spdlog::info("MetalPathIntegrator: uploaded {}x{} HDRI env texture + CDF tables", ew, eh);
     }
 
     // 1×1 white fallback texture (used when no dome light is present)
@@ -458,6 +479,8 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     }
     camParams.shutterOpen  = cam.shutterOpen;
     camParams.shutterClose = cam.shutterClose;
+    camParams.envMapWidth  = m_impl->envCdfWidth;
+    camParams.envMapHeight = m_impl->envCdfHeight;
 
     // Use the persistent accum buffer — allocates only on first call or size change.
     // clearAccum() should be called when starting a fresh render (new scene/camera).
@@ -526,6 +549,9 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
         [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->meshIndexOffsetBuffer()  offset:0 atIndex:10];
         [enc setBuffer:batchMTL      offset:0 atIndex:11];
         [enc setAccelerationStructure:tlas atBufferIndex:12];
+        // HDRI importance sampling CDF tables (nil when no dome light loaded)
+        [enc setBuffer:m_impl->envMarginalCdfBuf    offset:0 atIndex:13];
+        [enc setBuffer:m_impl->envConditionalCdfBuf offset:0 atIndex:14];
         [enc setTexture:envTex atIndex:0];
         [enc useResource:tlas usage:MTLResourceUsageRead];
         for (void* blasVoid : m_impl->accel->blasHandles())
@@ -615,6 +641,8 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
     }
     camParams.shutterOpen  = cam.shutterOpen;
     camParams.shutterClose = cam.shutterClose;
+    camParams.envMapWidth  = m_impl->envCdfWidth;
+    camParams.envMapHeight = m_impl->envCdfHeight;
 
     // Tile-sized accum buffer (gid is local; shader writes gid.y*tileW+gid.x)
     size_t accumBytes   = tileW * tileH * sizeof(GpuAccumPixel);
@@ -669,6 +697,12 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
         setB (11, sampleIdxMTL);
 
         [enc setAccelerationStructure:tlas atBufferIndex:12];
+
+        // HDRI importance sampling CDF buffers (nil-safe: Metal ignores nil bindings)
+        if (m_impl->envMarginalCdfBuf)
+            [enc setBuffer:m_impl->envMarginalCdfBuf    offset:0 atIndex:13];
+        if (m_impl->envConditionalCdfBuf)
+            [enc setBuffer:m_impl->envConditionalCdfBuf offset:0 atIndex:14];
 
         // Environment texture (index 0); fallback 1×1 white if no HDRI loaded
         id<MTLTexture> envTex = m_impl->envTexture

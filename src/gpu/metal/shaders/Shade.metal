@@ -186,8 +186,90 @@ static float rectLightSolidAnglePdf(const device GpuLight& light,
 }
 
 // ---------------------------------------------------------------------------
-// Direct-light sampling (one light chosen uniformly at random)
+// HDRI importance sampling helpers
 // ---------------------------------------------------------------------------
+
+// Binary search into a normalized 1D CDF of (n+1) floats.
+// Returns bin index in [0,n), remapped u in [0,1), and bin probability (= pdf).
+static uint sampleCDF1D(const device float* cdf, uint n, float u,
+                         thread float& uRemapped, thread float& prob) {
+    uint lo = 0, hi = n;
+    while (lo < hi) {
+        uint mid = (lo + hi) >> 1;
+        if (cdf[mid + 1] <= u) lo = mid + 1;
+        else hi = mid;
+    }
+    uint idx = min(lo, n - 1);
+    float binProb = cdf[idx + 1] - cdf[idx];
+    uRemapped = (binProb > 1e-7f) ? clamp((u - cdf[idx]) / binProb, 0.0f, 1.0f - 1e-7f) : 0.0f;
+    prob = binProb;
+    return idx;
+}
+
+// Evaluate solid-angle PDF for world direction `dir` using uploaded HDRI CDFs.
+static float evalEnvPdf(float3 dir,
+                         constant GpuCameraParams& cam,
+                         const device float* marginalCdf,
+                         const device float* conditionalCdf) {
+    float3 envRot0 = float3(cam.envRot0.x, cam.envRot0.y, cam.envRot0.z);
+    float3 envRot1 = float3(cam.envRot1.x, cam.envRot1.y, cam.envRot1.z);
+    float3 envRot2 = float3(cam.envRot2.x, cam.envRot2.y, cam.envRot2.z);
+    float3 local = float3(dot(envRot0, dir), dot(envRot1, dir), dot(envRot2, dir));
+
+    float theta = acos(clamp(local.y, -1.0f, 1.0f));
+    float phi   = atan2(local.x, local.z);
+    if (phi < 0.0f) phi += 2.0f * M_PI_F;
+
+    uint W = cam.envMapWidth;
+    uint H = cam.envMapHeight;
+    uint col = min(uint(phi / (2.0f * M_PI_F) * float(W)), W - 1u);
+    uint row = min(uint(theta / M_PI_F * float(H)), H - 1u);
+
+    float sinTheta = max(sin(theta), 1e-6f);
+    float pdfRow   = marginalCdf[row + 1] - marginalCdf[row];
+    float pdfCol   = conditionalCdf[row * (W + 1) + col + 1] - conditionalCdf[row * (W + 1) + col];
+    return (pdfRow * pdfCol * float(W * H)) / (2.0f * M_PI_F * M_PI_F * sinTheta);
+}
+
+// Sample a direction from the 2D HDRI importance distribution.
+// Returns the world-space direction and sets pdfOut (solid-angle PDF).
+static float3 sampleEnvDirection(float2 u,
+                                  constant GpuCameraParams& cam,
+                                  const device float* marginalCdf,
+                                  const device float* conditionalCdf,
+                                  thread float& pdfOut) {
+    uint W = cam.envMapWidth;
+    uint H = cam.envMapHeight;
+
+    float uRow, probRow, uCol, probCol;
+    uint row = sampleCDF1D(marginalCdf,                   H, u.y, uRow, probRow);
+    uint col = sampleCDF1D(conditionalCdf + row * (W + 1), W, u.x, uCol, probCol);
+
+    float v     = (float(row) + uRow) / float(H);
+    float uu    = (float(col) + uCol) / float(W);
+    float theta = v * M_PI_F;
+    float phi   = uu * 2.0f * M_PI_F;
+    float sinT  = sin(theta);
+    float cosT  = cos(theta);
+
+    // Direction in envmap local space, rotated to world space.
+    // cam.envRot rows map world→env; transpose maps env→world.
+    float3 envDir  = float3(sinT * sin(phi), cosT, sinT * cos(phi));
+    float3 envRot0 = float3(cam.envRot0.x, cam.envRot0.y, cam.envRot0.z);
+    float3 envRot1 = float3(cam.envRot1.x, cam.envRot1.y, cam.envRot1.z);
+    float3 envRot2 = float3(cam.envRot2.x, cam.envRot2.y, cam.envRot2.z);
+    float3 worldDir = float3(
+        envRot0.x * envDir.x + envRot1.x * envDir.y + envRot2.x * envDir.z,
+        envRot0.y * envDir.x + envRot1.y * envDir.y + envRot2.y * envDir.z,
+        envRot0.z * envDir.x + envRot1.z * envDir.y + envRot2.z * envDir.z
+    );
+
+    float sinTabs = max(sinT, 1e-6f);
+    pdfOut = (probRow * probCol * float(W * H)) / (2.0f * M_PI_F * M_PI_F * sinTabs);
+    if (pdfOut <= 0.0f) pdfOut = 1e-7f;
+    return worldDir;
+}
+
 // ---------------------------------------------------------------------------
 // Shadow transmittance — steps through glass surfaces between hitPos and the
 // light, accumulating tint. Returns (0,0,0) if an opaque surface blocks the
@@ -264,7 +346,9 @@ static float3 sampleDirect(
     thread uint&                    rng,
     acceleration_structure<instancing, primitive_motion> accelStruct,
     constant GpuCameraParams&       cam,
-    texture2d<float, access::sample> envTex)
+    texture2d<float, access::sample> envTex,
+    const device float*             envMarginalCdf,
+    const device float*             envConditionalCdf)
 {
     if (numLights == 0) return float3(0);
 
@@ -319,11 +403,20 @@ static float3 sampleDirect(
         Li   = float3(light.Le.x, light.Le.y, light.Le.z);
 
     } else if (light.type == kLightDome) {
-        wi   = cosineSampleHemisphere(rand2(rng), n);
         tMax = 1e9f;
-        float cosW = max(1e-7f, dot(n, wi));
-        pdfL = (cosW / M_PI_F) * lightPick;
-        Li   = evalEnvmap(wi, cam, envTex);
+        if (cam.envMapWidth > 0) {
+            // HDRI importance sampling via uploaded CDF tables
+            float envPdf = 0.0f;
+            wi  = sampleEnvDirection(rand2(rng), cam, envMarginalCdf, envConditionalCdf, envPdf);
+            if (dot(n, wi) <= 0.0f) return float3(0);
+            pdfL = envPdf * lightPick;
+        } else {
+            // Fallback: cosine hemisphere sampling
+            wi = cosineSampleHemisphere(rand2(rng), n);
+            float cosW = max(1e-7f, dot(n, wi));
+            pdfL = (cosW / M_PI_F) * lightPick;
+        }
+        Li = evalEnvmap(wi, cam, envTex);
 
     } else {
         return float3(0);
@@ -372,21 +465,23 @@ static float3 sampleDirect(
 // Main kernel
 // ---------------------------------------------------------------------------
 kernel void shade(
-    constant  GpuCameraParams&              cam           [[ buffer(0) ]],
-    device    GpuAccumPixel*                accum         [[ buffer(1) ]],
-    const device GpuLight*                  lights        [[ buffer(2) ]],
-    constant  uint&                         numLights     [[ buffer(3) ]],
-    const device GpuMaterial*               materials     [[ buffer(4) ]],
-    constant  uint&                         numMaterials  [[ buffer(5) ]],
-    const device PackedFloat3*              normals       [[ buffer(6) ]],
-    const device uint32_t*                  indices       [[ buffer(7) ]],
-    const device uint32_t*                  triMeshIDs    [[ buffer(8) ]],
-    const device uint32_t*                  meshVertexOffsets [[ buffer(9) ]],
+    constant  GpuCameraParams&              cam               [[ buffer(0)  ]],
+    device    GpuAccumPixel*                accum             [[ buffer(1)  ]],
+    const device GpuLight*                  lights            [[ buffer(2)  ]],
+    constant  uint&                         numLights         [[ buffer(3)  ]],
+    const device GpuMaterial*               materials         [[ buffer(4)  ]],
+    constant  uint&                         numMaterials      [[ buffer(5)  ]],
+    const device PackedFloat3*              normals           [[ buffer(6)  ]],
+    const device uint32_t*                  indices           [[ buffer(7)  ]],
+    const device uint32_t*                  triMeshIDs        [[ buffer(8)  ]],
+    const device uint32_t*                  meshVertexOffsets [[ buffer(9)  ]],
     const device uint32_t*                  meshIndexOffsets  [[ buffer(10) ]],
-    constant  GpuSampleBatch&               batch         [[ buffer(11) ]],
+    constant  GpuSampleBatch&               batch             [[ buffer(11) ]],
     acceleration_structure<instancing, primitive_motion> accelStruct [[ buffer(12) ]],
-    texture2d<float, access::sample>        envTexture    [[ texture(0) ]],
-    uint2                                   gid           [[ thread_position_in_grid ]])
+    const device float*                     envMarginalCdf    [[ buffer(13) ]],
+    const device float*                     envConditionalCdf [[ buffer(14) ]],
+    texture2d<float, access::sample>        envTexture        [[ texture(0) ]],
+    uint2                                   gid               [[ thread_position_in_grid ]])
 {
     uint px = cam.tileX0 + gid.x;
     uint py = cam.tileY0 + gid.y;
@@ -456,12 +551,18 @@ kernel void shade(
             if (envColor.x > 0.0f || envColor.y > 0.0f || envColor.z > 0.0f) {
                 float weight = 1.0f;
                 if (!prevWasDelta && bounce > 0) {
-                    // NEE dome PDF (cosine hemisphere): (cosW/pi) × uniform_sel (1/N)
                     float lpdf = 0.0f;
                     for (uint li = 0; li < numLights; ++li) {
                         if (lights[li].type == kLightDome) {
-                            float cosW = max(0.0f, dot(r.direction, prevN));
-                            lpdf += (cosW / M_PI_F) / float(numLights);
+                            float domePdf = 0.0f;
+                            if (cam.envMapWidth > 0) {
+                                domePdf = evalEnvPdf(r.direction, cam,
+                                                     envMarginalCdf, envConditionalCdf);
+                            } else {
+                                float cosW = max(0.0f, dot(r.direction, prevN));
+                                domePdf = cosW / M_PI_F;
+                            }
+                            lpdf += domePdf / float(numLights);
                         }
                     }
                     if (lpdf > 0.0f)
@@ -532,7 +633,8 @@ kernel void shade(
                                            lights, numLights,
                                            materials, numMaterials,
                                            normals, indices, meshIndexOffsets,
-                                           rng, accelStruct, cam, envTexture);
+                                           rng, accelStruct, cam, envTexture,
+                                           envMarginalCdf, envConditionalCdf);
         }
 
         // Russian roulette after bounce 3

@@ -130,7 +130,8 @@ struct GpuCameraParams {
     float     envIntensity;   // multiplier for HDRI pixels (DomeLight intensity)
     float     shutterOpen;    // normalized shutter open time  (typically 0.0)
     float     shutterClose;   // normalized shutter close time (typically 1.0)
-    float     _pad6;
+    uint32_t  envMapWidth;    // CDF table width  (0 = no HDRI importance sampling)
+    uint32_t  envMapHeight;   // CDF table height
 };
 
 // ---------------------------------------------------------------------------

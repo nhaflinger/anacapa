@@ -198,6 +198,20 @@ public:
         r0 = m_rot[0]; r1 = m_rot[1]; r2 = m_rot[2];
     }
 
+    // CDF data for GPU importance sampling upload.
+    // Marginal CDF: (m_height + 1) floats, cdf[0]=0, cdf[m_height]=1.
+    const std::vector<float>& marginalCdf() const { return m_marginal.cdf; }
+
+    // Conditional CDFs packed as a flat array: m_height rows × (m_width + 1) floats.
+    // Row r's CDF starts at offset r * (m_width + 1).
+    std::vector<float> flatConditionalCdf() const {
+        std::vector<float> result;
+        result.reserve(static_cast<size_t>(m_height) * (m_width + 1));
+        for (const auto& dist : m_conditional)
+            result.insert(result.end(), dist.cdf.begin(), dist.cdf.end());
+        return result;
+    }
+
 private:
     // Apply the stored rotation: world direction → envmap local direction
     Vec3f rotateToEnv(Vec3f wo) const {
