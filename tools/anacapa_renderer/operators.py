@@ -7,7 +7,8 @@ import shutil
 import threading
 import queue
 
-from .export import get_executable, export_usd, build_command, get_scenes_dir, get_cache_dir
+from .export import (get_executable, export_usd, build_command,
+                      get_scenes_dir, get_cache_dir, substitute_frame_tokens)
 
 
 class ANACAPA_OT_render(bpy.types.Operator):
@@ -134,20 +135,16 @@ class ANACAPA_OT_render(bpy.types.Operator):
         output_path  = os.path.join(tmp_dir, "render.exr")
         preview_path = os.path.join(tmp_dir, "preview.png")
         executable   = get_executable(context)
-        cmd, _       = build_command(executable, usd_path, settings,
+        cmd          = build_command(executable, usd_path, settings,
                                      width, height, output_path,
                                      curves_path=abc_path,
                                      matassign_paths=matassign_paths,
                                      frame=context.scene.frame_current)
 
-        # Always add progressive PNG preview (overrides settings.png_path for temp use)
-        if "--png" not in cmd:
-            cmd += ["--png", preview_path]
-        else:
-            # Replace the user-specified png with our temp preview;
-            # the final PNG will be written by _load_result if settings.png_path is set.
-            idx = cmd.index("--png")
-            cmd[idx + 1] = preview_path
+        # Progressive preview PNG goes to a temp path so the Image Editor
+        # can hot-reload it as samples accumulate.  The persisted EXR is
+        # copied to settings.output_path (with $F substituted) at the end.
+        cmd += ["--png", preview_path]
 
         # --- Launch Anacapa ---
         import shlex
@@ -293,11 +290,15 @@ class ANACAPA_OT_render(bpy.types.Operator):
         persist_path = os.path.join(bpy.app.tempdir, "anacapa_last_render.exr")
         shutil.copy2(output_path, persist_path)
 
-        # If user specified a PNG output path, copy the preview PNG there too
-        if settings.png_path:
-            preview_path = ANACAPA_OT_render._preview_path
-            if preview_path and os.path.exists(preview_path):
-                shutil.copy2(preview_path, bpy.path.abspath(settings.png_path))
+        # If the user set an EXR output path, copy the rendered EXR there
+        # with $F frame tokens substituted.  Create parent dirs as needed.
+        if settings.output_path:
+            user_path = substitute_frame_tokens(
+                bpy.path.abspath(settings.output_path),
+                context.scene.frame_current)
+            os.makedirs(os.path.dirname(user_path) or ".", exist_ok=True)
+            shutil.copy2(output_path, user_path)
+            print(f"[Anacapa] Saved EXR -> {user_path}")
 
         # Remove preview image; replace with final EXR
         preview_img = ANACAPA_OT_render._preview_img
@@ -400,11 +401,11 @@ class ANACAPA_OT_export_scene(bpy.types.Operator):
             self.report({'ERROR'}, "USD export produced no file")
             return {'CANCELLED'}
 
-        cmd, _ = build_command(executable, usd_path, settings,
-                               width, height, output_path,
-                               curves_path=abc_path,
-                               matassign_paths=matassign_paths,
-                               frame=context.scene.frame_current)
+        cmd = build_command(executable, usd_path, settings,
+                            width, height, output_path,
+                            curves_path=abc_path,
+                            matassign_paths=matassign_paths,
+                            frame=context.scene.frame_current)
         cmd_str = shlex.join(cmd)
 
         print("\n" + "=" * 72)

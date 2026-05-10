@@ -14,8 +14,25 @@ Glass BSDF conversion, etc.) when only transforms or camera changed.
 
 import bpy
 import os
+import re
 import importlib.util
 import shutil
+
+
+# ---------------------------------------------------------------------------
+# Frame-token substitution for output paths
+#
+# Replaces $F, $F2, $F3, ... in a path with the current frame number.
+# $F alone uses no padding ("42"); $Fn pads with leading zeros to width n.
+# Mirrors the convention used by Houdini, RV, and Nuke.
+# ---------------------------------------------------------------------------
+_FRAME_TOKEN_RE = re.compile(r'\$F(\d*)')
+
+def substitute_frame_tokens(path, frame):
+    def _sub(m):
+        width = int(m.group(1)) if m.group(1) else 0
+        return f"{int(frame):0{width}d}" if width else str(int(frame))
+    return _FRAME_TOKEN_RE.sub(_sub, path)
 
 # ---------------------------------------------------------------------------
 # Persistent state — stored in bpy.app.driver_namespace so it survives
@@ -979,8 +996,4 @@ def build_command(executable, usd_path, settings, width, height, output_path,
         for p in paths:
             cmd += ["--matassign", p]
 
-    png_path = bpy.path.abspath(settings.png_path) if settings.png_path else None
-    if png_path:
-        cmd += ["--png", png_path, "--exposure", str(settings.exposure)]
-
-    return cmd, png_path
+    return cmd

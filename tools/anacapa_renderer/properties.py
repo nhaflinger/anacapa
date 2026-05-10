@@ -120,14 +120,18 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
         default=False,
     )
 
-    # PNG preview output
-    png_path: bpy.props.StringProperty(
-        name="PNG Output",
-        description="Write an ACES-tonemapped sRGB PNG alongside the EXR",
+    # EXR output path.  $F tokens substitute the current frame number:
+    #   $F  -> "42"        (no padding)
+    #   $F2 -> "42"         $F3 -> "042"     $F4 -> "0042"   etc.
+    # See substitute_frame_tokens() in export.py.  Empty = don't persist
+    # the EXR (it still goes to a temp dir for in-Blender display).
+    output_path: bpy.props.StringProperty(
+        name="EXR Output",
+        description='EXR output path. Use "$F4" for 4-padded frame numbers '
+                    '(e.g. "render.$F4.exr" -> "render.0042.exr"). '
+                    'Tokens: $F (no padding), $F2..$F8 (zero-padded).',
         subtype='FILE_PATH',
     )
-    exposure: bpy.props.FloatProperty(
-        name="Exposure", description="EV adjustment for PNG output", default=0.0)
 
     # Camera
     camera_path: bpy.props.StringProperty(

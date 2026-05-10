@@ -154,10 +154,7 @@ class ANACAPA_PT_output(bpy.types.Panel):
         layout.prop(s, "write_aovs")
 
         layout.separator()
-        layout.prop(s, "png_path")
-        row = layout.row()
-        row.active = bool(s.png_path)
-        row.prop(s, "exposure")
+        layout.prop(s, "output_path")
 
         layout.separator()
         layout.operator("anacapa.export_scene", icon='EXPORT')
