@@ -24,10 +24,7 @@ public:
     explicit PathIntegrator(uint32_t maxDepth = 8, uint32_t minDepth = 2)
         : m_maxDepth(maxDepth), m_minDepth(minDepth) {}
 
-    void prepare(const SceneView& scene) override {
-        // Build alias table for light selection (uniform for now)
-        m_lightCount = static_cast<uint32_t>(scene.lights.size());
-    }
+    void prepare(const SceneView& /*scene*/) override {}
 
     void renderTile(const SceneView& scene,
                     const TileRequest& tile,
@@ -39,13 +36,11 @@ public:
     void setDebugMeshID(int32_t id) override { m_debugMeshID = id; }
 
 private:
-    // outAlbedo/outNormal are filled with first-hit surface data for denoising
     Spectrum Li(const Ray& ray, const SceneView& scene,
-                ISampler& sampler, uint32_t depth,
+                ISampler& sampler,
                 Spectrum& outAlbedo, Vec3f& outNormal) const;
 
-    // Direct lighting: sample one light, return MIS-weighted contribution.
-    // sceneTime is stamped on shadow rays for temporal consistency.
+    // Light sampling only — emitter Le is handled in Li via path continuation.
     Spectrum estimateDirect(const SurfaceInteraction& si,
                              const IMaterial& mat,
                              Vec3f wo,
@@ -54,15 +49,18 @@ private:
                              ISampler& sampler,
                              float sceneTime) const;
 
+    // Combined PDF of reaching direction wi from point `from` via NEE with
+    // uniform light selection (1/N × light's solid-angle PDF, summed over lights).
+    float emitterPdf(Vec3f from, Vec3f wi, const SceneView& scene) const;
+
     static float powerHeuristic(float nF, float pdfF,
                                   float nG, float pdfG) {
         float f = nF * pdfF, g = nG * pdfG;
         return (f * f) / (f*f + g*g);
     }
 
-    uint32_t m_maxDepth  = 8;
-    uint32_t m_minDepth  = 2;
-    uint32_t m_lightCount = 0;
+    uint32_t m_maxDepth    = 8;
+    uint32_t m_minDepth    = 2;
     int32_t  m_debugMeshID = -1;
 };
 

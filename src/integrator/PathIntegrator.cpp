@@ -39,7 +39,7 @@ void PathIntegrator::renderTile(const SceneView& scene,
 
                 Spectrum albedo = {};
                 Vec3f    normal = {};
-                Spectrum sample = Li(ray, scene, sampler, 0, albedo, normal);
+                Spectrum sample = Li(ray, scene, sampler, albedo, normal);
                 if (sample.isFinite()) {
                     accum += sample;
                     float lum = luminance(sample);
@@ -50,8 +50,6 @@ void PathIntegrator::renderTile(const SceneView& scene,
                 ++aovCount;
             }
 
-            // Weight by sampleCount so adaptive passes merge correctly:
-            // Film computes weighted average across all passes per pixel.
             float invSPP = 1.f / static_cast<float>(tile.sampleCount);
             localTile.add(tx, ty, accum * invSPP, static_cast<float>(tile.sampleCount));
             localTile.addLumSq(tx, ty, sumLumSq);
@@ -69,32 +67,41 @@ void PathIntegrator::renderTile(const SceneView& scene,
 }
 
 Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
-                              ISampler& sampler, uint32_t depth,
+                              ISampler& sampler,
                               Spectrum& outAlbedo, Vec3f& outNormal) const {
-    Spectrum L      = {};
-    Spectrum beta   = {1.f, 1.f, 1.f};
-    Ray      r      = ray;
-    bool     specularBounce = false;
-    bool     firstHit       = true;
+    Spectrum L    = {};
+    Spectrum beta = {1.f, 1.f, 1.f};
+    Ray      r    = ray;
+
+    // MIS state: track the BSDF PDF of the ray that spawned the current vertex.
+    // prevWasDelta=true on the first hit and after any delta bounce so emitter Le
+    // gets weight=1 (no NEE was attempted, no double-count risk).
+    float prevBsdfPdf  = 0.f;
+    Vec3f prevP        = {};
+    bool  prevWasDelta = true;
+    bool  firstHit     = true;
 
     for (uint32_t bounce = 0; bounce <= m_maxDepth; ++bounce) {
         TraceResult hit = scene.accel->trace(r);
 
         if (!hit.hit) {
-            if (bounce == 0 || specularBounce) {
-                Spectrum bg = scene.envLight
-                    ? scene.envLight->Le({}, {}, r.direction)
-                    : scene.envRadiance;
-                L += beta * bg;
+            // Background / environment light
+            Spectrum bg = scene.envLight
+                ? scene.envLight->Le({}, {}, r.direction)
+                : scene.envRadiance;
+            if (!isBlack(bg)) {
+                float weight = 1.f;
+                if (!prevWasDelta && bounce > 0) {
+                    float lpdf = emitterPdf(prevP, r.direction, scene);
+                    weight = powerHeuristic(1, prevBsdfPdf, 1, lpdf);
+                }
+                L += beta * bg * weight;
             }
             break;
         }
 
         SurfaceInteraction& si = hit.si;
 
-        // --debug-mesh: when set, primary rays that hit any other mesh return
-        // black so only the target mesh's pixels are visible.  Indirect bounces
-        // are unaffected — the target mesh is shaded with full lighting.
         if (firstHit && m_debugMeshID >= 0
                 && static_cast<int32_t>(si.meshID) != m_debugMeshID) {
             outAlbedo = {};
@@ -110,13 +117,7 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
         Vec3f wo = -r.direction;
         ShadingContext ctx(si, r.direction);
 
-        // Alpha test — if the surface is alpha-masked and this point is in the
-        // cutout region, continue the ray past the surface without shading it.
-        // Stochastic opacity: compare opacity against a random sample so
-        // semi-transparent alpha-masked surfaces (fire, foliage) get a
-        // properly anti-aliased soft edge rather than a hard cutout at 0.5.
-        // Only consume a sampler dimension for partial alpha to preserve
-        // low-discrepancy structure for subsequent bounce decisions.
+        // Alpha / opacity cutout
         {
             float opacity = mat->evalOpacity(ctx);
             bool passThrough = opacity <= 0.f
@@ -128,41 +129,48 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
             }
         }
 
-        // Capture first-hit AOVs for denoising
         if (firstHit) {
             outAlbedo = mat->reflectance(ctx);
             outNormal = si.n;
             firstHit  = false;
         }
 
+        // Emitter Le — add with MIS weight against the NEE light-sampling PDF.
+        // prevWasDelta is true on the first hit and after any delta bounce, so
+        // those cases get weight=1 (no NEE was attempted, no double-count risk).
         Spectrum Le = mat->Le(ctx, wo);
         if (!isBlack(Le)) {
-            if (bounce == 0 || specularBounce)
-                L += beta * Le;
+            float weight = 1.f;
+            if (!prevWasDelta && bounce > 0) {
+                float lpdf = emitterPdf(prevP, r.direction, scene);
+                weight = powerHeuristic(1, prevBsdfPdf, 1, lpdf);
+            }
+            L += beta * Le * weight;
         }
 
+        // NEE: uniform random light selection
         if (!mat->isDelta() && !scene.lights.empty()) {
-            uint32_t lightIdx = static_cast<uint32_t>(
-                sampler.get1D() * static_cast<float>(scene.lights.size()));
-            lightIdx = std::min(lightIdx,
-                static_cast<uint32_t>(scene.lights.size() - 1));
-
-            Spectrum Ld = estimateDirect(si, *mat, wo,
-                                          *scene.lights[lightIdx],
+            uint32_t N = static_cast<uint32_t>(scene.lights.size());
+            uint32_t lightIdx = std::min(
+                static_cast<uint32_t>(sampler.get1D() * static_cast<float>(N)), N - 1);
+            Spectrum Ld = estimateDirect(si, *mat, wo, *scene.lights[lightIdx],
                                           scene, sampler, ray.time);
-            L += beta * Ld * static_cast<float>(scene.lights.size());
+            L += beta * Ld * static_cast<float>(N);
         }
 
+        // BSDF sample for path continuation
         BSDFSample bs = mat->sample(ctx, wo, sampler.get2D(), sampler.get1D());
-        if (!bs.isValid()) {
-            break;
-        }
+        if (!bs.isValid()) break;
 
-        specularBounce = bs.isDelta();
+        // Update MIS tracking before moving to the next vertex
+        prevP         = si.p;
+        prevBsdfPdf   = bs.pdf;
+        prevWasDelta  = bs.isDelta();
+
         beta *= bs.f / bs.pdf;
         r = spawnRay(si.p, si.n, bs.wi);
         r.time = ray.time;
-        r.skipStrandID = si.isCurve ? si.strandID : ~0u;  // skip own strand on next bounce
+        r.skipStrandID = si.isCurve ? si.strandID : ~0u;
 
         if (bounce >= m_minDepth) {
             float q = 1.f - std::min(beta.maxComponent(), 0.95f);
@@ -174,6 +182,13 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
     return L;
 }
 
+// ---------------------------------------------------------------------------
+// estimateDirect — light-sampling branch only.
+//
+// The BSDF-sampling branch has been removed: emitter hits via path-continuation
+// are handled in Li with proper per-emitter MIS weights, which correctly covers
+// all emitters across all bounce depths (not just the immediately adjacent hit).
+// ---------------------------------------------------------------------------
 Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
                                          const IMaterial& mat,
                                          Vec3f wo,
@@ -181,106 +196,52 @@ Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
                                          const SceneView& scene,
                                          ISampler& sampler,
                                          float sceneTime) const {
-    Spectrum Ld = {};
     ShadingContext ctx(si, -wo);
 
-    // --- Light sampling ---
-    {
-        LightSample ls = light.sample(si.p, si.n, sampler.get2D());
-        if (ls.pdf > 0.f && !isBlack(ls.Li)) {
-            BSDFEval be = mat.evaluate(ctx, wo, ls.wi);
-            if (!isBlack(be.f)) {
-                Ray shadowRay = spawnRayTo(si.p, si.n, si.p + ls.wi * ls.dist);
-                shadowRay.time = sceneTime;
-                shadowRay.skipStrandID = si.isCurve ? si.strandID : ~0u;
-                Spectrum Tr = shadowTransmittance(shadowRay, scene);
-                if (!isBlack(Tr)) {
-                    float weight = ls.isDelta
-                        ? 1.f
-                        : powerHeuristic(1, ls.pdf, 1, be.pdf);
-                    // For hair, use sinθ (angle from fiber tangent) not the ribbon normal dot.
-                    // The ribbon normal always faces the camera so absDot(wi, n) ≈ 0 for
-                    // most light directions, killing direct lighting entirely.
-                    float cosI = si.isCurve
-                        ? std::sqrt(std::max(0.f, 1.f - dot(ls.wi, ctx.t) * dot(ls.wi, ctx.t)))
-                        : absDot(ls.wi, si.n);
-                    Ld += be.f * ls.Li * Tr * cosI * weight / ls.pdf;
-                }
-            }
-        }
+    LightSample ls = light.sample(si.p, si.n, sampler.get2D());
+    if (ls.pdf <= 0.f || isBlack(ls.Li)) return {};
+
+    BSDFEval be = mat.evaluate(ctx, wo, ls.wi);
+    if (isBlack(be.f)) return {};
+
+    Ray shadowRay = spawnRayTo(si.p, si.n, si.p + ls.wi * ls.dist);
+    shadowRay.time = sceneTime;
+    shadowRay.skipStrandID = si.isCurve ? si.strandID : ~0u;
+    Spectrum Tr = shadowTransmittance(shadowRay, scene);
+    if (isBlack(Tr)) return {};
+
+    // Power-heuristic MIS weight: balance light-sampling PDF against BSDF PDF.
+    // Delta lights (point/directional) don't have a competing BSDF strategy.
+    float weight = ls.isDelta
+        ? 1.f
+        : powerHeuristic(1, ls.pdf, 1, be.pdf);
+
+    float cosI = si.isCurve
+        ? std::sqrt(std::max(0.f, 1.f - dot(ls.wi, ctx.t) * dot(ls.wi, ctx.t)))
+        : absDot(ls.wi, si.n);
+
+    return be.f * ls.Li * Tr * cosI * weight / ls.pdf;
+}
+
+// ---------------------------------------------------------------------------
+// emitterPdf — uniform-selection combined solid-angle PDF for MIS.
+//
+// Returns (1/N) × sum of each light's solid-angle PDF for direction wi from
+// point `from`.  This matches the NEE strategy used in Li: pick one light
+// uniformly (prob 1/N), sample it (PDF ls.pdf).  The combined selection PDF
+// is (1/N) × ls.pdf, which is what the MIS denominator needs.
+// ---------------------------------------------------------------------------
+float PathIntegrator::emitterPdf(Vec3f from, Vec3f wi,
+                                   const SceneView& scene) const {
+    if (scene.lights.empty()) return 0.f;
+    float pdf = 0.f;
+    float weight = 1.f / static_cast<float>(scene.lights.size());
+    for (const ILight* light : scene.lights) {
+        float lpdf = light->pdf(from, wi);
+        if (lpdf > 0.f)
+            pdf += weight * lpdf;
     }
-
-    // --- BSDF sampling (skip for delta lights) ---
-    if (!light.isDelta()) {
-        BSDFSample bs = mat.sample(ctx, wo, sampler.get2D(), sampler.get1D());
-        if (bs.isValid()) {
-            float lightPdf = light.pdf(si.p, bs.wi);
-            if (lightPdf > 0.f) {
-                float weight = bs.isDelta()
-                    ? 1.f
-                    : powerHeuristic(1, bs.pdf, 1, lightPdf);
-
-                // Trace toward the light, stepping through any transparent surfaces.
-                // We use shadowTransmittance which handles the chain of transparent
-                // hits, then fall through to check if the final hit is an emitter.
-                // Use geometric normal for offset to clear the actual surface.
-                Ray shadowRay = spawnRay(si.p, si.ng, bs.wi);
-                shadowRay.tMax = 1e10f;
-                shadowRay.time = sceneTime;
-                shadowRay.skipStrandID = si.isCurve ? si.strandID : ~0u;
-
-                // Find the first non-transmissive surface (emitter or opaque blocker)
-                Spectrum Tr = {1.f, 1.f, 1.f};
-                TraceResult hit;
-                {
-                    Ray stepRay = shadowRay;
-                    for (int step = 0; step < 8; ++step) {
-                        hit = scene.accel->trace(stepRay);
-                        if (!hit.hit) break;
-                        const IMaterial* m = (hit.si.meshID < scene.materials.size())
-                                             ? scene.materials[hit.si.meshID] : nullptr;
-                        if (!m) { Tr = {}; break; }
-                        ShadingContext hctx(hit.si, stepRay.direction);
-                        Spectrum tint = m->transmittanceColor(hctx);
-                        if (isBlack(tint)) break;   // opaque / emitter — stop here
-                        Tr = Tr * tint;
-                        if (isBlack(Tr)) break;
-                        float remaining = stepRay.tMax - hit.si.t;
-                        if (remaining <= 1e-4f) { hit.hit = false; break; }
-                        float t = stepRay.time;
-                        stepRay = spawnRay(hit.si.p, hit.si.ng, stepRay.direction);
-                        stepRay.tMax = remaining - 1e-4f;
-                        stepRay.time = t;
-                    }
-                }
-
-                Spectrum Li = {};
-                if (!hit.hit) {
-                    Li = scene.envLight
-                        ? scene.envLight->Le({}, {}, bs.wi)
-                        : scene.envRadiance;
-                } else if (hit.si.meshID < scene.materials.size()) {
-                    const IMaterial* hitMat = scene.materials[hit.si.meshID];
-                    if (hitMat) {
-                        ShadingContext hitCtx(hit.si, -bs.wi);
-                        Li = hitMat->Le(hitCtx, -bs.wi);
-                    }
-                }
-
-                if (!isBlack(Li) && !isBlack(Tr)) {
-                    // Hair sample() pre-multiplies bs.f by cosThetaI (sinθ from
-                    // tangent). For curves, skip the separate cosI factor; for
-                    // surfaces, apply the standard normal dot product.
-                    float cosI = si.isCurve
-                        ? 1.f
-                        : absDot(bs.wi, si.n);
-                    Ld += bs.f * Li * Tr * cosI * weight / bs.pdf;
-                }
-            }
-        }
-    }
-
-    return Ld;
+    return pdf;
 }
 
 } // namespace anacapa
