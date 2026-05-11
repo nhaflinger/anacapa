@@ -1,9 +1,10 @@
 #pragma once
 
 // Pure C++ header — no Objective-C types.
-// Wraps the Metal BLAS+TLAS build from a GeometryPool.
+// Wraps the Metal BLAS+TLAS build from a GeometryPool and optional CurvePool.
 
 #include <anacapa/accel/GeometryPool.h>
+#include <anacapa/accel/CurvePool.h>
 #include <memory>
 #include <vector>
 
@@ -18,12 +19,20 @@ namespace anacapa {
 //
 // Also uploads vertex attributes (positions, normals, UVs) and per-triangle
 // meshID into MTLBuffers so the Shade kernel can interpolate hit data.
+//
+// Hair: if curvePool is non-null and has strands, each Bézier strand is
+// tessellated into a flat ribbon mesh (kHairTessSteps quads per segment).
+// The hair BLAS is added as the last instance in the TLAS.  Motion blur is
+// supported via two-keyframe vertex buffers (shutter-open / shutter-close).
 // ---------------------------------------------------------------------------
 class MetalAccelStructure {
 public:
     // device: id<MTLDevice> (void* to keep header ObjC-free)
     // cmdQueue: id<MTLCommandQueue>
-    MetalAccelStructure(void* device, void* cmdQueue, const GeometryPool& pool);
+    // curvePool: optional — pass nullptr when the scene has no hair
+    MetalAccelStructure(void* device, void* cmdQueue,
+                        const GeometryPool& pool,
+                        const CurvePool*    curvePool = nullptr);
     ~MetalAccelStructure();
 
     bool isValid() const;
@@ -56,6 +65,14 @@ public:
     // Array of per-mesh BLAS handles — callers must useResource each entry
     // before dispatching a kernel that traverses the TLAS.
     std::vector<void*> blasHandles() const;  // id<MTLAccelerationStructure> per mesh
+
+    // Hair ribbon buffers — valid only when hairMeshBaseID() != 0xFFFFFFFF.
+    // hairTriBuffer: one GpuHairTri per tessellated triangle (primID-indexed).
+    // hairMatBuffer: one GpuHairMaterial per scene material slot.
+    void*    hairTriBuffer()     const;  // id<MTLBuffer>
+    void*    hairMatBuffer()     const;  // id<MTLBuffer>
+    uint32_t numHairMaterials()  const;
+    uint32_t hairMeshBaseID()    const;  // TLAS instance ID of the hair mesh; 0xFFFFFFFF if none
 
 private:
     struct Impl;

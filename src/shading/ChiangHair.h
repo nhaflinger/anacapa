@@ -24,6 +24,8 @@ class ChiangHairMaterial : public IMaterial {
 public:
     using Params = MarschnerHairMaterial::Params;
 
+    const Params& params() const { return m_p; }
+
     explicit ChiangHairMaterial(const Params& p) : m_p(p) {
         // ---- Longitudinal variance (same curve-fit as Marschner) ----
         float bm = std::clamp(m_p.beta_m, 1e-3f, 1.f);

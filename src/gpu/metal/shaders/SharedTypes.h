@@ -62,6 +62,7 @@ enum GpuMaterialType : uint32_t {
     kMatGGX         = 1,
     kMatEmissive    = 2,
     kMatGlass       = 3,   // smooth dielectric — delta Fresnel + Snell refraction
+    kMatHair        = 4,   // Marschner cylindrical fiber BSDF (handled via hairTris/hairMats buffers)
 };
 
 struct GpuMaterial {
@@ -75,6 +76,36 @@ struct GpuMaterial {
     // Specular layer strength [0,1] — MaterialX standard_surface `specular` knob.
     // Multiplies the dielectric Fresnel in the energy-conserving spec/diff balance.
     float           specular;
+};
+
+// ---------------------------------------------------------------------------
+// GpuHairMaterial — Marschner BSDF parameters for one hair material slot.
+// Indexed by GpuHairTri::matIdx.  scene.materials[] size determines the
+// buffer length; non-hair slots are zero-initialised and never accessed.
+// ---------------------------------------------------------------------------
+struct GpuHairMaterial {
+    GpuFloat3 sigma_a;  // default absorption when strand color is the (1,1,1) sentinel
+    float     eta;      // IOR of cortex (typically 1.55)
+    float     beta_m;   // longitudinal roughness ∈ [0,1]
+    float     beta_n;   // azimuthal roughness    ∈ [0,1]
+    float     alpha;    // cuticle tilt in degrees (typically 2–4)
+    float     _pad;
+};
+
+// ---------------------------------------------------------------------------
+// GpuHairTri — per-triangle metadata for tessellated hair ribbons.
+// The GPU hair mesh is one BLAS; primID indexes directly into this buffer.
+// h values encode the impact parameter h ∈ [-1,1] at each barycentric vertex
+// so the shader can interpolate: h = h0*(1-u-v) + h1*u + h2*v.
+// ---------------------------------------------------------------------------
+struct GpuHairTri {
+    GpuFloat3 tangent;  // fiber direction (world-space, unit) — same for both tris of a quad
+    uint32_t  matIdx;   // index into hairMats[] buffer
+    GpuFloat3 color;    // per-strand linear RGB; (1,1,1) = use GpuHairMaterial.sigma_a default
+    float     h0;       // impact parameter at barycentric vertex 0 ∈ [-1,1]
+    float     h1;       // impact parameter at barycentric vertex 1
+    float     h2;       // impact parameter at barycentric vertex 2
+    float     _pad;
 };
 
 // ---------------------------------------------------------------------------
@@ -144,6 +175,11 @@ struct GpuCameraParams {
     // separately in the kernel argument table.
     uint32_t  pixelFilterBins;
     float     pixelFilterRadius;
+
+    // Hair: TLAS instance ID where the tessellated hair mesh starts.
+    // 0xFFFFFFFF when the scene contains no hair.
+    uint32_t  hairMeshBaseID;
+    uint32_t  _camPad[3];
 };
 
 // ---------------------------------------------------------------------------

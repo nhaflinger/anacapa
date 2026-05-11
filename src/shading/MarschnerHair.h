@@ -197,6 +197,8 @@ public:
         float    alpha   = 2.f;    // cuticle scale tilt in degrees (typical 2–4°)
     };
 
+    const Params& params() const { return m_p; }
+
     explicit MarschnerHairMaterial(const Params& p) : m_p(p) {
         // Longitudinal variance — PBRT v4 curve-fit mapping from β_m
         float bm  = std::clamp(m_p.beta_m, 1e-3f, 1.f);

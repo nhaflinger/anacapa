@@ -445,7 +445,8 @@ void RenderSession::buildAccelStructure() {
     auto accel = std::make_unique<CurveBrute>(m_geomPool, m_curvePool);
     accel->commit();
     m_accel = std::move(accel);
-    m_scene.accel = m_accel.get();
+    m_scene.accel     = m_accel.get();
+    m_scene.curvePool = &m_curvePool;
 }
 
 // ---------------------------------------------------------------------------

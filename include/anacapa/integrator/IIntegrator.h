@@ -10,6 +10,7 @@
 namespace anacapa {
 
 class IAccelerationStructure;
+class CurvePool;
 class IMaterial;
 class ILight;
 class ISampler;
@@ -149,7 +150,8 @@ struct Camera {
 // Separates the integrator from the scene ownership model.
 // ---------------------------------------------------------------------------
 struct SceneView {
-    const IAccelerationStructure*        accel    = nullptr;
+    const IAccelerationStructure*        accel     = nullptr;
+    const CurvePool*                     curvePool = nullptr;  // nullptr when no hair in scene
     std::vector<const IMaterial*>        materials;   // indexed by meshID
     std::vector<const ILight*>           lights;
     const ILight*                        envLight = nullptr;  // Infinite/dome light (nullptr = constant)

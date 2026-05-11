@@ -15,6 +15,8 @@
 // Material type-detection includes — used in prepare() only
 #include "../../shading/Lambertian.h"
 #include "../../shading/StandardSurface.h"
+#include "../../shading/MarschnerHair.h"
+#include "../../shading/ChiangHair.h"
 #include "../../shading/lights/AreaLight.h"
 #include "../../shading/lights/DirectionalLight.h"
 #include "../../shading/lights/DomeLight.h"
@@ -78,6 +80,12 @@ struct MetalPathIntegrator::Impl {
     id<MTLBuffer> accumMTL    = nil;
     uint32_t      accumWidth  = 0;
     uint32_t      accumHeight = 0;
+
+    // Hair material parameter buffer — one GpuHairMaterial per scene material slot.
+    // Built in prepare() alongside hairTriBuf (which lives inside MetalAccelStructure).
+    id<MTLBuffer> hairMatBuf      = nil;
+    uint32_t      numHairMats     = 0;
+    uint32_t      hairMeshBaseID  = 0xFFFFFFFFu;
 
     // Pointer to scene geometry (for building the accel structure)
     const GeometryPool* geomPool = nullptr;
@@ -291,6 +299,42 @@ static GpuLight extractGpuLight(const ILight* light) {
     return gl;
 }
 
+static GpuHairMaterial extractGpuHairMaterial(const IMaterial* mat) {
+    GpuHairMaterial hm{};
+    // Defaults matching MarschnerHairMaterial::Params
+    hm.sigma_a = {0.06f, 0.10f, 0.20f};
+    hm.eta     = 1.55f;
+    hm.beta_m  = 0.40f;
+    hm.beta_n  = 0.60f;
+    hm.alpha   = 2.0f;
+    hm._pad    = 0.f;
+
+    if (!mat) return hm;
+
+    // ChiangHairMaterial uses Params = MarschnerHairMaterial::Params
+    const ChiangHairMaterial* ch = dynamic_cast<const ChiangHairMaterial*>(mat);
+    if (ch) {
+        const auto& p = ch->params();
+        hm.sigma_a = {p.sigma_a.x, p.sigma_a.y, p.sigma_a.z};
+        hm.eta     = p.eta;
+        hm.beta_m  = p.beta_m;
+        hm.beta_n  = p.beta_n;
+        hm.alpha   = p.alpha;
+        return hm;
+    }
+    const MarschnerHairMaterial* mh = dynamic_cast<const MarschnerHairMaterial*>(mat);
+    if (mh) {
+        const auto& p = mh->params();
+        hm.sigma_a = {p.sigma_a.x, p.sigma_a.y, p.sigma_a.z};
+        hm.eta     = p.eta;
+        hm.beta_m  = p.beta_m;
+        hm.beta_n  = p.beta_n;
+        hm.alpha   = p.alpha;
+        return hm;
+    }
+    return hm;
+}
+
 // ---------------------------------------------------------------------------
 // Constructor / Destructor
 // ---------------------------------------------------------------------------
@@ -362,13 +406,28 @@ void MetalPathIntegrator::prepare(const SceneView& scene) {
     // Access it via the IAccelerationStructure's pool() method.
     m_impl->geomPool = &scene.accel->pool();
 
-    // Build hardware acceleration structure
+    // Build hardware acceleration structure (hair ribbons included when curvePool is present)
     m_impl->accel = std::make_unique<MetalAccelStructure>(
-        (__bridge void*)dev, (__bridge void*)cq, *m_impl->geomPool);
+        (__bridge void*)dev, (__bridge void*)cq, *m_impl->geomPool, scene.curvePool);
 
     if (!m_impl->accel->isValid()) {
         spdlog::error("MetalPathIntegrator::prepare — accel build failed");
         return;
+    }
+
+    // Hair material buffer — one slot per scene.materials entry (zero for non-hair slots).
+    // hairMeshBaseID comes from the accel structure built above.
+    m_impl->hairMeshBaseID = m_impl->accel->hairMeshBaseID();
+    {
+        uint32_t nSlots = static_cast<uint32_t>(scene.materials.size());
+        if (nSlots == 0) nSlots = 1;  // Metal doesn't allow zero-length buffers
+        std::vector<GpuHairMaterial> hairMats(nSlots);
+        for (uint32_t i = 0; i < static_cast<uint32_t>(scene.materials.size()); ++i)
+            hairMats[i] = extractGpuHairMaterial(scene.materials[i]);
+        m_impl->hairMatBuf = [dev newBufferWithBytes:hairMats.data()
+                                              length:nSlots * sizeof(GpuHairMaterial)
+                                             options:MTLResourceStorageModeShared];
+        m_impl->numHairMats = nSlots;
     }
 
     // Upload materials
@@ -563,6 +622,7 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     camParams.specLUTRoughBins = m_impl->specLUTRoughBins;
     camParams.pixelFilterBins   = m_impl->pixelFilterBins;
     camParams.pixelFilterRadius = m_impl->pixelFilterRadius;
+    camParams.hairMeshBaseID    = m_impl->hairMeshBaseID;
 
     // Use the persistent accum buffer — allocates only on first call or size change.
     // clearAccum() should be called when starting a fresh render (new scene/camera).
@@ -640,6 +700,11 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
         // Pixel filter CDF / sign tables (nil → kernel falls back to box-1.0)
         [enc setBuffer:m_impl->pixelFilterCdfBuf   offset:0 atIndex:17];
         [enc setBuffer:m_impl->pixelFilterSignBuf  offset:0 atIndex:18];
+        // Hair buffers (nil-safe — Metal silently ignores nil bindings)
+        if (m_impl->accel->hairTriBuffer())
+            [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->hairTriBuffer() offset:0 atIndex:19];
+        if (m_impl->hairMatBuf)
+            [enc setBuffer:m_impl->hairMatBuf offset:0 atIndex:20];
         [enc setTexture:envTex atIndex:0];
         [enc useResource:tlas usage:MTLResourceUsageRead];
         for (void* blasVoid : m_impl->accel->blasHandles())
@@ -736,6 +801,7 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
     camParams.specLUTRoughBins = m_impl->specLUTRoughBins;
     camParams.pixelFilterBins   = m_impl->pixelFilterBins;
     camParams.pixelFilterRadius = m_impl->pixelFilterRadius;
+    camParams.hairMeshBaseID    = m_impl->hairMeshBaseID;
 
     // Tile-sized accum buffer (gid is local; shader writes gid.y*tileW+gid.x)
     size_t accumBytes   = tileW * tileH * sizeof(GpuAccumPixel);
@@ -806,6 +872,11 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
             [enc setBuffer:m_impl->pixelFilterCdfBuf  offset:0 atIndex:17];
         if (m_impl->pixelFilterSignBuf)
             [enc setBuffer:m_impl->pixelFilterSignBuf offset:0 atIndex:18];
+        // Hair buffers
+        if (m_impl->accel->hairTriBuffer())
+            [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->hairTriBuffer() offset:0 atIndex:19];
+        if (m_impl->hairMatBuf)
+            [enc setBuffer:m_impl->hairMatBuf offset:0 atIndex:20];
 
         // Environment texture (index 0); fallback 1×1 white if no HDRI loaded
         id<MTLTexture> envTex = m_impl->envTexture
