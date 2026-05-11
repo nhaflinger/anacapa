@@ -189,6 +189,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
   --light-angle      2.0                     \
   --filter           mitchell                \
   --filter-width     2.0                     \
+  --hair-tess-steps  4                       \
   --adaptive                                 \
   --adaptive-base-spp 0
 
