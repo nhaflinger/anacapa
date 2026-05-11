@@ -562,7 +562,14 @@ static bool uploadTextureToSlot(const char* path, SlotState& s)
     bool ok = false;
 
     if (hasExtCI(path, ".exr")) {
-        // EXR: load as scene-linear float via OIIO
+        // EXR: load as scene-linear float via OIIO.  Anacapa writes a
+        // multi-channel beauty/denoised/AOV layout (3, 6, 9, or 12
+        // channels in one subimage), so we always read at the native
+        // nchannels and copy the first three (R, G, B) into the
+        // RGBA32F texture with alpha = 1.  Using a 4-float xstride
+        // here used to overflow the destination by (nc - 4) * 4 bytes
+        // per pixel when nc > 4, which corrupted the heap and crashed
+        // the viewer on EXRs containing AOV layers.
         auto inp = OIIO::ImageInput::open(path);
         if (inp) {
             const OIIO::ImageSpec& spec = inp->spec();
@@ -570,22 +577,35 @@ static bool uploadTextureToSlot(const char* path, SlotState& s)
             int h  = spec.height;
             int nc = spec.nchannels;
             std::vector<float> buf(w * h * 4, 0.f);
-            // Read into RGBA float, flipping vertically for OpenGL
             if (nc >= 3) {
-                std::vector<float> row(w * 4);
+                std::vector<float> row(static_cast<size_t>(w) * nc);
+                bool readOk = true;
                 for (int y = 0; y < h; ++y) {
                     int flippedY = h - 1 - y;
-                    inp->read_scanline(y + spec.y, 0, OIIO::TypeDesc::FLOAT, row.data(),
-                                       4 * sizeof(float));
-                    std::memcpy(buf.data() + flippedY * w * 4, row.data(), w * 4 * sizeof(float));
+                    if (!inp->read_scanline(y + spec.y, 0,
+                                            OIIO::TypeDesc::FLOAT,
+                                            row.data())) {
+                        readOk = false;
+                        break;
+                    }
+                    float* dst = buf.data() + static_cast<size_t>(flippedY) * w * 4;
+                    for (int x = 0; x < w; ++x) {
+                        dst[x*4 + 0] = row[x*nc + 0];
+                        dst[x*4 + 1] = row[x*nc + 1];
+                        dst[x*4 + 2] = row[x*nc + 2];
+                        dst[x*4 + 3] = 1.f;
+                    }
+                }
+                if (readOk) {
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0,
+                                  GL_RGBA, GL_FLOAT, buf.data());
+                    s.texW  = w;
+                    s.texH  = h;
+                    s.isHdr = true;
+                    ok = true;
                 }
             }
             inp->close();
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, buf.data());
-            s.texW  = w;
-            s.texH  = h;
-            s.isHdr = true;
-            ok = true;
         }
     } else {
         // PNG / JPEG / HDR — use stb_image
