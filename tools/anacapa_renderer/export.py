@@ -991,6 +991,11 @@ def build_command(executable, usd_path, settings, width, height, output_path,
     if getattr(settings, 'filter_width', 0.0) > 0.0:
         cmd += ["--filter-width", str(settings.filter_width)]
 
+    # Hair tessellation
+    hair_tess = getattr(settings, 'hair_tess_steps', 4)
+    if hair_tess != 4:
+        cmd += ["--hair-tess-steps", str(hair_tess)]
+
     if settings.camera_path:
         cmd += ["--camera", settings.camera_path]
 

@@ -82,6 +82,28 @@ class ANACAPA_PT_film(bpy.types.Panel):
 
 
 # ---------------------------------------------------------------------------
+# Hair
+# ---------------------------------------------------------------------------
+
+class ANACAPA_PT_hair(bpy.types.Panel):
+    bl_label       = "Hair"
+    bl_space_type  = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context     = "render"
+    COMPAT_ENGINES = {'ANACAPA'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.engine == 'ANACAPA'
+
+    def draw(self, context):
+        layout = self.layout
+        s = context.scene.anacapa
+        layout.use_property_split = True
+        layout.prop(s, "hair_tess_steps")
+
+
+# ---------------------------------------------------------------------------
 # Lighting
 # ---------------------------------------------------------------------------
 
@@ -192,6 +214,7 @@ _classes = [
     ANACAPA_PT_sampling,
     ANACAPA_PT_adaptive,
     ANACAPA_PT_film,
+    ANACAPA_PT_hair,
     ANACAPA_PT_lighting,
     ANACAPA_PT_camera,
     ANACAPA_PT_output,

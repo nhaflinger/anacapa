@@ -73,6 +73,14 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
         default=0.0, min=0.0, soft_max=8.0,
     )
 
+    # Hair
+    hair_tess_steps: bpy.props.IntProperty(
+        name="Hair Tess Steps",
+        description="Quads per cubic Bézier hair segment. Higher = smoother "
+                    "ribbons; 1–2 for fast previews, 4 default, 8+ for hero close-ups",
+        default=4, min=1, max=32,
+    )
+
     # Environment
     env_path: bpy.props.StringProperty(
         name="Environment Map",
