@@ -9,44 +9,52 @@
 namespace anacapa {
 
 // ---------------------------------------------------------------------------
-// SegRef — identifies one cubic Bézier segment within the CurvePool.
+// CpuHairTri — baked per-triangle data for pre-tessellated hair ribbons.
+// primID from the hair BVH indexes directly into the CpuHairTri array.
+// Geometry stored in Möller-Trumbore form (v0, e1=v1-v0, e2=v2-v0).
 // ---------------------------------------------------------------------------
-struct SegRef {
-    uint32_t strandIdx;
-    uint32_t segIdx;
+struct CpuHairTri {
+    Vec3f    v0, e1, e2;  // world-space triangle (shutter-open)
+    Vec3f    tangent;     // fiber direction at quad midpoint (unit)
+    Vec3f    ribbonN;     // outward ribbon normal (world-space)
+    Vec3f    color;       // per-strand linear RGB
+    float    h0, h1, h2; // impact parameter at barycentric verts 0/1/2
+    uint32_t matIdx;      // strand.materialIndex → scene.materials[]
 };
 
 // ---------------------------------------------------------------------------
-// CurveNode — a node in the flat SAH-like BVH over curve segments.
+// HairNode — binary SAH BVH node over tessellated hair triangles.
 //
-// Interior node:  left_or_prim  = left child index
-//                 right_or_count = right child index  (high bit clear)
-// Leaf node:      left_or_prim  = first SegRef index in m_segRefs
-//                 right_or_count = prim count | 0x80000000
+// Interior: left_or_prim = left child, right_or_count = right child
+// Leaf:     left_or_prim = first index in m_hairPrimIdx,
+//           right_or_count = count | 0x80000000
 // ---------------------------------------------------------------------------
-struct CurveNode {
+struct HairNode {
     float    bmin[3], bmax[3];
-    uint32_t left_or_prim;    // interior: left child; leaf: first prim idx
-    uint32_t right_or_count;  // interior: right child; leaf: count | 0x80000000
+    uint32_t left_or_prim;
+    uint32_t right_or_count;
 
     bool     isLeaf()    const { return (right_or_count & 0x80000000u) != 0; }
     uint32_t primCount() const { return  right_or_count & 0x7FFFFFFFu; }
 };
 
 // ---------------------------------------------------------------------------
-// CurveBrute — triangle BVH + SAH BVH over all curve segments.
+// CurveBrute — mesh triangle BVH4 + pre-tessellated hair ribbon triangle BVH.
 //
-// Triangle intersection: O(log N) via BVHBackend.
-// Curve intersection:    O(log S) via CurveNode BVH over individual segments,
-//                        then recursive de Casteljau subdivision (depth 6) at
-//                        each leaf.  Replaces the former O(S) brute-force loop.
+// Triangle intersection: O(log N) via BVHBackend (BVH4 + SIMD).
+// Hair intersection:     O(log T) via HairNode binary BVH, then O(1)
+//                        Möller-Trumbore per leaf triangle. No per-ray
+//                        recursive subdivision.
 //
-// Material lookup: si.meshID = strand.materialIndex, si.isCurve = true,
-//                  si.strandID = index into CurvePool.
+// Each cubic Bézier segment is tessellated into tessSteps quads (2*tessSteps
+// triangles) at commit() time. tessSteps=4 matches the GPU default.
 // ---------------------------------------------------------------------------
 class CurveBrute : public IAccelerationStructure {
 public:
-    CurveBrute(const GeometryPool& triPool, const CurvePool& curvePool);
+    static constexpr int kDefaultTessSteps = 4;
+
+    CurveBrute(const GeometryPool& triPool, const CurvePool& curvePool,
+               int tessSteps = kDefaultTessSteps);
 
     void commit() override;
 
@@ -57,11 +65,12 @@ public:
     const CurvePool&    curvePool() const          { return m_curvePool; }
 
 private:
-
-    BVHBackend             m_triBvh;
-    const CurvePool&       m_curvePool;
-    std::vector<CurveNode> m_curveNodes;  // flat BVH over curve segments
-    std::vector<SegRef>    m_segRefs;     // leaf prim array (ordered by build)
+    BVHBackend              m_triBvh;
+    const CurvePool&        m_curvePool;
+    int                     m_tessSteps;
+    std::vector<HairNode>   m_hairNodes;    // binary BVH over hair triangles
+    std::vector<uint32_t>   m_hairPrimIdx;  // leaf prim array → m_hairTris index
+    std::vector<CpuHairTri> m_hairTris;     // baked geometry + shade data
 };
 
 } // namespace anacapa
