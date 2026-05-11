@@ -113,8 +113,9 @@ static __forceinline__ __device__ float3 lerp3(float3 a, float3 b, float t) {
 // ---------------------------------------------------------------------------
 struct TraceResult {
     uint32_t valid;
-    uint32_t meshID;
-    uint32_t primID;
+    uint32_t meshID;       // resolved scene material slot (from triMeshIDs[] for tri hits)
+    uint32_t primID;       // primitive index local to the BLAS instance
+    uint32_t instanceID;   // IAS instance index (0 = mesh GAS, 1 = hair GAS)
     float2   bary;
     float    t;
 };
@@ -122,7 +123,7 @@ struct TraceResult {
 static __forceinline__ __device__
 TraceResult trace(float3 orig, float3 dir, float tMin, float tMax, float rayTime)
 {
-    uint32_t p0 = 0, p1 = 0, p2 = 0, p3 = 0, p4 = 0;
+    uint32_t p0 = 0, p1 = 0, p2 = 0, p3 = 0, p4 = 0, p5 = 0;
     optixTrace(
         params.handle,
         orig, dir,
@@ -133,16 +134,21 @@ TraceResult trace(float3 orig, float3 dir, float tMin, float tMax, float rayTime
         /*SBToffset=*/0u,
         /*SBTstride=*/1u,
         /*missSBT=*/0u,
-        p0, p1, p2, p3, p4);
+        p0, p1, p2, p3, p4, p5);
 
     TraceResult r{};
     r.valid = p0;
     if (p0) {
-        r.primID = p1;
-        r.bary.x = __uint_as_float(p2);
-        r.bary.y = __uint_as_float(p3);
-        r.t      = __uint_as_float(p4);
-        r.meshID = params.triMeshIDs[p1];
+        r.primID     = p1;
+        r.bary.x     = __uint_as_float(p2);
+        r.bary.y     = __uint_as_float(p3);
+        r.t          = __uint_as_float(p4);
+        r.instanceID = p5;
+        // Triangle hits (instance 0) look up the per-triangle meshID;
+        // hair hits use the per-strand material index from GpuHairTri.
+        const bool isHair = (params.cam.hairMeshBaseID != 0xFFFFFFFFu
+                             && p5 >= params.cam.hairMeshBaseID);
+        r.meshID = isHair ? 0u : params.triMeshIDs[p1];
     }
     return r;
 }
@@ -343,6 +349,11 @@ float3 shadowTransmittance(float3 origin, float3 dir, float tMax, float rayTime)
         TraceResult hit = trace(orig, dir, 1e-4f, remaining, rayTime);
         if (!hit.valid) break;
 
+        // Hair is fully opaque to shadow rays (no transmission lobe yet).
+        const bool isHair = (params.cam.hairMeshBaseID != 0xFFFFFFFFu
+                              && hit.instanceID >= params.cam.hairMeshBaseID);
+        if (isHair) return make_float3(0.0f, 0.0f, 0.0f);
+
         uint32_t matIdx = (hit.meshID < params.numMaterials) ? hit.meshID : 0u;
         GpuMaterial mat = params.materials[matIdx];
 
@@ -504,6 +515,278 @@ float3 evalLayeredBSDF(float3 wo, float3 wi, float3 n,
     float3 diff   = disneyDiffuseLobe(wo, wi, n, baseColor, roughness) * diffW;
 
     return diff + spec;
+}
+
+// ===========================================================================
+// Marschner (2003) hair BSDF — three lobes (R / TT / TRT).
+// Port of Shade.metal, which itself follows PBRT-v4's Hair.cpp.
+// ===========================================================================
+static __forceinline__ __device__
+float mh_I0(float x) {
+    float sum = 0.f, x2i = 1.f, denom = 1.f;
+    #pragma unroll
+    for (int i = 0; i < 12; ++i) {
+        if (i > 0) { x2i *= x * x; denom *= float(i) * float(i) * 4.f; }
+        sum += x2i / denom;
+    }
+    return sum;
+}
+static __forceinline__ __device__
+float mh_logI0(float x) {
+    if (x > 12.f)
+        return x + 0.5f * (-logf(2.f * CUDART_PI_F) - logf(x) + 1.f / (8.f * x));
+    return logf(mh_I0(x));
+}
+static __forceinline__ __device__
+float mh_Mp(float cosI, float sinI, float cosR, float sinR, float v) {
+    v = fmaxf(v, 1e-5f);
+    float a = cosI * cosR / v;
+    float b = sinI * sinR / v;
+    if (v <= 0.1f)
+        return expf(mh_logI0(a) - b - 1.f/v + 0.6931472f + logf(0.5f/v));
+    return expf(-b) * mh_I0(a) / (2.f * v * sinhf(1.f/v));
+}
+static __forceinline__ __device__
+float mh_logistic(float x, float s) {
+    float ex = expf(-fabsf(x) / s);
+    return ex / (s * (1.f + ex) * (1.f + ex));
+}
+static __forceinline__ __device__
+float mh_logisticCDF(float x, float s) { return 1.f / (1.f + expf(-x / s)); }
+static __forceinline__ __device__
+float mh_trimmedLogistic(float x, float s) {
+    return mh_logistic(x, s)
+         / (mh_logisticCDF(CUDART_PI_F, s) - mh_logisticCDF(-CUDART_PI_F, s));
+}
+static __forceinline__ __device__
+float mh_sampleTrimmedLogistic(float u, float s) {
+    float a = mh_logisticCDF(-CUDART_PI_F, s);
+    float b = mh_logisticCDF( CUDART_PI_F, s);
+    return fminf(CUDART_PI_F,
+                 fmaxf(-CUDART_PI_F,
+                       -s * logf(1.f / (a + u * (b - a)) - 1.f)));
+}
+static __forceinline__ __device__
+float mh_Phi(int p, float gO, float gT) {
+    return 2.f * float(p) * gT - 2.f * gO + float(p) * CUDART_PI_F;
+}
+static __forceinline__ __device__
+float mh_wrapPhi(float x) {
+    x = fmodf(x, 2.f * CUDART_PI_F);
+    if (x >  CUDART_PI_F) x -= 2.f * CUDART_PI_F;
+    if (x < -CUDART_PI_F) x += 2.f * CUDART_PI_F;
+    return x;
+}
+static __forceinline__ __device__
+float mh_Np(float phi, int p, float s, float gO, float gT) {
+    return mh_trimmedLogistic(mh_wrapPhi(phi - mh_Phi(p, gO, gT)), s);
+}
+static __forceinline__ __device__
+float hairLum(float3 c) { return c.x * 0.2126f + c.y * 0.7152f + c.z * 0.0722f; }
+
+// Lobe attenuation A_p — writes R/TT/TRT into ap[0..2].
+static __forceinline__ __device__
+void mh_Ap(float cosThetaO, float eta, float h, float3 sigma_a, float3 ap[3]) {
+    float sin2O = fmaxf(0.f, 1.f - cosThetaO * cosThetaO);
+    float etaP  = sqrtf(fmaxf(0.f, eta * eta - sin2O)) / fmaxf(cosThetaO, 1e-5f);
+    float sinGT = fminf(1.f-1e-5f, fmaxf(-1.f+1e-5f, h / fmaxf(etaP, 1e-5f)));
+    float cosGT = sqrtf(fmaxf(0.f, 1.f - sinGT * sinGT));
+    float3 T    = make_float3(expf(-sigma_a.x * 2.f * cosGT),
+                              expf(-sigma_a.y * 2.f * cosGT),
+                              expf(-sigma_a.z * 2.f * cosGT));
+    float cosGO = sqrtf(fmaxf(0.f, 1.f - h * h));
+    float fr    = fresnelDielectric(fmaxf(0.f, cosThetaO * cosGO), eta);
+    ap[0] = make_float3(fr, fr, fr);
+    ap[1] = (1.f - fr) * (1.f - fr) * T;
+    ap[2] = ap[1] * T * fr;
+}
+
+struct HairPrecomp { float3 v; float s; float3 alphaR; };
+
+static __forceinline__ __device__
+HairPrecomp makeHairPrecomp(const GpuHairMaterial& hm) {
+    HairPrecomp hp;
+    float bm = fminf(1.f, fmaxf(1e-3f, hm.beta_m));
+    float v0 = 0.726f * bm + 0.812f * bm * bm + 3.7f * powf(bm, 20.f);
+    v0 *= v0;
+    hp.v = make_float3(v0, v0 * 0.25f, v0 * 4.f);
+
+    float bn = fminf(1.f, fmaxf(1e-3f, hm.beta_n));
+    hp.s = 0.626657069f * (0.265f * bn + 1.194f * bn * bn + 5.372f * powf(bn, 22.f));
+
+    float ar = hm.alpha * (CUDART_PI_F / 180.f);
+    hp.alphaR = make_float3(-ar, ar * 0.5f, -ar * 1.5f);
+    return hp;
+}
+
+// Full Marschner BSDF evaluation (R + TT + TRT, no cosine factor).
+static __forceinline__ __device__
+float3 evalMarschnerLobes(
+    float sinThetaO, float cosThetaO,
+    float sinThetaI, float cosThetaI,
+    float phi, float h, float3 sigma_a, float eta,
+    float3 v, float s, float3 alphaR)
+{
+    float cosThetaD = sqrtf(fmaxf(0.f,
+        0.5f * (1.f + cosThetaO * cosThetaI + sinThetaO * sinThetaI)));
+    float denom = fmaxf(1e-5f, cosThetaD * cosThetaD);
+
+    float sin2O  = 1.f - cosThetaO * cosThetaO;
+    float etaP   = sqrtf(fmaxf(0.f, eta * eta - sin2O)) / fmaxf(cosThetaO, 1e-5f);
+    float gammaO = asinf(fminf(1.f-1e-5f, fmaxf(-1.f+1e-5f, h)));
+    float sinGT  = fminf(1.f-1e-5f, fmaxf(-1.f+1e-5f, h / fmaxf(etaP, 1e-5f)));
+    float gammaT = asinf(sinGT);
+
+    float3 ap[3]; mh_Ap(cosThetaO, eta, h, sigma_a, ap);
+
+    float3 fsum = make_float3(0.f, 0.f, 0.f);
+    const float ar[3] = { alphaR.x, alphaR.y, alphaR.z };
+    const float vv[3] = { v.x, v.y, v.z };
+    #pragma unroll
+    for (int p = 0; p < 3; ++p) {
+        float sinOs = sinThetaO * cosf(2.f * ar[p])
+                    + cosThetaO * sinf(2.f * ar[p]);
+        float cosOs = sqrtf(fmaxf(0.f, 1.f - sinOs * sinOs));
+        float m_p = mh_Mp(cosThetaI, sinThetaI, cosOs, sinOs, vv[p]);
+        float n_p = mh_Np(phi, p, s, gammaO, gammaT);
+        fsum = fsum + ap[p] * (m_p * n_p);
+    }
+    return fsum * (1.0f / denom);
+}
+
+// Marschner PDF for the BSDF-sampling MIS weight.
+static __forceinline__ __device__
+float evalMarschnerPdf(
+    float sinThetaO, float cosThetaO,
+    float sinThetaI, float cosThetaI,
+    float phi, float h, float3 sigma_a, float eta,
+    float3 v, float s, float3 alphaR)
+{
+    float sin2O  = 1.f - cosThetaO * cosThetaO;
+    float etaP   = sqrtf(fmaxf(0.f, eta * eta - sin2O)) / fmaxf(cosThetaO, 1e-5f);
+    float gammaO = asinf(fminf(1.f-1e-5f, fmaxf(-1.f+1e-5f, h)));
+    float sinGT  = fminf(1.f-1e-5f, fmaxf(-1.f+1e-5f, h / fmaxf(etaP, 1e-5f)));
+    float gammaT = asinf(sinGT);
+
+    float3 ap[3]; mh_Ap(cosThetaO, eta, h, sigma_a, ap);
+    float w0 = hairLum(ap[0]), w1 = hairLum(ap[1]), w2 = hairLum(ap[2]);
+    float wT = w0 + w1 + w2;
+    if (wT < 1e-8f) return 0.f;
+
+    const float ar[3] = { alphaR.x, alphaR.y, alphaR.z };
+    const float vv[3] = { v.x, v.y, v.z };
+    const float wp[3] = { w0, w1, w2 };
+
+    float pdf = 0.f;
+    #pragma unroll
+    for (int p = 0; p < 3; ++p) {
+        float sinOs = sinThetaO * cosf(2.f * ar[p])
+                    + cosThetaO * sinf(2.f * ar[p]);
+        float cosOs = sqrtf(fmaxf(0.f, 1.f - sinOs * sinOs));
+        pdf += (wp[p] / wT)
+             * mh_Mp(cosThetaI, sinThetaI, cosOs, sinOs, vv[p]) * cosThetaI
+             * mh_Np(phi, p, s, gammaO, gammaT);
+    }
+    return fmaxf(0.f, pdf);
+}
+
+// ---------------------------------------------------------------------------
+// Hair NEE — Marschner × Li / pdfL from a single sampled light direction.
+// ---------------------------------------------------------------------------
+static __forceinline__ __device__
+float3 sampleDirectHair(float3 hitPos, float3 wo, float3 hairT, float h,
+                         float3 sigma_a, float eta, float3 v, float s, float3 alphaR,
+                         float3 ribbonN, float rayTime, uint32_t& rng)
+{
+    if (params.numLights == 0) return make_float3(0.f, 0.f, 0.f);
+
+    uint32_t lightIdx = uint32_t(rand01(rng) * float(params.numLights)) % params.numLights;
+    const GpuLight& light = params.lights[lightIdx];
+    float lightPick = 1.f / float(params.numLights);
+
+    float3 Li = make_float3(0.f, 0.f, 0.f), wi = make_float3(0.f, 0.f, 0.f);
+    float tMax = 0.f, pdfL = 0.f;
+
+    if (light.type == kLightRect) {
+        float2 u = rand2(rng);
+        float3 lpos = make3(light.position);
+        float3 luH  = make3(light.uHalf);
+        float3 lvH  = make3(light.vHalf);
+        float3 sp   = lpos + luH * (2.f * u.x - 1.f) + lvH * (2.f * u.y - 1.f);
+        float3 toL  = sp - hitPos;
+        float  dist = sqrtf(dot(toL, toL));
+        wi   = toL * (1.f / dist);
+        tMax = dist * 0.9999f;
+        float3 lN = make3(light.normal);
+        float  cosL = dot(-1.f * wi, lN);
+        if (cosL <= 0.f) return make_float3(0.f, 0.f, 0.f);
+        pdfL = (dist * dist) / (cosL * light.area) * lightPick;
+        Li   = make3(light.Le);
+    } else if (light.type == kLightDirectional) {
+        float3 baseDir = make3(light.normal);
+        float cc = light.cosCone;
+        if (cc < 0.9999f) {
+            float2 uc = rand2(rng);
+            float cosT = 1.f - uc.x * (1.f - cc);
+            float sinT = sqrtf(fmaxf(0.f, 1.f - cosT * cosT));
+            float phi  = 2.f * CUDART_PI_F * uc.y;
+            float3 t, bt;
+            buildONB(baseDir, t, bt);
+            wi = normalize(t * (sinT * cosf(phi))
+                         + bt * (sinT * sinf(phi))
+                         + baseDir * cosT);
+        } else {
+            wi = baseDir;
+        }
+        tMax = 1e9f;
+        pdfL = lightPick;
+        Li   = make3(light.Le);
+    } else if (light.type == kLightDome) {
+        tMax = 1e9f;
+        if (params.cam.envMapWidth > 0 && params.envMarginalCdf != nullptr
+                && params.envConditionalCdf != nullptr) {
+            float ep = 0.f;
+            wi = sampleEnvDirection(rand2(rng),
+                                    params.envMarginalCdf,
+                                    params.envConditionalCdf, ep);
+            pdfL = ep * lightPick;
+        } else {
+            wi   = cosineSampleHemisphere(rand2(rng), ribbonN);
+            float cw = fmaxf(1e-7f, dot(ribbonN, wi));
+            pdfL = (cw / CUDART_PI_F) * lightPick;
+        }
+        Li = (params.envTexture != 0) ? evalEnvmap(wi) : make3(params.cam.envLe);
+    } else {
+        return make_float3(0.f, 0.f, 0.f);
+    }
+    if (pdfL <= 0.f) return make_float3(0.f, 0.f, 0.f);
+
+    float3 shadowO = hitPos + ribbonN * 1e-4f;
+    float3 Tr = shadowTransmittance(shadowO, wi, tMax, rayTime);
+    if (compmax(Tr) <= 0.f) return make_float3(0.f, 0.f, 0.f);
+
+    // Hair BSDF evaluation
+    float sinThetaO = dot(wo, hairT);
+    float cosThetaO = sqrtf(fmaxf(0.f, 1.f - sinThetaO * sinThetaO));
+    float sinThetaI = dot(wi, hairT);
+    float cosThetaI = sqrtf(fmaxf(0.f, 1.f - sinThetaI * sinThetaI));
+
+    float3 woPerp = wo - hairT * sinThetaO;
+    float3 wiPerp = wi - hairT * sinThetaI;
+    float  lenO = sqrtf(dot(woPerp, woPerp));
+    float  lenI = sqrtf(dot(wiPerp, wiPerp));
+    float  phi  = 0.f;
+    if (lenO > 1e-5f && lenI > 1e-5f) {
+        woPerp = woPerp * (1.f / lenO);
+        wiPerp = wiPerp * (1.f / lenI);
+        float c  = fminf(1.f, fmaxf(-1.f, dot(woPerp, wiPerp)));
+        float sp = dot(cross(wiPerp, woPerp), hairT);
+        phi = atan2f(sp, c);
+    }
+
+    float3 f = evalMarschnerLobes(sinThetaO, cosThetaO, sinThetaI, cosThetaI,
+                                   phi, h, sigma_a, eta, v, s, alphaR);
+    return f * cosThetaI * Li * Tr * (1.f / pdfL);
 }
 
 // ---------------------------------------------------------------------------
@@ -767,6 +1050,146 @@ extern "C" __global__ void __raygen__rg()
 
             float3 hitPos = rayOrig + rayDir * hit.t;
 
+            // ----------------------------------------------------------------
+            // Hair hit — handled before the standard material lookup because
+            // hair uses its own per-primitive metadata buffer and Marschner
+            // BSDF.  params.normals / params.indices index the mesh GAS only.
+            // ----------------------------------------------------------------
+            const bool isHair = (params.cam.hairMeshBaseID != 0xFFFFFFFFu
+                                  && hit.instanceID >= params.cam.hairMeshBaseID);
+            if (isHair && params.hairTris != nullptr && params.hairMats != nullptr) {
+                GpuHairTri ht = params.hairTris[hit.primID];
+                float bw = 1.f - hit.bary.x - hit.bary.y;
+                float h  = fminf(1.f-1e-5f, fmaxf(-1.f+1e-5f,
+                    ht.h0 * bw + ht.h1 * hit.bary.x + ht.h2 * hit.bary.y));
+
+                // Per-strand sigma_a: Beer-Lambert from color, or material default.
+                float3 sc = make3(ht.color);
+                float3 sigma_a;
+                if (sc.x > 0.98f && sc.y > 0.98f && sc.z > 0.98f) {
+                    sigma_a = make3(params.hairMats[ht.matIdx].sigma_a);
+                } else {
+                    sigma_a = make_float3(-logf(fmaxf(0.001f, sc.x)),
+                                          -logf(fmaxf(0.001f, sc.y)),
+                                          -logf(fmaxf(0.001f, sc.z)));
+                }
+
+                HairPrecomp hp = makeHairPrecomp(params.hairMats[ht.matIdx]);
+                float3 hairT   = make3(ht.tangent);
+
+                // Ribbon normal — matches the tessellator's convention.
+                float3 refUp = (fabsf(hairT.y) > 0.9f) ? make_float3(1.f, 0.f, 0.f)
+                                                       : make_float3(0.f, 1.f, 0.f);
+                float3 widthDir = normalize(cross(hairT, refUp));
+                float3 ribbonN  = normalize(cross(widthDir, hairT));
+                if (dot(ribbonN, -1.0f * rayDir) < 0.f) ribbonN = -1.0f * ribbonN;
+
+                float3 wo = -1.0f * rayDir;
+
+                if (params.numLights > 0) {
+                    L += throughput * sampleDirectHair(
+                        hitPos, wo, hairT, h, sigma_a,
+                        params.hairMats[ht.matIdx].eta,
+                        hp.v, hp.s, hp.alphaR, ribbonN, rayTime, rng);
+                }
+
+                // Russian roulette
+                if (bounce >= 3) {
+                    float q = fmaxf(0.05f, 1.0f - compmax(throughput));
+                    if (rand01(rng) < q) break;
+                    throughput *= (1.0f / (1.0f - q));
+                }
+
+                // Sample next direction — lobe pick via A_p luminance weights,
+                // longitudinal angle by Box-Muller around theta_o + alphaR,
+                // azimuthal angle by the trimmed-logistic CDF inverse.
+                float sinThetaO = dot(wo, hairT);
+                float cosThetaO = sqrtf(fmaxf(0.f, 1.f - sinThetaO * sinThetaO));
+
+                float3 ap[3];
+                mh_Ap(cosThetaO, params.hairMats[ht.matIdx].eta, h, sigma_a, ap);
+                float w0 = hairLum(ap[0]), w1 = hairLum(ap[1]), w2 = hairLum(ap[2]);
+                float wT = w0 + w1 + w2;
+                if (wT < 1e-8f) break;
+
+                float uComp = rand01(rng);
+                int lobe = 2;
+                float uLobe;
+                float cdf0 = w0 / wT, cdf1 = (w0 + w1) / wT;
+                if (uComp < cdf0)      { lobe = 0; uLobe = uComp / fmaxf(cdf0, 1e-7f); }
+                else if (uComp < cdf1) { lobe = 1; uLobe = (uComp - cdf0) / fmaxf(cdf1 - cdf0, 1e-7f); }
+                else                   {            uLobe = (uComp - cdf1) / fmaxf(1.f - cdf1, 1e-7f); }
+
+                float thetaO = asinf(fminf(1.f-1e-5f, fmaxf(-1.f+1e-5f, sinThetaO)));
+                float u1 = fmaxf(rand01(rng), 1e-6f);
+                float u2 = rand01(rng);
+                float z  = sqrtf(-2.f * logf(u1)) * cosf(2.f * CUDART_PI_F * u2);
+                const float arArr[3] = { hp.alphaR.x, hp.alphaR.y, hp.alphaR.z };
+                const float vArr[3]  = { hp.v.x, hp.v.y, hp.v.z };
+                float thetaI = fminf(CUDART_PI_F * 0.5f,
+                                      fmaxf(-CUDART_PI_F * 0.5f,
+                                            thetaO + arArr[lobe]
+                                                   + z * sqrtf(vArr[lobe])));
+                float sinThetaI_s = sinf(thetaI), cosThetaI_s = cosf(thetaI);
+
+                float etaH = params.hairMats[ht.matIdx].eta;
+                float sin2O  = 1.f - cosThetaO * cosThetaO;
+                float etaP   = sqrtf(fmaxf(0.f, etaH * etaH - sin2O))
+                             / fmaxf(cosThetaO, 1e-5f);
+                float gammaO = asinf(fminf(1.f-1e-5f, fmaxf(-1.f+1e-5f, h)));
+                float sinGT  = fminf(1.f-1e-5f, fmaxf(-1.f+1e-5f, h / fmaxf(etaP, 1e-5f)));
+                float gammaT = asinf(sinGT);
+                float phi_s  = mh_sampleTrimmedLogistic(uLobe, hp.s)
+                             + mh_Phi(lobe, gammaO, gammaT);
+
+                float3 woPerp = wo - hairT * sinThetaO;
+                float  lenO   = sqrtf(dot(woPerp, woPerp));
+                if (lenO < 1e-5f) {
+                    float3 arb = (fabsf(hairT.x) > 0.9f)
+                               ? make_float3(0.f, 1.f, 0.f)
+                               : make_float3(1.f, 0.f, 0.f);
+                    woPerp = normalize(cross(hairT, arb));
+                } else {
+                    woPerp = woPerp * (1.f / lenO);
+                }
+                float3 ctPerp = cross(hairT, woPerp);
+
+                float3 wi = normalize(hairT * sinThetaI_s
+                                    + woPerp * (cosThetaI_s * cosf(phi_s))
+                                    + ctPerp * (cosThetaI_s * sinf(phi_s)));
+
+                float sinThetaI_a = dot(wi, hairT);
+                float cosThetaI_a = sqrtf(fmaxf(0.f, 1.f - sinThetaI_a * sinThetaI_a));
+                float3 wiPerp = wi - hairT * sinThetaI_a;
+                float  lenI   = sqrtf(dot(wiPerp, wiPerp));
+                float  phiA   = 0.f;
+                if (lenI > 1e-5f && lenO > 1e-5f) {
+                    wiPerp = wiPerp * (1.f / lenI);
+                    float c  = fminf(1.f, fmaxf(-1.f, dot(woPerp, wiPerp)));
+                    float sp = dot(cross(wiPerp, woPerp), hairT);
+                    phiA = atan2f(sp, c);
+                }
+
+                float3 bsdfF = evalMarschnerLobes(sinThetaO, cosThetaO,
+                                                   sinThetaI_a, cosThetaI_a,
+                                                   phiA, h, sigma_a, etaH,
+                                                   hp.v, hp.s, hp.alphaR);
+                float bsdfPdf = evalMarschnerPdf(sinThetaO, cosThetaO,
+                                                  sinThetaI_a, cosThetaI_a,
+                                                  phiA, h, sigma_a, etaH,
+                                                  hp.v, hp.s, hp.alphaR);
+                if (bsdfPdf < 1e-8f) break;
+
+                throughput *= bsdfF * cosThetaI_a * (1.f / bsdfPdf);
+
+                rayOrig      = hitPos + ribbonN * 1e-4f;
+                rayDir       = wi;
+                prevBsdfPdf  = bsdfPdf;
+                prevN        = ribbonN;
+                prevWasDelta = false;
+                continue;  // skip mesh material code
+            }
+
             float3 geomN = interpolateNormal(hit.primID, hit.bary,
                                              params.normals, params.indices);
             float3 n = geomN;
@@ -941,6 +1364,7 @@ extern "C" __global__ void __raygen__rg()
 extern "C" __global__ void __closesthit__ch()
 {
     const uint32_t prim  = optixGetPrimitiveIndex();
+    const uint32_t inst  = optixGetInstanceId();
     const float2   bary  = optixGetTriangleBarycentrics();
     const float    tHit  = optixGetRayTmax();
     optixSetPayload_0(1u);
@@ -948,6 +1372,7 @@ extern "C" __global__ void __closesthit__ch()
     optixSetPayload_2(__float_as_uint(bary.x));
     optixSetPayload_3(__float_as_uint(bary.y));
     optixSetPayload_4(__float_as_uint(tHit));
+    optixSetPayload_5(inst);
 }
 
 extern "C" __global__ void __miss__ms()

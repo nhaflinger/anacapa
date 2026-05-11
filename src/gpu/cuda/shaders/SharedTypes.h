@@ -56,6 +56,7 @@ enum GpuMaterialType : uint32_t {
     kMatGGX         = 1,
     kMatEmissive    = 2,
     kMatGlass       = 3,
+    kMatHair        = 4,   // Marschner — handled via hairTris/hairMats buffers
 };
 
 struct GpuMaterial {
@@ -71,6 +72,36 @@ struct GpuMaterial {
     // for UsdPreviewSurface, 1.0 for explicit metals, 0 for non-glossy.
     // Used by the energy-conserving spec/diff balance in the GPU shader.
     float      specular;
+};
+
+// ---------------------------------------------------------------------------
+// GpuHairMaterial — Marschner BSDF parameters for one hair material slot.
+// Indexed by GpuHairTri::matIdx.  scene.materials[] size determines the
+// buffer length; non-hair slots are zero-initialised and never accessed.
+// ---------------------------------------------------------------------------
+struct GpuHairMaterial {
+    GpuFloat3 sigma_a;  // default absorption when strand color is the (1,1,1) sentinel
+    float     eta;      // IOR of cortex (typically 1.55)
+    float     beta_m;   // longitudinal roughness ∈ [0,1]
+    float     beta_n;   // azimuthal roughness    ∈ [0,1]
+    float     alpha;    // cuticle tilt in degrees (typically 2–4)
+    float     _pad;
+};
+
+// ---------------------------------------------------------------------------
+// GpuHairTri — per-triangle metadata for tessellated hair ribbons.
+// The GPU hair geometry is one GAS; primID indexes directly into this buffer.
+// h values encode the impact parameter h ∈ [-1, 1] at each barycentric vertex
+// so the shader can interpolate: h = h0*(1-u-v) + h1*u + h2*v.
+// ---------------------------------------------------------------------------
+struct GpuHairTri {
+    GpuFloat3 tangent;  // fiber direction (world-space, unit)
+    uint32_t  matIdx;   // index into hairMats[] buffer
+    GpuFloat3 color;    // per-strand linear RGB; (1,1,1) = use GpuHairMaterial.sigma_a default
+    float     h0;       // impact parameter at barycentric vertex 0 ∈ [-1, 1]
+    float     h1;       // impact parameter at barycentric vertex 1
+    float     h2;       // impact parameter at barycentric vertex 2
+    float     _pad;
 };
 
 // ---------------------------------------------------------------------------
@@ -130,6 +161,10 @@ struct GpuCameraParams {
     uint32_t  envMapWidth;    // CDF table width  (0 = no HDRI importance sampling)
     uint32_t  envMapHeight;   // CDF table height
     float     fireflyClamp;   // max luminance per path sample; 0 = disabled
+    // Hair: OptiX IAS instance ID where the tessellated hair geometry lives.
+    // 0xFFFFFFFF when the scene contains no hair.  In raygen this is compared
+    // against optixGetInstanceId() to route hits into the Marschner shader.
+    uint32_t  hairMeshBaseID;
 };
 
 // ---------------------------------------------------------------------------

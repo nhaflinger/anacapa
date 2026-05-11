@@ -48,10 +48,24 @@ struct CudaAccelStructure::Impl {
     CudaBuffer<uint32_t>  meshVertexOffsets;
     CudaBuffer<uint32_t>  meshIndexOffsets;
 
+    // Hair ribbon geometry (separate from triangle buffers).
+    CudaByteBuffer            hairPosOpenBuf;
+    CudaByteBuffer            hairPosCloseBuf;
+    CudaBuffer<uint32_t>      hairIndexBuf;
+    CudaBuffer<GpuHairTri>    hairTriBuf;
+    uint32_t                  numHairTris    = 0;
+    uint32_t                  hairMeshBase   = 0xFFFFFFFFu;  // IAS instance ID; sentinel = no hair
+    bool                      hairHasMotion  = false;
+
 #ifdef ANACAPA_ENABLE_OPTIX
-    // OptiX-built GAS storage.  Output buffer must outlive the handle.
-    CudaByteBuffer         asBuffer;
-    OptixTraversableHandle gasHandle = 0;
+    // OptiX-built AS storage.  Output buffers must outlive the handles.
+    CudaByteBuffer         meshAsBuffer;
+    OptixTraversableHandle meshGasHandle = 0;
+    CudaByteBuffer         hairAsBuffer;
+    OptixTraversableHandle hairGasHandle = 0;
+    CudaByteBuffer         iasBuffer;
+    OptixTraversableHandle iasHandle     = 0;
+    CudaByteBuffer         iasInstanceBuf;
 #endif
 
     uint32_t totalVertices  = 0;
@@ -61,10 +75,205 @@ struct CudaAccelStructure::Impl {
     bool     valid          = false;
 };
 
+#ifdef ANACAPA_ENABLE_OPTIX
+// ---------------------------------------------------------------------------
+// Hair tessellation helpers — mirror MetalAccelStructure.mm:
+//   per cubic Bézier segment, sample (kHairTessSteps+1) ribbon cross-sections
+//   and stitch them into kHairTessSteps quads (= 2*kHairTessSteps triangles).
+// ---------------------------------------------------------------------------
+static constexpr int kHairTessSteps = 4;
+
+struct PackedFloat3 { float x, y, z; };
+
+static Vec3f bezierPoint(const Vec3f* p, float t) {
+    float u = 1.f - t;
+    return p[0]*(u*u*u) + p[1]*(3.f*u*u*t) + p[2]*(3.f*u*t*t) + p[3]*(t*t*t);
+}
+
+static Vec3f bezierTangent(const Vec3f* p, float t) {
+    float u = 1.f - t;
+    Vec3f d = (p[1]-p[0])*(3.f*u*u) + (p[2]-p[1])*(6.f*u*t) + (p[3]-p[2])*(3.f*t*t);
+    float len = std::sqrt(d.x*d.x + d.y*d.y + d.z*d.z);
+    if (len < 1e-8f) return {0.f, 1.f, 0.f};
+    return {d.x/len, d.y/len, d.z/len};
+}
+
+static Vec3f crossVec(Vec3f a, Vec3f b) {
+    return {a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x};
+}
+
+static Vec3f normalizeVec(Vec3f v) {
+    float len = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+    if (len < 1e-8f) return {0.f, 1.f, 0.f};
+    return {v.x/len, v.y/len, v.z/len};
+}
+
+static void tessellateSegment(
+    const Vec3f* cvOpen,
+    const Vec3f* cvClose,        // nullptr = same as cvOpen
+    float        strandV0,
+    float        strandV1,
+    float        wRoot,           // diameter at strandV0
+    float        wTip,            // diameter at strandV1
+    Vec3f        strandColor,
+    uint32_t     matIdx,
+    uint32_t     vBase,
+    std::vector<PackedFloat3>& posOpen,
+    std::vector<PackedFloat3>& posClose,
+    std::vector<uint32_t>&     indices,
+    std::vector<GpuHairTri>&   hairTris)
+{
+    for (int k = 0; k <= kHairTessSteps; ++k) {
+        float t = float(k) / float(kHairTessSteps);
+        float w = (wRoot * (1.f - t) + wTip * t) * 0.5f;  // half-width (radius)
+        if (w < 5e-5f) w = 5e-5f;                          // robust intersection
+
+        Vec3f posO = bezierPoint(cvOpen, t);
+        Vec3f posC = cvClose ? bezierPoint(cvClose, t) : posO;
+        Vec3f tang = bezierTangent(cvOpen, t);
+
+        Vec3f refUp = (std::abs(tang.y) > 0.9f) ? Vec3f{1.f,0.f,0.f}
+                                                : Vec3f{0.f,1.f,0.f};
+        Vec3f perp  = normalizeVec(crossVec(tang, refUp));
+
+        Vec3f lO = {posO.x - perp.x*w, posO.y - perp.y*w, posO.z - perp.z*w};
+        Vec3f rO = {posO.x + perp.x*w, posO.y + perp.y*w, posO.z + perp.z*w};
+        Vec3f lC = {posC.x - perp.x*w, posC.y - perp.y*w, posC.z - perp.z*w};
+        Vec3f rC = {posC.x + perp.x*w, posC.y + perp.y*w, posC.z + perp.z*w};
+
+        posOpen.push_back ({lO.x, lO.y, lO.z});
+        posOpen.push_back ({rO.x, rO.y, rO.z});
+        posClose.push_back({lC.x, lC.y, lC.z});
+        posClose.push_back({rC.x, rC.y, rC.z});
+    }
+
+    for (int k = 0; k < kHairTessSteps; ++k) {
+        uint32_t l0 = vBase + uint32_t(2*k + 0);
+        uint32_t r0 = vBase + uint32_t(2*k + 1);
+        uint32_t l1 = vBase + uint32_t(2*k + 2);
+        uint32_t r1 = vBase + uint32_t(2*k + 3);
+
+        float tMid = (float(k) + 0.5f) / float(kHairTessSteps);
+        Vec3f tang = bezierTangent(cvOpen, tMid);
+
+        GpuHairTri ht{};
+        ht.tangent = {tang.x, tang.y, tang.z};
+        ht.matIdx  = matIdx;
+        ht.color   = {strandColor.x, strandColor.y, strandColor.z};
+
+        // Tri 0: (l0, r0, r1) → h = (-1, +1, +1)
+        indices.push_back(l0); indices.push_back(r0); indices.push_back(r1);
+        ht.h0 = -1.f; ht.h1 = +1.f; ht.h2 = +1.f;
+        hairTris.push_back(ht);
+
+        // Tri 1: (l0, r1, l1) → h = (-1, +1, -1)
+        indices.push_back(l0); indices.push_back(r1); indices.push_back(l1);
+        ht.h0 = -1.f; ht.h1 = +1.f; ht.h2 = -1.f;
+        hairTris.push_back(ht);
+    }
+}
+
+// Build one triangle GAS (motion-aware when both vbClose and vbOpen differ).
+// Returns the (handle, output buffer) pair via out-arguments; the buffer
+// must outlive the handle.  Returns true on success.
+static bool buildTriangleGAS(
+    OptixDeviceContext optixCtx,
+    CUstream           stream,
+    CUdeviceptr        vbOpen,
+    CUdeviceptr        vbClose,
+    bool               motion,
+    uint32_t           numVerts,
+    CUdeviceptr        ibDev,
+    uint32_t           numTris,
+    CudaByteBuffer&    outBuf,
+    OptixTraversableHandle& outHandle)
+{
+    CUdeviceptr vbArr[2] = { vbOpen, vbClose };
+
+    OptixBuildInput buildInput{};
+    buildInput.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+    auto& tri = buildInput.triangleArray;
+    tri.vertexFormat        = OPTIX_VERTEX_FORMAT_FLOAT3;
+    tri.vertexStrideInBytes = sizeof(float) * 3;
+    tri.numVertices         = numVerts;
+    tri.vertexBuffers       = vbArr;
+    tri.indexFormat         = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
+    tri.indexStrideInBytes  = sizeof(uint32_t) * 3;
+    tri.numIndexTriplets    = numTris;
+    tri.indexBuffer         = ibDev;
+
+    const uint32_t geomFlags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+    tri.flags         = geomFlags;
+    tri.numSbtRecords = 1;
+
+    OptixAccelBuildOptions accelOpts{};
+    accelOpts.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE
+                         | OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
+    accelOpts.operation  = OPTIX_BUILD_OPERATION_BUILD;
+    if (motion) {
+        accelOpts.motionOptions.numKeys   = 2;
+        accelOpts.motionOptions.timeBegin = 0.0f;
+        accelOpts.motionOptions.timeEnd   = 1.0f;
+        accelOpts.motionOptions.flags     = OPTIX_MOTION_FLAG_NONE;
+    } else {
+        accelOpts.motionOptions.numKeys = 1;
+    }
+
+    OptixAccelBufferSizes sizes{};
+    OPTIX_CHECK(optixAccelComputeMemoryUsage(
+        optixCtx, &accelOpts, &buildInput, 1, &sizes));
+
+    CudaByteBuffer tempBuf(sizes.tempSizeInBytes);
+    CudaByteBuffer uncompactedBuf(sizes.outputSizeInBytes);
+    CudaBuffer<uint64_t> compactedSizeBuf(1);
+    // Fail cleanly if any of the build allocations failed (e.g. low-VRAM
+    // GPU + a giant hair tessellation).  Callers can then skip hair and
+    // continue with the mesh-only path instead of corrupting OptiX state.
+    if (!tempBuf.isValid() || !uncompactedBuf.isValid() || !compactedSizeBuf.isValid()) {
+        fprintf(stderr, "[error] CudaAccelStructure: GAS build OOM "
+                        "(temp=%zu KiB, output=%zu KiB)\n",
+                sizes.tempSizeInBytes / 1024,
+                sizes.outputSizeInBytes / 1024);
+        outHandle = 0;
+        return false;
+    }
+
+    OptixAccelEmitDesc emit{};
+    emit.type   = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
+    emit.result = static_cast<CUdeviceptr>(compactedSizeBuf.devPtr());
+
+    OptixTraversableHandle hUncompacted = 0;
+    OPTIX_CHECK(optixAccelBuild(
+        optixCtx, stream, &accelOpts, &buildInput, 1,
+        static_cast<CUdeviceptr>(tempBuf.devPtr()), sizes.tempSizeInBytes,
+        static_cast<CUdeviceptr>(uncompactedBuf.devPtr()), sizes.outputSizeInBytes,
+        &hUncompacted, &emit, 1));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    std::vector<uint64_t> hostCompactedSize(1);
+    compactedSizeBuf.download(hostCompactedSize);
+    size_t compactedSize = static_cast<size_t>(hostCompactedSize[0]);
+
+    if (compactedSize > 0 && compactedSize < sizes.outputSizeInBytes) {
+        outBuf = CudaByteBuffer(compactedSize);
+        OPTIX_CHECK(optixAccelCompact(
+            optixCtx, stream, hUncompacted,
+            static_cast<CUdeviceptr>(outBuf.devPtr()), compactedSize,
+            &outHandle));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+    } else {
+        outBuf    = std::move(uncompactedBuf);
+        outHandle = hUncompacted;
+    }
+    return true;
+}
+#endif  // ANACAPA_ENABLE_OPTIX
+
 // ---------------------------------------------------------------------------
 // Constructor
 // ---------------------------------------------------------------------------
-CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& pool)
+CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& pool,
+                                        const CurvePool* curvePool)
     : m_impl(std::make_unique<Impl>())
 {
     uint32_t numMeshes = static_cast<uint32_t>(pool.numMeshes());
@@ -174,96 +383,188 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
     m_impl->meshIndexOffsets.upload(indexOffsets);
 
 #ifdef ANACAPA_ENABLE_OPTIX
-    // -----------------------------------------------------------------------
-    // OptiX GAS — single triangle GAS over all meshes' world-space vertices.
-    // When any mesh has motion keys, build with two-keyframe motion options
-    // (vertexBuffers[0] = open, vertexBuffers[1] = close); otherwise build
-    // a static GAS with a single vertex buffer.  Per-mesh material dispatch
-    // happens via the existing triMeshIDs buffer (Step 4 will replace this
-    // with SBT records when the kernel is split).
-    // -----------------------------------------------------------------------
     OptixDeviceContext optixCtx =
         static_cast<OptixDeviceContext>(ctx.optixContext());
     if (optixCtx) {
         CUstream stream = static_cast<CUstream>(ctx.cuStream());
 
-        const CUdeviceptr vbOpen  = static_cast<CUdeviceptr>(m_impl->posBuffer.devPtr());
-        const CUdeviceptr vbClose = static_cast<CUdeviceptr>(m_impl->posBufferClose.devPtr());
-        const CUdeviceptr ibDev   = static_cast<CUdeviceptr>(m_impl->indices.devPtr());
+        // -------------------------------------------------------------------
+        // 1) Triangle (mesh) GAS — one GAS over all scene triangles.
+        // Per-mesh material dispatch happens via triMeshIDs in the shader.
+        // -------------------------------------------------------------------
+        buildTriangleGAS(optixCtx, stream,
+                          static_cast<CUdeviceptr>(m_impl->posBuffer.devPtr()),
+                          static_cast<CUdeviceptr>(m_impl->posBufferClose.devPtr()),
+                          m_impl->hasMotion,
+                          totalVerts,
+                          static_cast<CUdeviceptr>(m_impl->indices.devPtr()),
+                          totalTris,
+                          m_impl->meshAsBuffer, m_impl->meshGasHandle);
 
-        CUdeviceptr vbArr[2] = { vbOpen, vbClose };
-
-        OptixBuildInput buildInput{};
-        buildInput.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
-        auto& tri = buildInput.triangleArray;
-        tri.vertexFormat        = OPTIX_VERTEX_FORMAT_FLOAT3;
-        tri.vertexStrideInBytes = sizeof(float) * 3;
-        tri.numVertices         = totalVerts;
-        tri.vertexBuffers       = vbArr;  // first numKeys entries used
-        tri.indexFormat         = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
-        tri.indexStrideInBytes  = sizeof(uint32_t) * 3;
-        tri.numIndexTriplets    = totalTris;
-        tri.indexBuffer         = ibDev;
-
-        const uint32_t geomFlags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
-        tri.flags         = geomFlags;
-        tri.numSbtRecords = 1;
-
-        OptixAccelBuildOptions accelOpts{};
-        accelOpts.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE
-                             | OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
-        accelOpts.operation  = OPTIX_BUILD_OPERATION_BUILD;
-        if (m_impl->hasMotion) {
-            accelOpts.motionOptions.numKeys   = 2;
-            accelOpts.motionOptions.timeBegin = 0.0f;
-            accelOpts.motionOptions.timeEnd   = 1.0f;
-            accelOpts.motionOptions.flags     = OPTIX_MOTION_FLAG_NONE;
-        } else {
-            accelOpts.motionOptions.numKeys = 1;
-        }
-
-        OptixAccelBufferSizes sizes{};
-        OPTIX_CHECK(optixAccelComputeMemoryUsage(
-            optixCtx, &accelOpts, &buildInput, /*numBuildInputs=*/1, &sizes));
-
-        // Temp buffer (freed after build) and a property slot to query the
-        // compacted size.
-        CudaByteBuffer tempBuf(sizes.tempSizeInBytes);
-        CudaByteBuffer outBufUncompacted(sizes.outputSizeInBytes);
-        CudaBuffer<uint64_t> compactedSizeBuf(1);
-
-        OptixAccelEmitDesc emit{};
-        emit.type   = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
-        emit.result = static_cast<CUdeviceptr>(compactedSizeBuf.devPtr());
-
-        OptixTraversableHandle handleUncompacted = 0;
-        OPTIX_CHECK(optixAccelBuild(
-            optixCtx, stream, &accelOpts, &buildInput, 1,
-            static_cast<CUdeviceptr>(tempBuf.devPtr()), sizes.tempSizeInBytes,
-            static_cast<CUdeviceptr>(outBufUncompacted.devPtr()), sizes.outputSizeInBytes,
-            &handleUncompacted, &emit, 1));
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-
-        std::vector<uint64_t> compactedSizeHost(1);
-        compactedSizeBuf.download(compactedSizeHost);
-        const size_t compactedSize = static_cast<size_t>(compactedSizeHost[0]);
-
-        if (compactedSize > 0 && compactedSize < sizes.outputSizeInBytes) {
-            m_impl->asBuffer = CudaByteBuffer(compactedSize);
-            OPTIX_CHECK(optixAccelCompact(
-                optixCtx, stream, handleUncompacted,
-                static_cast<CUdeviceptr>(m_impl->asBuffer.devPtr()), compactedSize,
-                &m_impl->gasHandle));
-            CUDA_CHECK(cudaStreamSynchronize(stream));
-        } else {
-            // Compaction wouldn't help — keep the uncompacted buffer.
-            m_impl->asBuffer  = std::move(outBufUncompacted);
-            m_impl->gasHandle = handleUncompacted;
-        }
-        printf("[info]  CudaAccelStructure: OptiX GAS built (%s, %u verts, %u tris, %.2f KiB)\n",
+        printf("[info]  CudaAccelStructure: mesh GAS (%s, %u verts, %u tris, %.2f KiB)\n",
                m_impl->hasMotion ? "motion-aware" : "static",
                totalVerts, totalTris,
-               m_impl->asBuffer.byteSize() / 1024.0);
+               m_impl->meshAsBuffer.byteSize() / 1024.0);
+
+        // -------------------------------------------------------------------
+        // 2) Hair GAS — tessellate strands into ribbon quads and build a
+        // second triangle GAS.  Matches the algorithm in MetalAccelStructure.
+        // -------------------------------------------------------------------
+        if (curvePool && curvePool->numStrands() > 0) {
+            std::vector<PackedFloat3> hairPosOpen, hairPosClose;
+            std::vector<uint32_t>     hairIndices;
+            std::vector<GpuHairTri>   hairTriData;
+            bool anyHairMotion = false;
+            uint32_t vBase = 0;
+
+            for (size_t si = 0; si < curvePool->numStrands(); ++si) {
+                const StrandDesc& strand =
+                    curvePool->strand(static_cast<uint32_t>(si));
+                uint32_t numSeg = strand.numSegments();
+                if (numSeg == 0) continue;
+
+                bool hasMotion = strand.hasMotion();
+                if (hasMotion) anyHairMotion = true;
+
+                for (uint32_t seg = 0; seg < numSeg; ++seg) {
+                    const Vec3f* cvOpen  = &strand.controlPoints[seg * 3];
+                    const Vec3f* cvClose = hasMotion
+                                         ? &strand.controlPointsClose[seg * 3]
+                                         : nullptr;
+                    float v0 = float(seg)     / float(numSeg);
+                    float v1 = float(seg + 1) / float(numSeg);
+                    float wRoot = strand.widthAt(v0);
+                    float wTip  = strand.widthAt(v1);
+
+                    tessellateSegment(cvOpen, cvClose, v0, v1, wRoot, wTip,
+                                      strand.color, strand.materialIndex,
+                                      vBase,
+                                      hairPosOpen, hairPosClose,
+                                      hairIndices, hairTriData);
+
+                    vBase += static_cast<uint32_t>(2 * (kHairTessSteps + 1));
+                }
+            }
+
+            uint32_t numHairTris = static_cast<uint32_t>(hairTriData.size());
+            if (numHairTris > 0) {
+                size_t nV = hairPosOpen.size();
+                size_t nI = hairIndices.size();
+
+                // Upload all hair buffers.
+                const size_t hairVBBytes = nV * sizeof(PackedFloat3);
+                m_impl->hairPosOpenBuf  = CudaByteBuffer(hairVBBytes);
+                m_impl->hairPosOpenBuf.upload(
+                    reinterpret_cast<const uint8_t*>(hairPosOpen.data()),
+                    hairVBBytes);
+                m_impl->hairPosCloseBuf = CudaByteBuffer(hairVBBytes);
+                m_impl->hairPosCloseBuf.upload(
+                    reinterpret_cast<const uint8_t*>(hairPosClose.data()),
+                    hairVBBytes);
+
+                m_impl->hairIndexBuf = CudaBuffer<uint32_t>(nI);
+                m_impl->hairIndexBuf.upload(hairIndices);
+
+                m_impl->hairTriBuf = CudaBuffer<GpuHairTri>(numHairTris);
+                m_impl->hairTriBuf.upload(hairTriData);
+
+                bool hairOk = buildTriangleGAS(optixCtx, stream,
+                                  static_cast<CUdeviceptr>(m_impl->hairPosOpenBuf.devPtr()),
+                                  static_cast<CUdeviceptr>(m_impl->hairPosCloseBuf.devPtr()),
+                                  anyHairMotion,
+                                  static_cast<uint32_t>(nV),
+                                  static_cast<CUdeviceptr>(m_impl->hairIndexBuf.devPtr()),
+                                  numHairTris,
+                                  m_impl->hairAsBuffer, m_impl->hairGasHandle);
+
+                if (hairOk) {
+                    m_impl->numHairTris   = numHairTris;
+                    m_impl->hairHasMotion = anyHairMotion;
+                    m_impl->hairMeshBase  = 1;  // IAS instance ID (mesh = 0, hair = 1)
+                    printf("[info]  CudaAccelStructure: hair GAS (%s, %zu strands, %u tris, %.2f KiB)\n",
+                           anyHairMotion ? "motion-aware" : "static",
+                           curvePool->numStrands(), numHairTris,
+                           m_impl->hairAsBuffer.byteSize() / 1024.0);
+                } else {
+                    // Hair GAS too big for this GPU; release tessellation
+                    // buffers and fall through to mesh-only rendering.
+                    m_impl->hairPosOpenBuf  = CudaByteBuffer{};
+                    m_impl->hairPosCloseBuf = CudaByteBuffer{};
+                    m_impl->hairIndexBuf    = CudaBuffer<uint32_t>{};
+                    m_impl->hairTriBuf      = CudaBuffer<GpuHairTri>{};
+                    m_impl->hairAsBuffer    = CudaByteBuffer{};
+                    m_impl->hairGasHandle   = 0;
+                    fprintf(stderr, "[warn]  CudaAccelStructure: hair GAS build failed "
+                                    "(%zu strands, %u tris) — rendering without hair\n",
+                            curvePool->numStrands(), numHairTris);
+                }
+            }
+        }
+
+        // -------------------------------------------------------------------
+        // 3) Build an IAS over the (one or two) GASes.  Always wrap the mesh
+        // GAS in an IAS so the rest of the pipeline gets a uniform traversable.
+        // -------------------------------------------------------------------
+        const uint32_t numInstances = (m_impl->hairMeshBase != 0xFFFFFFFFu) ? 2u : 1u;
+
+        const bool iasMotion = m_impl->hasMotion || m_impl->hairHasMotion;
+        std::vector<OptixInstance> insts(numInstances);
+        memset(insts.data(), 0, numInstances * sizeof(OptixInstance));
+        auto fillInstance = [&](OptixInstance& inst, uint32_t id,
+                                 OptixTraversableHandle child) {
+            inst.transform[0]  = 1.f; inst.transform[1] = 0.f; inst.transform[2]  = 0.f; inst.transform[3]  = 0.f;
+            inst.transform[4]  = 0.f; inst.transform[5] = 1.f; inst.transform[6]  = 0.f; inst.transform[7]  = 0.f;
+            inst.transform[8]  = 0.f; inst.transform[9] = 0.f; inst.transform[10] = 1.f; inst.transform[11] = 0.f;
+            inst.instanceId    = id;
+            inst.sbtOffset     = 0;
+            inst.visibilityMask = 0xFF;
+            inst.flags         = OPTIX_INSTANCE_FLAG_NONE;
+            inst.traversableHandle = child;
+        };
+        fillInstance(insts[0], 0, m_impl->meshGasHandle);
+        if (numInstances == 2)
+            fillInstance(insts[1], 1, m_impl->hairGasHandle);
+
+        const size_t instBytes = numInstances * sizeof(OptixInstance);
+        m_impl->iasInstanceBuf = CudaByteBuffer(instBytes);
+        m_impl->iasInstanceBuf.upload(
+            reinterpret_cast<const uint8_t*>(insts.data()), instBytes);
+
+        OptixBuildInput iasInput{};
+        iasInput.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
+        iasInput.instanceArray.instances    =
+            static_cast<CUdeviceptr>(m_impl->iasInstanceBuf.devPtr());
+        iasInput.instanceArray.numInstances = numInstances;
+
+        OptixAccelBuildOptions iasOpts{};
+        iasOpts.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+        iasOpts.operation  = OPTIX_BUILD_OPERATION_BUILD;
+        if (iasMotion) {
+            iasOpts.motionOptions.numKeys   = 2;
+            iasOpts.motionOptions.timeBegin = 0.f;
+            iasOpts.motionOptions.timeEnd   = 1.f;
+            iasOpts.motionOptions.flags     = OPTIX_MOTION_FLAG_NONE;
+        } else {
+            iasOpts.motionOptions.numKeys = 1;
+        }
+
+        OptixAccelBufferSizes iasSizes{};
+        OPTIX_CHECK(optixAccelComputeMemoryUsage(
+            optixCtx, &iasOpts, &iasInput, 1, &iasSizes));
+
+        CudaByteBuffer iasTempBuf(iasSizes.tempSizeInBytes);
+        m_impl->iasBuffer = CudaByteBuffer(iasSizes.outputSizeInBytes);
+        OPTIX_CHECK(optixAccelBuild(
+            optixCtx, stream, &iasOpts, &iasInput, 1,
+            static_cast<CUdeviceptr>(iasTempBuf.devPtr()), iasSizes.tempSizeInBytes,
+            static_cast<CUdeviceptr>(m_impl->iasBuffer.devPtr()),
+            iasSizes.outputSizeInBytes,
+            &m_impl->iasHandle, nullptr, 0));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+
+        printf("[info]  CudaAccelStructure: IAS built (%u instance%s, %.2f KiB)\n",
+               numInstances, numInstances == 1 ? "" : "s",
+               m_impl->iasBuffer.byteSize() / 1024.0);
     }
 #endif
 
@@ -287,10 +588,12 @@ uint64_t CudaAccelStructure::indexBuffer()            const { return m_impl->ind
 uint64_t CudaAccelStructure::triMeshIDBuffer()        const { return m_impl->triMeshIDs.devPtr(); }
 uint64_t CudaAccelStructure::meshVertexOffsetBuffer() const { return m_impl->meshVertexOffsets.devPtr(); }
 uint64_t CudaAccelStructure::meshIndexOffsetBuffer()  const { return m_impl->meshIndexOffsets.devPtr(); }
-bool     CudaAccelStructure::hasMotion()              const { return m_impl->hasMotion; }
+bool     CudaAccelStructure::hasMotion()              const { return m_impl->hasMotion || m_impl->hairHasMotion; }
+uint64_t CudaAccelStructure::hairTriBuffer()          const { return m_impl->hairTriBuf.isValid() ? m_impl->hairTriBuf.devPtr() : 0u; }
+uint32_t CudaAccelStructure::hairMeshBaseID()         const { return m_impl->hairMeshBase; }
 uint64_t CudaAccelStructure::traversableHandle()      const {
 #ifdef ANACAPA_ENABLE_OPTIX
-    return static_cast<uint64_t>(m_impl->gasHandle);
+    return static_cast<uint64_t>(m_impl->iasHandle);
 #else
     return 0;
 #endif

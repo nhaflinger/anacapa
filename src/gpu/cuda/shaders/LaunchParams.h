@@ -48,6 +48,12 @@ struct LaunchParams {
     uint32_t                 pixelFilterBins;
     float                    pixelFilterRadius;
 
+    // Hair — per-triangle metadata + per-material BSDF parameters.
+    // Indexed by optixGetPrimitiveIndex() inside the hair GAS.  nullptr
+    // when the scene has no hair (cam.hairMeshBaseID == 0xFFFFFFFF).
+    const GpuHairTri*        hairTris;
+    const GpuHairMaterial*   hairMats;
+
     // OptiX traversable for the GAS (uint64 = OptixTraversableHandle).  Set
     // to CudaAccelStructure::traversableHandle().  Read in raygen / shadow
     // calls of optixTrace.

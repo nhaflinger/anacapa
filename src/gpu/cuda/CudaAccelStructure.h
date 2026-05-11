@@ -4,6 +4,7 @@
 // Mirrors MetalAccelStructure.h.
 
 #include <anacapa/accel/GeometryPool.h>
+#include <anacapa/accel/CurvePool.h>
 #include <cstdint>
 #include <memory>
 
@@ -12,16 +13,24 @@ namespace anacapa {
 class CudaContext;
 
 // ---------------------------------------------------------------------------
-// CudaAccelStructure — OptiX GAS over all scene triangles.
+// CudaAccelStructure — OptiX acceleration structure over scene triangles
+// and (optionally) tessellated hair ribbons.
 //
-// Builds a single triangle GAS, motion-aware when any mesh has motion keys
-// (vertex buffers at shutter-open and shutter-close).  Owns the world-space
-// vertex / normal / index buffers used both for the GAS build and for
-// shading-time attribute fetch in the OptiX programs.
+// When the CurvePool argument is non-null and contains strands, hair is
+// tessellated into ribbon quads (matching the Metal backend), built into a
+// second triangle GAS, and exposed alongside the mesh GAS through an IAS.
+// The IAS has two instances: index 0 = mesh GAS, index 1 = hair GAS.  The
+// hairMeshBaseID() accessor returns that hair instance index so raygen can
+// dispatch hits to the Marschner BSDF.
+//
+// When no curves are supplied, the build collapses to a single triangle GAS
+// wrapped in a one-instance IAS — the traversable handle always points at
+// an IAS, which keeps the OptiX pipeline configuration uniform.
 // ---------------------------------------------------------------------------
 class CudaAccelStructure {
 public:
-    CudaAccelStructure(CudaContext& ctx, const GeometryPool& pool);
+    CudaAccelStructure(CudaContext& ctx, const GeometryPool& pool,
+                       const CurvePool* curvePool = nullptr);
     ~CudaAccelStructure();
 
     bool isValid() const;
@@ -46,6 +55,13 @@ public:
     uint32_t totalVertices()  const;
     uint32_t totalTriangles() const;
     uint32_t numMeshes()      const;
+
+    // Hair accessors — valid only when hairMeshBaseID() != 0xFFFFFFFF.
+    // hairTriBuffer: one GpuHairTri per tessellated triangle (primID-indexed
+    // within the hair GAS).  The per-material hair-BSDF buffer is owned by
+    // CudaPathIntegrator (it depends on scene.materials, not on geometry).
+    uint64_t hairTriBuffer()     const;  // device GpuHairTri*
+    uint32_t hairMeshBaseID()    const;  // IAS instance ID, or 0xFFFFFFFF
 
 private:
     struct Impl;

@@ -15,6 +15,8 @@
 
 #include "../../shading/Lambertian.h"
 #include "../../shading/StandardSurface.h"
+#include "../../shading/MarschnerHair.h"
+#include "../../shading/ChiangHair.h"
 #include "../../shading/lights/AreaLight.h"
 #include "../../shading/lights/DirectionalLight.h"
 #include "../../shading/lights/DomeLight.h"
@@ -147,6 +149,38 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
     return gm;
 }
 
+static GpuHairMaterial extractGpuHairMaterial(const IMaterial* mat) {
+    GpuHairMaterial hm{};
+    hm.sigma_a = {0.06f, 0.10f, 0.20f};
+    hm.eta     = 1.55f;
+    hm.beta_m  = 0.40f;
+    hm.beta_n  = 0.60f;
+    hm.alpha   = 2.0f;
+    hm._pad    = 0.f;
+
+    if (!mat) return hm;
+
+    if (const ChiangHairMaterial* ch = dynamic_cast<const ChiangHairMaterial*>(mat)) {
+        const auto& p = ch->params();
+        hm.sigma_a = {p.sigma_a.x, p.sigma_a.y, p.sigma_a.z};
+        hm.eta     = p.eta;
+        hm.beta_m  = p.beta_m;
+        hm.beta_n  = p.beta_n;
+        hm.alpha   = p.alpha;
+        return hm;
+    }
+    if (const MarschnerHairMaterial* mh = dynamic_cast<const MarschnerHairMaterial*>(mat)) {
+        const auto& p = mh->params();
+        hm.sigma_a = {p.sigma_a.x, p.sigma_a.y, p.sigma_a.z};
+        hm.eta     = p.eta;
+        hm.beta_m  = p.beta_m;
+        hm.beta_n  = p.beta_n;
+        hm.alpha   = p.alpha;
+        return hm;
+    }
+    return hm;
+}
+
 static GpuLight extractGpuLight(const ILight* light) {
     GpuLight gl{};
     if (!light) return gl;
@@ -250,6 +284,13 @@ struct CudaPathIntegrator::Impl {
     uint32_t            pixelFilterBins    = 0;
     float               pixelFilterRadius  = 0.f;
 
+    // Hair — per-material BSDF parameters (one slot per scene.materials entry).
+    // The per-triangle GpuHairTri buffer lives in CudaAccelStructure; the
+    // tessellated hair geometry is the second IAS instance (instanceID =
+    // accel->hairMeshBaseID()).  hairMeshBaseID == 0xFFFFFFFF means no hair.
+    CudaBuffer<GpuHairMaterial> d_hairMats;
+    uint32_t                    hairMeshBaseID = 0xFFFFFFFFu;
+
     uint32_t numMaterials = 0;
     uint32_t numLights    = 0;
     uint32_t maxDepth     = 6;
@@ -336,8 +377,9 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
 
     OptixPipelineCompileOptions pipeOpts{};
     pipeOpts.usesMotionBlur                   = 1;  // motion always allowed; static GAS still works
-    pipeOpts.traversableGraphFlags            = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
-    pipeOpts.numPayloadValues                 = 5;
+    pipeOpts.traversableGraphFlags            =
+        OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
+    pipeOpts.numPayloadValues                 = 6;
     pipeOpts.numAttributeValues               = 2;  // triangle barycentrics
     pipeOpts.exceptionFlags                   = OPTIX_EXCEPTION_FLAG_NONE;
     pipeOpts.pipelineLaunchParamsVariableName = "params";
@@ -399,7 +441,7 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
                                            &dcStackTrav, &dcStackState, &contStack));
     OPTIX_CHECK(optixPipelineSetStackSize(optixPipeline,
                                           dcStackTrav, dcStackState, contStack,
-                                          /*maxTraversableDepth=*/1));
+                                          /*maxTraversableDepth=*/2));
 
     // ---- Shader binding table -----------------------------------------------
     SbtRecord raygenRec{}, missRec{}, hitRec{};
@@ -503,11 +545,12 @@ void CudaPathIntegrator::prepare(const SceneView& scene) {
     if (!isValid() || !scene.accel) return;
 
     m_impl->accel = std::make_unique<CudaAccelStructure>(
-        *m_impl->ctx, scene.accel->pool());
+        *m_impl->ctx, scene.accel->pool(), scene.curvePool);
     if (!m_impl->accel->isValid()) {
         fprintf(stderr, "[error] CudaPathIntegrator::prepare - accel build failed\n");
         return;
     }
+    m_impl->hairMeshBaseID = m_impl->accel->hairMeshBaseID();
 
     // Materials
     uint32_t nMat = static_cast<uint32_t>(scene.materials.size());
@@ -517,6 +560,17 @@ void CudaPathIntegrator::prepare(const SceneView& scene) {
     m_impl->d_materials  = CudaBuffer<GpuMaterial>(gpuMats.size());
     m_impl->d_materials.upload(gpuMats);
     m_impl->numMaterials = nMat;
+
+    // Hair materials — one slot per scene material, even on non-hair slots
+    // (the raygen indexes by the strand's material index, not by GpuMaterial type).
+    {
+        size_t nSlots = std::max(scene.materials.size(), size_t(1));
+        std::vector<GpuHairMaterial> hairMats(nSlots);
+        for (size_t i = 0; i < scene.materials.size(); ++i)
+            hairMats[i] = extractGpuHairMaterial(scene.materials[i]);
+        m_impl->d_hairMats = CudaBuffer<GpuHairMaterial>(nSlots);
+        m_impl->d_hairMats.upload(hairMats);
+    }
 
     // Lights
     std::vector<GpuLight> gpuLights;
@@ -669,6 +723,7 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.cam.envMapWidth   = envCdfWidth;
     p.cam.envMapHeight  = envCdfHeight;
     p.cam.fireflyClamp  = fireflyClamp;
+    p.cam.hairMeshBaseID = hairMeshBaseID;
     p.specAlbedoLUT     = d_specAlbedoLUT.isValid()    ? d_specAlbedoLUT.ptr()    : nullptr;
     p.specAvgAlbedoLUT  = d_specAvgAlbedoLUT.isValid() ? d_specAvgAlbedoLUT.ptr() : nullptr;
     p.specLUTCosBins    = specLUTCosBins;
@@ -677,6 +732,8 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.pixelFilterSigns  = d_pixelFilterSigns.isValid() ? d_pixelFilterSigns.ptr() : nullptr;
     p.pixelFilterBins   = pixelFilterBins;
     p.pixelFilterRadius = pixelFilterRadius;
+    p.hairTris          = reinterpret_cast<const GpuHairTri*>(accel->hairTriBuffer());
+    p.hairMats          = d_hairMats.isValid() ? d_hairMats.ptr() : nullptr;
     p.handle            = accel->traversableHandle();
 }
 
