@@ -15,11 +15,21 @@ namespace anacapa {
 // ---------------------------------------------------------------------------
 struct CpuHairTri {
     Vec3f    v0, e1, e2;  // world-space triangle (shutter-open)
-    Vec3f    tangent;     // fiber direction at quad midpoint (unit)
-    Vec3f    ribbonN;     // outward ribbon normal (world-space)
+    Vec3f    tangent;     // fiber direction at quad midpoint (unit, open-time)
+    Vec3f    ribbonN;     // outward ribbon normal (world-space, open-time)
     Vec3f    color;       // per-strand linear RGB
     float    h0, h1, h2; // impact parameter at barycentric verts 0/1/2
     uint32_t matIdx;      // strand.materialIndex → scene.materials[]
+};
+
+// ---------------------------------------------------------------------------
+// CpuHairTriClose — close-time geometry, kept parallel to m_hairTris.
+// Only populated when at least one strand carries motion keys, so static
+// scenes pay zero extra memory.  Shading attributes (tangent, ribbonN) stay
+// open-time only — the same approximation the GPU backends use.
+// ---------------------------------------------------------------------------
+struct CpuHairTriClose {
+    Vec3f v0, e1, e2;
 };
 
 // ---------------------------------------------------------------------------
@@ -65,12 +75,13 @@ public:
     const CurvePool&    curvePool() const          { return m_curvePool; }
 
 private:
-    BVHBackend              m_triBvh;
-    const CurvePool&        m_curvePool;
-    int                     m_tessSteps;
-    std::vector<HairNode>   m_hairNodes;    // binary BVH over hair triangles
-    std::vector<uint32_t>   m_hairPrimIdx;  // leaf prim array → m_hairTris index
-    std::vector<CpuHairTri> m_hairTris;     // baked geometry + shade data
+    BVHBackend                   m_triBvh;
+    const CurvePool&             m_curvePool;
+    int                          m_tessSteps;
+    std::vector<HairNode>        m_hairNodes;    // binary BVH over hair triangles
+    std::vector<uint32_t>        m_hairPrimIdx;  // leaf prim array → m_hairTris index
+    std::vector<CpuHairTri>      m_hairTris;     // baked geometry + shade data (open-time)
+    std::vector<CpuHairTriClose> m_hairTrisClose; // close-time positions; empty = static
 };
 
 } // namespace anacapa

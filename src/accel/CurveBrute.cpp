@@ -27,27 +27,36 @@ static Vec3f bezierTangent(const Vec3f* p, float t) {
 }
 
 // Tessellate one cubic Bézier segment into tessSteps ribbon quads.
-// Appends 2*tessSteps CpuHairTri entries.
+// Appends 2*tessSteps CpuHairTri entries (open-time geometry + shade data).
+// When cvClose is non-null AND outClose is non-null, also appends matching
+// close-time CpuHairTriClose entries — same algorithm against the close-time
+// CV array.  Shading attributes (tangent, ribbonN) stay open-time only.
 static void tessellateSegment(
     const Vec3f* cvOpen,
-    float        wRoot,     // half-width at segment start
-    float        wTip,      // half-width at segment end
+    const Vec3f* cvClose,    // nullptr for static segments
+    float        wRoot,
+    float        wTip,
     Vec3f        color,
     uint32_t     matIdx,
     int          tessSteps,
-    std::vector<CpuHairTri>& out)
+    std::vector<CpuHairTri>&      out,
+    std::vector<CpuHairTriClose>* outClose)
 {
-    const int N = tessSteps;
+    const int  N        = tessSteps;
+    const bool hasMotion = (cvClose != nullptr) && (outClose != nullptr);
 
-    // Sample N+1 positions and build left/right ribbon vertices
-    std::vector<Vec3f> left(N + 1), right(N + 1);
+    // Sample N+1 ribbon cross-sections.  Width and perp orientation come
+    // from the open-time tangent so the close-time ribbon stays parallel
+    // to the open ribbon (no twist) — same convention as the GPU.
+    std::vector<Vec3f> leftO (N + 1), rightO (N + 1);
+    std::vector<Vec3f> leftC (N + 1), rightC (N + 1);
 
     for (int k = 0; k <= N; ++k) {
         float t = float(k) / float(N);
         float w = (wRoot * (1.f - t) + wTip * t);
-        if (w < 5e-5f) w = 5e-5f;  // minimum 0.1 mm radius
+        if (w < 5e-5f) w = 5e-5f;
 
-        Vec3f pos  = bezierPoint(cvOpen, t);
+        Vec3f posO = bezierPoint(cvOpen, t);
         Vec3f tang = bezierTangent(cvOpen, t);
         if (tang.lengthSq() < 1e-12f) tang = cvOpen[3] - cvOpen[0];
         tang = safeNormalize(tang);
@@ -55,14 +64,20 @@ static void tessellateSegment(
         Vec3f refUp = (std::abs(tang.y) > 0.9f) ? Vec3f{1.f,0.f,0.f} : Vec3f{0.f,1.f,0.f};
         Vec3f perp  = safeNormalize(cross(tang, refUp));
 
-        left[k]  = pos - perp * w;   // h = -1
-        right[k] = pos + perp * w;   // h = +1
+        leftO [k] = posO - perp * w;
+        rightO[k] = posO + perp * w;
+
+        if (hasMotion) {
+            Vec3f posC = bezierPoint(cvClose, t);
+            leftC [k] = posC - perp * w;
+            rightC[k] = posC + perp * w;
+        }
     }
 
     // Build N quads = 2N triangles
     for (int k = 0; k < N; ++k) {
-        Vec3f l0 = left[k],    r0 = right[k];
-        Vec3f l1 = left[k+1],  r1 = right[k+1];
+        Vec3f l0o = leftO[k],    r0o = rightO[k];
+        Vec3f l1o = leftO[k+1],  r1o = rightO[k+1];
 
         float tMid = (float(k) + 0.5f) / float(N);
         Vec3f tang = bezierTangent(cvOpen, tMid);
@@ -80,14 +95,22 @@ static void tessellateSegment(
         ht.matIdx  = matIdx;
 
         // Tri 0: (l0, r0, r1) — h values (-1, +1, +1)
-        ht.v0 = l0; ht.e1 = r0 - l0; ht.e2 = r1 - l0;
+        ht.v0 = l0o; ht.e1 = r0o - l0o; ht.e2 = r1o - l0o;
         ht.h0 = -1.f; ht.h1 = +1.f; ht.h2 = +1.f;
         out.push_back(ht);
+        if (hasMotion) {
+            Vec3f l0c = leftC[k], r0c = rightC[k], r1c = rightC[k+1];
+            outClose->push_back({ l0c, r0c - l0c, r1c - l0c });
+        }
 
         // Tri 1: (l0, r1, l1) — h values (-1, +1, -1)
-        ht.v0 = l0; ht.e1 = r1 - l0; ht.e2 = l1 - l0;
+        ht.v0 = l0o; ht.e1 = r1o - l0o; ht.e2 = l1o - l0o;
         ht.h0 = -1.f; ht.h1 = +1.f; ht.h2 = -1.f;
         out.push_back(ht);
+        if (hasMotion) {
+            Vec3f l0c = leftC[k], r1c = rightC[k+1], l1c = leftC[k+1];
+            outClose->push_back({ l0c, r1c - l0c, l1c - l0c });
+        }
     }
 }
 
@@ -124,43 +147,58 @@ static bool aabbHit(const float bmin[3], const float bmax[3],
     return tn <= tf;
 }
 
-// Möller-Trumbore ray-triangle intersection.
+// Möller-Trumbore against the time-interpolated triangle.  When htc is
+// nullptr (no motion) this collapses to the open-time tri at zero cost.
 // u, v are barycentric coords; hit point = v0*(1-u-v) + v1*u + v2*v.
-static bool intersectHairTri(const CpuHairTri& ht, const Ray& ray,
+static bool intersectHairTri(const CpuHairTri& ht, const CpuHairTriClose* htc,
+                               float time, const Ray& ray,
                                float ray_tMin, float& inoutBestT,
                                float& outU, float& outV)
 {
-    Vec3f h = cross(ray.direction, ht.e2);
-    float a = dot(ht.e1, h);
+    Vec3f v0 = ht.v0, e1 = ht.e1, e2 = ht.e2;
+    if (htc) {
+        v0 = v0 + (htc->v0 - v0) * time;
+        e1 = e1 + (htc->e1 - e1) * time;
+        e2 = e2 + (htc->e2 - e2) * time;
+    }
+    Vec3f h = cross(ray.direction, e2);
+    float a = dot(e1, h);
     if (std::abs(a) < 1e-9f) return false;
     float f = 1.f / a;
-    Vec3f s = ray.origin - ht.v0;
+    Vec3f s = ray.origin - v0;
     float u = f * dot(s, h);
     if (u < 0.f || u > 1.f) return false;
-    Vec3f q = cross(s, ht.e1);
+    Vec3f q = cross(s, e1);
     float v = f * dot(ray.direction, q);
     if (v < 0.f || u + v > 1.f) return false;
-    float t = f * dot(ht.e2, q);
+    float t = f * dot(e2, q);
     if (t < ray_tMin || t >= inoutBestT) return false;
     inoutBestT = t;
     outU = u; outV = v;
     return true;
 }
 
-static bool intersectHairTriAny(const CpuHairTri& ht, const Ray& ray,
+static bool intersectHairTriAny(const CpuHairTri& ht, const CpuHairTriClose* htc,
+                                 float time, const Ray& ray,
                                  float ray_tMin, float ray_tMax)
 {
-    Vec3f h = cross(ray.direction, ht.e2);
-    float a = dot(ht.e1, h);
+    Vec3f v0 = ht.v0, e1 = ht.e1, e2 = ht.e2;
+    if (htc) {
+        v0 = v0 + (htc->v0 - v0) * time;
+        e1 = e1 + (htc->e1 - e1) * time;
+        e2 = e2 + (htc->e2 - e2) * time;
+    }
+    Vec3f h = cross(ray.direction, e2);
+    float a = dot(e1, h);
     if (std::abs(a) < 1e-9f) return false;
     float f = 1.f / a;
-    Vec3f s = ray.origin - ht.v0;
+    Vec3f s = ray.origin - v0;
     float u = f * dot(s, h);
     if (u < 0.f || u > 1.f) return false;
-    Vec3f q = cross(s, ht.e1);
+    Vec3f q = cross(s, e1);
     float v = f * dot(ray.direction, q);
     if (v < 0.f || u + v > 1.f) return false;
-    float t = f * dot(ht.e2, q);
+    float t = f * dot(e2, q);
     return t >= ray_tMin && t < ray_tMax;
 }
 
@@ -326,39 +364,55 @@ void CurveBrute::commit() {
     m_hairNodes.clear();
     m_hairPrimIdx.clear();
     m_hairTris.clear();
+    m_hairTrisClose.clear();
 
     const uint32_t S = (uint32_t)m_curvePool.numStrands();
     if (S == 0) return;
 
-    // Tessellate all strands into ribbon triangles.
+    // Decide once whether any strand carries motion keys; if so we pay
+    // for parallel close-time triangles, otherwise the close vector stays
+    // empty and static scenes pay nothing extra.
+    bool anyMotion = false;
+    for (uint32_t si = 0; si < S; ++si) {
+        if (m_curvePool.strand(si).hasMotion()) { anyMotion = true; break; }
+    }
+
     for (uint32_t si = 0; si < S; ++si) {
         const StrandDesc& strand = m_curvePool.strand(si);
         const uint32_t    numSeg = strand.numSegments();
-
-        float v0base = 0.f;
-        const float vStep = 1.f / float(numSeg);
+        const bool        strandMotion = strand.hasMotion();
+        const float       vStep = 1.f / float(numSeg);
 
         for (uint32_t seg = 0; seg < numSeg; ++seg) {
-            const Vec3f* cvOpen = &strand.controlPoints[seg * 3];
+            const Vec3f* cvOpen  = &strand.controlPoints[seg * 3];
+            // When the scene has motion but THIS strand is static, we still
+            // need close-time entries so the parallel array stays aligned —
+            // tessellateSegment treats cvClose == cvOpen as zero displacement.
+            const Vec3f* cvClose = anyMotion
+                                 ? (strandMotion
+                                      ? &strand.controlPointsClose[seg * 3]
+                                      : cvOpen)
+                                 : nullptr;
             float strandV0 = seg * vStep;
             float strandV1 = strandV0 + vStep;
             float wRoot = strand.widthAt(strandV0) * 0.5f;
             float wTip  = strand.widthAt(strandV1) * 0.5f;
 
-            tessellateSegment(cvOpen, wRoot, wTip,
-                              strand.color,
-                              strand.materialIndex,
+            tessellateSegment(cvOpen, cvClose, wRoot, wTip,
+                              strand.color, strand.materialIndex,
                               m_tessSteps,
-                              m_hairTris);
+                              m_hairTris,
+                              anyMotion ? &m_hairTrisClose : nullptr);
         }
-        (void)v0base;
     }
 
     if (m_hairTris.empty()) return;
 
     const uint32_t T = (uint32_t)m_hairTris.size();
 
-    // Build per-triangle AABB work array
+    // Build per-triangle AABB work array — when motion is present, expand
+    // each leaf bound to enclose both shutter-open and shutter-close tris
+    // so motion-displaced hair isn't culled at traversal time.
     std::vector<HairTriWork> work;
     work.reserve(T);
     for (uint32_t i = 0; i < T; ++i) {
@@ -374,6 +428,19 @@ void CurveBrute::commit() {
         w.bmax[0] = std::max({ht.v0.x, v1.x, v2.x});
         w.bmax[1] = std::max({ht.v0.y, v1.y, v2.y});
         w.bmax[2] = std::max({ht.v0.z, v1.z, v2.z});
+
+        if (anyMotion) {
+            const CpuHairTriClose& hc = m_hairTrisClose[i];
+            Vec3f c1 = hc.v0 + hc.e1;
+            Vec3f c2 = hc.v0 + hc.e2;
+            w.bmin[0] = std::min({w.bmin[0], hc.v0.x, c1.x, c2.x});
+            w.bmin[1] = std::min({w.bmin[1], hc.v0.y, c1.y, c2.y});
+            w.bmin[2] = std::min({w.bmin[2], hc.v0.z, c1.z, c2.z});
+            w.bmax[0] = std::max({w.bmax[0], hc.v0.x, c1.x, c2.x});
+            w.bmax[1] = std::max({w.bmax[1], hc.v0.y, c1.y, c2.y});
+            w.bmax[2] = std::max({w.bmax[2], hc.v0.z, c1.z, c2.z});
+        }
+
         // Small epsilon to avoid degenerate AABBs on flat ribbon tris
         for (int k = 0; k < 3; ++k) {
             if (w.bmax[k] - w.bmin[k] < 1e-6f) {
@@ -393,8 +460,9 @@ void CurveBrute::commit() {
 
     buildHairBVH(work, m_hairPrimIdx, m_hairNodes, 0, T);
 
-    spdlog::info("CurveBrute (tessellated): {} strands → {} tris, {} BVH nodes (tessSteps={})",
-                 S, T, m_hairNodes.size(), m_tessSteps);
+    spdlog::info("CurveBrute (tessellated): {} strands → {} tris ({}), {} BVH nodes (tessSteps={})",
+                 S, T, anyMotion ? "motion-aware" : "static",
+                 m_hairNodes.size(), m_tessSteps);
 }
 
 TraceResult CurveBrute::trace(const Ray& ray) const {
@@ -422,8 +490,11 @@ TraceResult CurveBrute::trace(const Ray& ray) const {
             uint32_t end = node.left_or_prim + node.primCount();
             for (uint32_t i = node.left_or_prim; i < end; ++i) {
                 uint32_t idx = m_hairPrimIdx[i];
+                const CpuHairTriClose* hc = m_hairTrisClose.empty()
+                                          ? nullptr : &m_hairTrisClose[idx];
                 float u, v;
-                if (intersectHairTri(m_hairTris[idx], ray, ray.tMin, bestT, u, v)) {
+                if (intersectHairTri(m_hairTris[idx], hc, ray.time, ray,
+                                       ray.tMin, bestT, u, v)) {
                     bestU      = u;
                     bestV      = v;
                     bestTriIdx = idx;
@@ -485,7 +556,10 @@ bool CurveBrute::occluded(const Ray& ray) const {
             uint32_t end = node.left_or_prim + node.primCount();
             for (uint32_t i = node.left_or_prim; i < end; ++i) {
                 uint32_t idx = m_hairPrimIdx[i];
-                if (intersectHairTriAny(m_hairTris[idx], ray, ray.tMin, ray.tMax))
+                const CpuHairTriClose* hc = m_hairTrisClose.empty()
+                                          ? nullptr : &m_hairTrisClose[idx];
+                if (intersectHairTriAny(m_hairTris[idx], hc, ray.time, ray,
+                                          ray.tMin, ray.tMax))
                     return true;
             }
         } else {
