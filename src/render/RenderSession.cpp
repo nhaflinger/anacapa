@@ -442,11 +442,12 @@ void RenderSession::buildCornellBox() {
 // When m_curvePool is empty (mesh-only scenes) the curve loop costs nothing.
 // ---------------------------------------------------------------------------
 void RenderSession::buildAccelStructure() {
-    auto accel = std::make_unique<CurveBrute>(m_geomPool, m_curvePool);
+    auto accel = std::make_unique<CurveBrute>(m_geomPool, m_curvePool, m_settings.hairTessSteps);
     accel->commit();
     m_accel = std::move(accel);
-    m_scene.accel     = m_accel.get();
-    m_scene.curvePool = &m_curvePool;
+    m_scene.accel         = m_accel.get();
+    m_scene.curvePool     = &m_curvePool;
+    m_scene.hairTessSteps = m_settings.hairTessSteps;
 }
 
 // ---------------------------------------------------------------------------

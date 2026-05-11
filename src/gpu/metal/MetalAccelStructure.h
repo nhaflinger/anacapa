@@ -30,9 +30,11 @@ public:
     // device: id<MTLDevice> (void* to keep header ObjC-free)
     // cmdQueue: id<MTLCommandQueue>
     // curvePool: optional — pass nullptr when the scene has no hair
+    // hairTessSteps: quads per Bézier segment (default 4)
     MetalAccelStructure(void* device, void* cmdQueue,
                         const GeometryPool& pool,
-                        const CurvePool*    curvePool = nullptr);
+                        const CurvePool*    curvePool    = nullptr,
+                        int                 hairTessSteps = 4);
     ~MetalAccelStructure();
 
     bool isValid() const;

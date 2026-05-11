@@ -125,6 +125,11 @@ int main(int argc, char** argv) {
                    "default (Box=0.5, Triangle=1.0, Gaussian=1.5, Mitchell=2.0, "
                    "Blackman-Harris=1.5, Catmull-Rom=2.0, Lanczos=4.0).")
        ->default_val(0.f);
+    app.add_option("--hair-tess-steps", settings.hairTessSteps,
+                   "Quads per cubic Bézier hair segment for ribbon tessellation "
+                   "(CPU and GPU). Higher = smoother curves. Default 4.")
+       ->default_val(4)
+       ->check(CLI::Range(1, 32));
 
     CLI11_PARSE(app, argc, argv);
 

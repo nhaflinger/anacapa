@@ -72,6 +72,11 @@ struct RenderSettings {
     PixelFilterType pixelFilter      = PixelFilterType::Mitchell;
     float           pixelFilterRadius = 0.f;
 
+    // Hair ribbon tessellation quality — quads per cubic Bézier segment.
+    // Higher = smoother ribbons, more triangles, slower commit but same render cost.
+    // Applied to both the CPU (CurveBrute) and GPU (MetalAccelStructure) pipelines.
+    int            hairTessSteps     = 4;
+
     // Debug: when >= 0, primary rays that hit a different mesh return black.
     // Useful for isolating which pixels belong to a given mesh, and for testing
     // that mesh's shading in isolation.  Indirect bounces are unaffected.

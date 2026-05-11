@@ -408,7 +408,8 @@ void MetalPathIntegrator::prepare(const SceneView& scene) {
 
     // Build hardware acceleration structure (hair ribbons included when curvePool is present)
     m_impl->accel = std::make_unique<MetalAccelStructure>(
-        (__bridge void*)dev, (__bridge void*)cq, *m_impl->geomPool, scene.curvePool);
+        (__bridge void*)dev, (__bridge void*)cq, *m_impl->geomPool,
+        scene.curvePool, scene.hairTessSteps);
 
     if (!m_impl->accel->isValid()) {
         spdlog::error("MetalPathIntegrator::prepare — accel build failed");

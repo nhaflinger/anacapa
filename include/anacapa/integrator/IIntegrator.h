@@ -157,6 +157,7 @@ struct SceneView {
     const ILight*                        envLight = nullptr;  // Infinite/dome light (nullptr = constant)
     Vec3f                                envRadiance = {};    // Constant background (used if envLight==nullptr)
     std::optional<Camera>                camera;              // set by scene loader
+    int                                  hairTessSteps = 4;   // quads per Bézier segment for hair tessellation
 };
 
 // ---------------------------------------------------------------------------

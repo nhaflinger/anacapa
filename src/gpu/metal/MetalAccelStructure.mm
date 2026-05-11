@@ -69,7 +69,6 @@ struct PackedFloat2 { float x, y; };
 // ---------------------------------------------------------------------------
 // Hair tessellation helpers
 // ---------------------------------------------------------------------------
-static constexpr int kHairTessSteps = 4;  // sub-divisions per Bézier segment
 
 static Vec3f bezierPoint(const Vec3f* p, float t) {
     float u = 1.f - t;
@@ -95,8 +94,8 @@ static Vec3f normalizeVec(Vec3f v) {
 }
 
 // Tessellate one cubic Bézier segment [cvs, cvs+3] into ribbon quads.
-// Appends (kHairTessSteps+1)*2 position entries to posOpen/posClose, the
-// same number of UV/normal entries, and kHairTessSteps*2 triangles + their
+// Appends (tessSteps+1)*2 position entries to posOpen/posClose, the
+// same number of UV/normal entries, and tessSteps*2 triangles + their
 // GpuHairTri metadata.  vBase is the index of the first vertex this segment
 // will produce in the combined position arrays.
 static void tessellateSegment(
@@ -109,6 +108,7 @@ static void tessellateSegment(
     Vec3f        strandColor,
     uint32_t     matIdx,
     uint32_t     vBase,
+    int          tessSteps,
     std::vector<PackedFloat3>& posOpen,
     std::vector<PackedFloat3>& posClose,
     std::vector<PackedFloat2>& uvs,
@@ -116,9 +116,9 @@ static void tessellateSegment(
     std::vector<uint32_t>&     indices,
     std::vector<GpuHairTri>&   hairTris)
 {
-    // Sample kHairTessSteps+1 positions along the segment
-    for (int k = 0; k <= kHairTessSteps; ++k) {
-        float t  = float(k) / float(kHairTessSteps);
+    // Sample tessSteps+1 positions along the segment
+    for (int k = 0; k <= tessSteps; ++k) {
+        float t  = float(k) / float(tessSteps);
         float v  = strandV0 + t * (strandV1 - strandV0);
         float w  = (wRoot * (1.f - t) + wTip * t) * 0.5f;  // half-width (radius)
         if (w < 5e-5f) w = 5e-5f;  // minimum 0.1 mm radius for robust intersection
@@ -150,15 +150,15 @@ static void tessellateSegment(
         uvs.push_back({ 1.f, v});  // right: h = +1
     }
 
-    // Build kHairTessSteps quads from adjacent row pairs
-    for (int k = 0; k < kHairTessSteps; ++k) {
+    // Build tessSteps quads from adjacent row pairs
+    for (int k = 0; k < tessSteps; ++k) {
         uint32_t l0 = vBase + uint32_t(2*k + 0);
         uint32_t r0 = vBase + uint32_t(2*k + 1);
         uint32_t l1 = vBase + uint32_t(2*k + 2);
         uint32_t r1 = vBase + uint32_t(2*k + 3);
 
         // Tangent at the midpoint of this sub-segment
-        float tMid = (float(k) + 0.5f) / float(kHairTessSteps);
+        float tMid = (float(k) + 0.5f) / float(tessSteps);
         Vec3f tang = bezierTangent(cvOpen, tMid);
 
         GpuHairTri ht;
@@ -215,7 +215,8 @@ static id<MTLAccelerationStructure> buildAccelStructure(
 MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
                                           void*             cmdQueueVoid,
                                           const GeometryPool& pool,
-                                          const CurvePool*  curvePool)
+                                          const CurvePool*  curvePool,
+                                          int               hairTessSteps)
     : m_impl(std::make_unique<Impl>())
 {
     id<MTLDevice>       device   = (__bridge id<MTLDevice>)      deviceVoid;
@@ -420,11 +421,12 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
                                   strand.color,
                                   strand.materialIndex,
                                   vBase,
+                                  hairTessSteps,
                                   hairPosOpen, hairPosClose,
                                   hairUVs, hairNormals,
                                   hairIndices, hairTriData);
 
-                vBase += static_cast<uint32_t>(2 * (kHairTessSteps + 1));
+                vBase += static_cast<uint32_t>(2 * (hairTessSteps + 1));
             }
         }
 
