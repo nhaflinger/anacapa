@@ -101,12 +101,16 @@ struct Camera {
 
         Vec3f target = lowerLeftCorner + horizontal*s + vertical*t;
 
-        // Map [0,1) time sample to the shutter interval
-        float rayTime = shutterOpen + timeU * (shutterClose - shutterOpen);
-
+        // timeU is already the normalized shutter parameter in [0,1).
+        // The open/close geometry is sampled at shutterOpen and shutterClose
+        // by the scene loader, so timeU=0 → open geometry, timeU→1 → close
+        // geometry regardless of the sign or magnitude of the shutter interval.
+        // Storing the raw frame-time (shutterOpen + timeU*(shutterClose-shutterOpen))
+        // produced negative ray.time for center-shutter renders, which extrapolated
+        // hair geometry backward and broke both BVH traversal and interpolateO2W.
         if (apertureRadius <= 0.f) {
             Ray r{origin, normalize(target - origin)};
-            r.time = rayTime;
+            r.time = timeU;
             return r;
         }
 
@@ -140,7 +144,7 @@ struct Camera {
 
         // Rays from all lens points converge at the focal point.
         Ray r{lensPoint, normalize(focalPoint - lensPoint)};
-        r.time = rayTime;
+        r.time = timeU;
         return r;
     }
 };

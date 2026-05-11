@@ -227,23 +227,40 @@ static void boxUnion(float bmin[3], float bmax[3],
 
 struct HairTriWork {
     uint32_t triIdx;
-    float    bmin[3], bmax[3];
+    float    bmin[3],       bmax[3];       // space-time union (used for SAH splits)
+    float    bmin_open[3],  bmax_open[3];  // open-time tight bound
+    float    bmin_close[3], bmax_close[3]; // close-time tight bound (= open if static)
     float    centroid[3];
 };
 
 static uint32_t buildHairBVH(
-    std::vector<HairTriWork>&  work,
-    std::vector<uint32_t>&     outPrimIdx,
-    std::vector<HairNode>&     nodes,
+    std::vector<HairTriWork>&      work,
+    std::vector<uint32_t>&         outPrimIdx,
+    std::vector<HairNode>&         nodes,
+    std::vector<HairNodeClose>*    nodesClose,  // nullptr for static scenes
     uint32_t start, uint32_t end)
 {
     uint32_t nodeIdx = (uint32_t)nodes.size();
     nodes.push_back({});
+    if (nodesClose) nodesClose->push_back({});
 
+    // Space-time union bound (used for SAH cost and node storage)
     float bmin[3] = {  FLT_MAX,  FLT_MAX,  FLT_MAX };
     float bmax[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
     for (uint32_t i = start; i < end; ++i)
         boxUnion(bmin, bmax, work[i].bmin, work[i].bmax);
+
+    // Separate open and close bounds for time-interpolated traversal
+    float bmin_o[3] = {  FLT_MAX,  FLT_MAX,  FLT_MAX };
+    float bmax_o[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+    float bmin_c[3] = {  FLT_MAX,  FLT_MAX,  FLT_MAX };
+    float bmax_c[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+    if (nodesClose) {
+        for (uint32_t i = start; i < end; ++i) {
+            boxUnion(bmin_o, bmax_o, work[i].bmin_open,  work[i].bmax_open);
+            boxUnion(bmin_c, bmax_c, work[i].bmin_close, work[i].bmax_close);
+        }
+    }
 
     uint32_t count    = end - start;
     float    leafCost = kHairIntersectCost * (float)count;
@@ -253,11 +270,17 @@ static uint32_t buildHairBVH(
         for (uint32_t i = start; i < end; ++i)
             outPrimIdx.push_back(work[i].triIdx);
         for (int k = 0; k < 3; ++k) {
-            nodes[nodeIdx].bmin[k] = bmin[k];
-            nodes[nodeIdx].bmax[k] = bmax[k];
+            nodes[nodeIdx].bmin[k] = nodesClose ? bmin_o[k] : bmin[k];
+            nodes[nodeIdx].bmax[k] = nodesClose ? bmax_o[k] : bmax[k];
         }
         nodes[nodeIdx].left_or_prim   = first;
         nodes[nodeIdx].right_or_count = count | 0x80000000u;
+        if (nodesClose) {
+            for (int k = 0; k < 3; ++k) {
+                (*nodesClose)[nodeIdx].bmin[k] = bmin_c[k];
+                (*nodesClose)[nodeIdx].bmax[k] = bmax_c[k];
+            }
+        }
     };
 
     if (count <= (uint32_t)kHairMaxLeaf) { makeLeaf(); return nodeIdx; }
@@ -335,15 +358,21 @@ static uint32_t buildHairBVH(
     uint32_t mid = (uint32_t)(midIt - work.begin());
     if (mid == start || mid == end) mid = (start + end) / 2;
 
-    uint32_t leftIdx  = buildHairBVH(work, outPrimIdx, nodes, start, mid);
-    uint32_t rightIdx = buildHairBVH(work, outPrimIdx, nodes, mid,   end);
+    uint32_t leftIdx  = buildHairBVH(work, outPrimIdx, nodes, nodesClose, start, mid);
+    uint32_t rightIdx = buildHairBVH(work, outPrimIdx, nodes, nodesClose, mid,   end);
 
     for (int k = 0; k < 3; ++k) {
-        nodes[nodeIdx].bmin[k] = bmin[k];
-        nodes[nodeIdx].bmax[k] = bmax[k];
+        nodes[nodeIdx].bmin[k] = nodesClose ? bmin_o[k] : bmin[k];
+        nodes[nodeIdx].bmax[k] = nodesClose ? bmax_o[k] : bmax[k];
     }
     nodes[nodeIdx].left_or_prim   = leftIdx;
     nodes[nodeIdx].right_or_count = rightIdx;
+    if (nodesClose) {
+        for (int k = 0; k < 3; ++k) {
+            (*nodesClose)[nodeIdx].bmin[k] = bmin_c[k];
+            (*nodesClose)[nodeIdx].bmax[k] = bmax_c[k];
+        }
+    }
     return nodeIdx;
 }
 
@@ -362,6 +391,7 @@ CurveBrute::CurveBrute(const GeometryPool& triPool, const CurvePool& curvePool,
 void CurveBrute::commit() {
     m_triBvh.commit();
     m_hairNodes.clear();
+    m_hairNodesClose.clear();
     m_hairPrimIdx.clear();
     m_hairTris.clear();
     m_hairTrisClose.clear();
@@ -410,43 +440,57 @@ void CurveBrute::commit() {
 
     const uint32_t T = (uint32_t)m_hairTris.size();
 
-    // Build per-triangle AABB work array — when motion is present, expand
-    // each leaf bound to enclose both shutter-open and shutter-close tris
-    // so motion-displaced hair isn't culled at traversal time.
+    // Build per-triangle AABB work array.
+    // For motion scenes: store separate open-time and close-time tight bounds
+    // plus their union (used for SAH split decisions). The BVH nodes store
+    // open-time bounds; a parallel m_hairNodesClose array stores close-time
+    // bounds. Traversal linearly interpolates by ray.time, giving tight
+    // conservative bounds at every time step with no misses.
     std::vector<HairTriWork> work;
     work.reserve(T);
+
+    auto triAABB = [](Vec3f v0, Vec3f e1, Vec3f e2,
+                      float* bmin, float* bmax) {
+        Vec3f v1 = v0 + e1, v2 = v0 + e2;
+        bmin[0] = std::min({v0.x, v1.x, v2.x});
+        bmin[1] = std::min({v0.y, v1.y, v2.y});
+        bmin[2] = std::min({v0.z, v1.z, v2.z});
+        bmax[0] = std::max({v0.x, v1.x, v2.x});
+        bmax[1] = std::max({v0.y, v1.y, v2.y});
+        bmax[2] = std::max({v0.z, v1.z, v2.z});
+    };
+
     for (uint32_t i = 0; i < T; ++i) {
         const CpuHairTri& ht = m_hairTris[i];
-        Vec3f v1 = ht.v0 + ht.e1;
-        Vec3f v2 = ht.v0 + ht.e2;
 
         HairTriWork w;
         w.triIdx = i;
-        w.bmin[0] = std::min({ht.v0.x, v1.x, v2.x});
-        w.bmin[1] = std::min({ht.v0.y, v1.y, v2.y});
-        w.bmin[2] = std::min({ht.v0.z, v1.z, v2.z});
-        w.bmax[0] = std::max({ht.v0.x, v1.x, v2.x});
-        w.bmax[1] = std::max({ht.v0.y, v1.y, v2.y});
-        w.bmax[2] = std::max({ht.v0.z, v1.z, v2.z});
+
+        triAABB(ht.v0, ht.e1, ht.e2, w.bmin_open, w.bmax_open);
 
         if (anyMotion) {
             const CpuHairTriClose& hc = m_hairTrisClose[i];
-            Vec3f c1 = hc.v0 + hc.e1;
-            Vec3f c2 = hc.v0 + hc.e2;
-            w.bmin[0] = std::min({w.bmin[0], hc.v0.x, c1.x, c2.x});
-            w.bmin[1] = std::min({w.bmin[1], hc.v0.y, c1.y, c2.y});
-            w.bmin[2] = std::min({w.bmin[2], hc.v0.z, c1.z, c2.z});
-            w.bmax[0] = std::max({w.bmax[0], hc.v0.x, c1.x, c2.x});
-            w.bmax[1] = std::max({w.bmax[1], hc.v0.y, c1.y, c2.y});
-            w.bmax[2] = std::max({w.bmax[2], hc.v0.z, c1.z, c2.z});
+            triAABB(hc.v0, hc.e1, hc.e2, w.bmin_close, w.bmax_close);
+            // Union for SAH
+            for (int k = 0; k < 3; ++k) {
+                w.bmin[k] = std::min(w.bmin_open[k], w.bmin_close[k]);
+                w.bmax[k] = std::max(w.bmax_open[k], w.bmax_close[k]);
+            }
+        } else {
+            for (int k = 0; k < 3; ++k) {
+                w.bmin_close[k] = w.bmin_open[k];
+                w.bmax_close[k] = w.bmax_open[k];
+                w.bmin[k]       = w.bmin_open[k];
+                w.bmax[k]       = w.bmax_open[k];
+            }
         }
 
         // Small epsilon to avoid degenerate AABBs on flat ribbon tris
         for (int k = 0; k < 3; ++k) {
-            if (w.bmax[k] - w.bmin[k] < 1e-6f) {
-                w.bmin[k] -= 1e-6f;
-                w.bmax[k] += 1e-6f;
-            }
+            float eps = 1e-6f;
+            if (w.bmin_open[k]  > w.bmax_open[k]  - eps) { w.bmin_open[k]  -= eps; w.bmax_open[k]  += eps; }
+            if (w.bmin_close[k] > w.bmax_close[k] - eps) { w.bmin_close[k] -= eps; w.bmax_close[k] += eps; }
+            if (w.bmin[k]       > w.bmax[k]        - eps) { w.bmin[k]       -= eps; w.bmax[k]       += eps; }
         }
         w.centroid[0] = (w.bmin[0] + w.bmax[0]) * 0.5f;
         w.centroid[1] = (w.bmin[1] + w.bmax[1]) * 0.5f;
@@ -457,8 +501,10 @@ void CurveBrute::commit() {
     uint32_t estLeaves = (T + kHairMaxLeaf - 1) / kHairMaxLeaf;
     m_hairNodes.reserve(2 * estLeaves + 4);
     m_hairPrimIdx.reserve(T);
+    if (anyMotion) m_hairNodesClose.reserve(2 * estLeaves + 4);
 
-    buildHairBVH(work, m_hairPrimIdx, m_hairNodes, 0, T);
+    buildHairBVH(work, m_hairPrimIdx, m_hairNodes,
+                 anyMotion ? &m_hairNodesClose : nullptr, 0, T);
 
     spdlog::info("CurveBrute (tessellated): {} strands → {} tris ({}), {} BVH nodes (tessSteps={})",
                  S, T, anyMotion ? "motion-aware" : "static",
@@ -472,28 +518,45 @@ TraceResult CurveBrute::trace(const Ray& ray) const {
 
     if (m_hairNodes.empty()) return result;
 
+    // ray.time is normalized to [0,1) by generateRay.
+    const float hairTime = ray.time;
+    const float hairTimeMt = 1.f - hairTime;
+    const bool  hasMotion = !m_hairNodesClose.empty();
+
     HairRayTraversal rt = HairRayTraversal::make(ray);
 
     uint32_t stack[64];
     int top = 0;
     stack[top++] = 0;
 
-    float   bestU = 0.f, bestV = 0.f;
+    float    bestU = 0.f, bestV = 0.f;
     uint32_t bestTriIdx = ~0u;
 
     while (top > 0) {
-        const HairNode& node = m_hairNodes[stack[--top]];
+        uint32_t        ni   = stack[--top];
+        const HairNode& node = m_hairNodes[ni];
 
-        if (!aabbHit(node.bmin, node.bmax, rt, bestT)) continue;
+        if (hasMotion) {
+            // Interpolate open and close bounds at ray.time — provably conservative
+            // since lerp(open_bound, close_bound, t) contains lerp(v_open, v_close, t).
+            const HairNodeClose& nc = m_hairNodesClose[ni];
+            float iMin[3], iMax[3];
+            for (int k = 0; k < 3; ++k) {
+                iMin[k] = node.bmin[k] * hairTimeMt + nc.bmin[k] * hairTime;
+                iMax[k] = node.bmax[k] * hairTimeMt + nc.bmax[k] * hairTime;
+            }
+            if (!aabbHit(iMin, iMax, rt, bestT)) continue;
+        } else {
+            if (!aabbHit(node.bmin, node.bmax, rt, bestT)) continue;
+        }
 
         if (node.isLeaf()) {
             uint32_t end = node.left_or_prim + node.primCount();
             for (uint32_t i = node.left_or_prim; i < end; ++i) {
                 uint32_t idx = m_hairPrimIdx[i];
-                const CpuHairTriClose* hc = m_hairTrisClose.empty()
-                                          ? nullptr : &m_hairTrisClose[idx];
+                const CpuHairTriClose* hc = hasMotion ? &m_hairTrisClose[idx] : nullptr;
                 float u, v;
-                if (intersectHairTri(m_hairTris[idx], hc, ray.time, ray,
+                if (intersectHairTri(m_hairTris[idx], hc, hairTime, ray,
                                        ray.tMin, bestT, u, v)) {
                     bestU      = u;
                     bestV      = v;
@@ -541,6 +604,10 @@ bool CurveBrute::occluded(const Ray& ray) const {
     if (m_triBvh.occluded(ray)) return true;
     if (m_hairNodes.empty()) return false;
 
+    const float hairTime   = ray.time;
+    const float hairTimeMt = 1.f - hairTime;
+    const bool  hasMotion  = !m_hairNodesClose.empty();
+
     HairRayTraversal rt = HairRayTraversal::make(ray);
 
     uint32_t stack[64];
@@ -548,17 +615,27 @@ bool CurveBrute::occluded(const Ray& ray) const {
     stack[top++] = 0;
 
     while (top > 0) {
-        const HairNode& node = m_hairNodes[stack[--top]];
+        uint32_t        ni   = stack[--top];
+        const HairNode& node = m_hairNodes[ni];
 
-        if (!aabbHit(node.bmin, node.bmax, rt, ray.tMax)) continue;
+        if (hasMotion) {
+            const HairNodeClose& nc = m_hairNodesClose[ni];
+            float iMin[3], iMax[3];
+            for (int k = 0; k < 3; ++k) {
+                iMin[k] = node.bmin[k] * hairTimeMt + nc.bmin[k] * hairTime;
+                iMax[k] = node.bmax[k] * hairTimeMt + nc.bmax[k] * hairTime;
+            }
+            if (!aabbHit(iMin, iMax, rt, ray.tMax)) continue;
+        } else {
+            if (!aabbHit(node.bmin, node.bmax, rt, ray.tMax)) continue;
+        }
 
         if (node.isLeaf()) {
             uint32_t end = node.left_or_prim + node.primCount();
             for (uint32_t i = node.left_or_prim; i < end; ++i) {
                 uint32_t idx = m_hairPrimIdx[i];
-                const CpuHairTriClose* hc = m_hairTrisClose.empty()
-                                          ? nullptr : &m_hairTrisClose[idx];
-                if (intersectHairTriAny(m_hairTris[idx], hc, ray.time, ray,
+                const CpuHairTriClose* hc = hasMotion ? &m_hairTrisClose[idx] : nullptr;
+                if (intersectHairTriAny(m_hairTris[idx], hc, hairTime, ray,
                                           ray.tMin, ray.tMax))
                     return true;
             }

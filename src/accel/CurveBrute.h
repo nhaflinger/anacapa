@@ -38,14 +38,24 @@ struct CpuHairTriClose {
 // Interior: left_or_prim = left child, right_or_count = right child
 // Leaf:     left_or_prim = first index in m_hairPrimIdx,
 //           right_or_count = count | 0x80000000
+//
+// For motion-blurred scenes a parallel m_hairNodesClose array holds the
+// close-time bounds.  At traversal time, bounds are linearly interpolated by
+// ray.time, giving tight per-time bounds that are provably conservative:
+// lerp(open_bound, close_bound, t) contains every lerped vertex position.
 // ---------------------------------------------------------------------------
 struct HairNode {
-    float    bmin[3], bmax[3];
+    float    bmin[3], bmax[3];  // open-time (or static) bounds
     uint32_t left_or_prim;
     uint32_t right_or_count;
 
     bool     isLeaf()    const { return (right_or_count & 0x80000000u) != 0; }
     uint32_t primCount() const { return  right_or_count & 0x7FFFFFFFu; }
+};
+
+// Close-time bounds stored in a parallel array; empty for static scenes.
+struct HairNodeClose {
+    float bmin[3], bmax[3];
 };
 
 // ---------------------------------------------------------------------------
@@ -78,10 +88,11 @@ private:
     BVHBackend                   m_triBvh;
     const CurvePool&             m_curvePool;
     int                          m_tessSteps;
-    std::vector<HairNode>        m_hairNodes;    // binary BVH over hair triangles
-    std::vector<uint32_t>        m_hairPrimIdx;  // leaf prim array → m_hairTris index
-    std::vector<CpuHairTri>      m_hairTris;     // baked geometry + shade data (open-time)
-    std::vector<CpuHairTriClose> m_hairTrisClose; // close-time positions; empty = static
+    std::vector<HairNode>        m_hairNodes;      // binary BVH over hair triangles
+    std::vector<HairNodeClose>   m_hairNodesClose; // close-time node bounds; empty = static
+    std::vector<uint32_t>        m_hairPrimIdx;    // leaf prim array → m_hairTris index
+    std::vector<CpuHairTri>      m_hairTris;       // baked geometry + shade data (open-time)
+    std::vector<CpuHairTriClose> m_hairTrisClose;  // close-time positions; empty = static
 };
 
 } // namespace anacapa
