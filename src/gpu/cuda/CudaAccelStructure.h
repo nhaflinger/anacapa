@@ -29,8 +29,11 @@ class CudaContext;
 // ---------------------------------------------------------------------------
 class CudaAccelStructure {
 public:
+    // hairTessSteps: quads per cubic Bézier segment for hair ribbon
+    // tessellation (default 4).  Same convention as MetalAccelStructure.
     CudaAccelStructure(CudaContext& ctx, const GeometryPool& pool,
-                       const CurvePool* curvePool = nullptr);
+                       const CurvePool* curvePool = nullptr,
+                       int hairTessSteps = 4);
     ~CudaAccelStructure();
 
     bool isValid() const;

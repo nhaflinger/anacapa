@@ -78,10 +78,11 @@ struct CudaAccelStructure::Impl {
 #ifdef ANACAPA_ENABLE_OPTIX
 // ---------------------------------------------------------------------------
 // Hair tessellation helpers — mirror MetalAccelStructure.mm:
-//   per cubic Bézier segment, sample (kHairTessSteps+1) ribbon cross-sections
-//   and stitch them into kHairTessSteps quads (= 2*kHairTessSteps triangles).
+//   per cubic Bézier segment, sample (hairTessSteps+1) ribbon cross-sections
+//   and stitch them into hairTessSteps quads (= 2*hairTessSteps triangles).
+//   hairTessSteps is plumbed in via the constructor (RenderSettings ->
+//   SceneView -> CudaPathIntegrator -> here).
 // ---------------------------------------------------------------------------
-static constexpr int kHairTessSteps = 4;
 
 struct PackedFloat3 { float x, y, z; };
 
@@ -118,13 +119,14 @@ static void tessellateSegment(
     Vec3f        strandColor,
     uint32_t     matIdx,
     uint32_t     vBase,
+    int          hairTessSteps,
     std::vector<PackedFloat3>& posOpen,
     std::vector<PackedFloat3>& posClose,
     std::vector<uint32_t>&     indices,
     std::vector<GpuHairTri>&   hairTris)
 {
-    for (int k = 0; k <= kHairTessSteps; ++k) {
-        float t = float(k) / float(kHairTessSteps);
+    for (int k = 0; k <= hairTessSteps; ++k) {
+        float t = float(k) / float(hairTessSteps);
         float w = (wRoot * (1.f - t) + wTip * t) * 0.5f;  // half-width (radius)
         if (w < 5e-5f) w = 5e-5f;                          // robust intersection
 
@@ -147,13 +149,13 @@ static void tessellateSegment(
         posClose.push_back({rC.x, rC.y, rC.z});
     }
 
-    for (int k = 0; k < kHairTessSteps; ++k) {
+    for (int k = 0; k < hairTessSteps; ++k) {
         uint32_t l0 = vBase + uint32_t(2*k + 0);
         uint32_t r0 = vBase + uint32_t(2*k + 1);
         uint32_t l1 = vBase + uint32_t(2*k + 2);
         uint32_t r1 = vBase + uint32_t(2*k + 3);
 
-        float tMid = (float(k) + 0.5f) / float(kHairTessSteps);
+        float tMid = (float(k) + 0.5f) / float(hairTessSteps);
         Vec3f tang = bezierTangent(cvOpen, tMid);
 
         GpuHairTri ht{};
@@ -273,9 +275,12 @@ static bool buildTriangleGAS(
 // Constructor
 // ---------------------------------------------------------------------------
 CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& pool,
-                                        const CurvePool* curvePool)
+                                        const CurvePool* curvePool,
+                                        int hairTessSteps)
     : m_impl(std::make_unique<Impl>())
 {
+    if (hairTessSteps < 1)  hairTessSteps = 1;
+    if (hairTessSteps > 32) hairTessSteps = 32;
     uint32_t numMeshes = static_cast<uint32_t>(pool.numMeshes());
     m_impl->numMeshes_ = numMeshes;
 
@@ -438,11 +443,11 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
 
                     tessellateSegment(cvOpen, cvClose, v0, v1, wRoot, wTip,
                                       strand.color, strand.materialIndex,
-                                      vBase,
+                                      vBase, hairTessSteps,
                                       hairPosOpen, hairPosClose,
                                       hairIndices, hairTriData);
 
-                    vBase += static_cast<uint32_t>(2 * (kHairTessSteps + 1));
+                    vBase += static_cast<uint32_t>(2 * (hairTessSteps + 1));
                 }
             }
 

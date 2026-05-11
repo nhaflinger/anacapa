@@ -545,7 +545,8 @@ void CudaPathIntegrator::prepare(const SceneView& scene) {
     if (!isValid() || !scene.accel) return;
 
     m_impl->accel = std::make_unique<CudaAccelStructure>(
-        *m_impl->ctx, scene.accel->pool(), scene.curvePool);
+        *m_impl->ctx, scene.accel->pool(), scene.curvePool,
+        scene.hairTessSteps);
     if (!m_impl->accel->isValid()) {
         fprintf(stderr, "[error] CudaPathIntegrator::prepare - accel build failed\n");
         return;
