@@ -765,6 +765,15 @@ bool CudaPathIntegrator::renderFrame(const SceneView& scene,
     // clearAccum() should be called when starting a fresh render (new scene/camera).
     m_impl->ensureAccum(filmWidth, filmHeight);
     CudaBuffer<GpuAccumPixel>& d_accum = m_impl->d_accum;
+    // Bail cleanly on VRAM exhaustion so the caller falls back to per-tile
+    // dispatch instead of submitting a launch with a null accum pointer.
+    if (!d_accum.isValid()) {
+        fprintf(stderr, "[error] CudaPathIntegrator::renderFrame: "
+                        "persistent accum alloc failed (%u x %u) — "
+                        "falling back to tile dispatch\n",
+                filmWidth, filmHeight);
+        return false;
+    }
 
     // Dispatch kBatchSize samples per launch — each thread traces the full
     // batch and accumulates locally before writing to the accum buffer.
@@ -848,6 +857,15 @@ void CudaPathIntegrator::renderTile(const SceneView& scene,
     uint32_t tileH = std::min(tile.height, filmHeight - tile.y0);
 
     CudaBuffer<GpuAccumPixel> d_accum(tileW * tileH);
+    // Bail cleanly on VRAM exhaustion.  Without this the launch below
+    // would scribble into a null device pointer and the download would
+    // produce arbitrary host memory contents — the source of the
+    // "tiles in the wrong place" symptom on low-memory GPUs.
+    if (!d_accum.isValid()) {
+        fprintf(stderr, "[error] CudaPathIntegrator::renderTile: "
+                        "d_accum alloc failed (%u x %u)\n", tileW, tileH);
+        return;
+    }
     d_accum.zero();
 
     LaunchParams params{};
@@ -866,6 +884,13 @@ void CudaPathIntegrator::renderTile(const SceneView& scene,
                             tileW, tileH, /*depth=*/1));
 #endif
     CUDA_CHECK(cudaStreamSynchronize(stream));
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[error] CudaPathIntegrator::renderTile: "
+                        "launch failed (%u x %u): %s\n",
+                tileW, tileH, cudaGetErrorString(err));
+        return;
+    }
 
     std::vector<GpuAccumPixel> h_accum;
     d_accum.download(h_accum);

@@ -21,7 +21,16 @@ public:
 
     explicit CudaBuffer(size_t count) : m_count(count) {
         assert(count > 0);
-        cudaMalloc(&m_ptr, count * sizeof(T));
+        cudaError_t e = cudaMalloc(&m_ptr, count * sizeof(T));
+        // On failure (most often cudaErrorMemoryAllocation) ensure m_ptr is
+        // null so isValid()/ptr() reliably signal the failure to callers.
+        // Without this, downstream code can deref a stale pointer and
+        // scribble into whatever happened to be at that VRAM address.
+        if (e != cudaSuccess) {
+            m_ptr   = nullptr;
+            m_count = 0;
+            cudaGetLastError();  // clear sticky error state
+        }
     }
 
     ~CudaBuffer() { if (m_ptr) cudaFree(m_ptr); }
