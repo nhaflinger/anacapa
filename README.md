@@ -228,6 +228,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 | `--exposure` | `0` | EV exposure adjustment for `--png` output (stops; positive = brighter) |
 | `--filter` | `mitchell` | Pixel reconstruction filter: `box`, `triangle`, `gaussian`, `mitchell`, `blackman-harris`, `catmull-rom`, `lanczos`. Mitchell-Netravali is a balanced default; `blackman-harris` matches Cycles' look |
 | `--filter-width` | `0` (auto) | Filter radius in pixels. `0` = use the filter's default (Box=0.5, Triangle=1.0, Gaussian=1.5, Mitchell=2.0, Blackman-Harris=1.5, Catmull-Rom=2.0, Lanczos=4.0) |
+| `--hair-tess-steps` | `4` | Quads per cubic Bézier hair segment for ribbon tessellation (CPU and GPU). Higher values produce smoother curves at the cost of more triangles and a slower scene commit. `1`–`2` for fast previews; `4` (default) is a good balance; `8`+ for close-up hero shots |
 | `--override-lights` | off | Replace all scene lights with a single white directional light (isolate material issues) |
 | `--override-materials` | off | Replace all scene materials with white Lambertian (isolate lighting issues) |
 | `--debug-mesh INT` | -1 (off) | Primary rays that hit any other mesh ID return black; only the target mesh is shaded.  Indirect bounces unaffected. |
