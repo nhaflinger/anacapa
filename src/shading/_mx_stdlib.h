@@ -781,6 +781,26 @@ void mx_image_color3(textureresource file, string layer, color default_value, ve
 
     color missingColor = default_value;
     vector2 st = mx_transform_uv(texcoord);
+
+    // For greyscale (1-channel) or greyscale+alpha (2-channel) textures, OIIO
+    // maps channel 0 → R, channel 1 (alpha) → G, and leaves B=0 when 3 channels
+    // are requested.  This produces a yellow-green tint on neutral-grey textures.
+    // Fix: read only the first channel and replicate to all three.
+    int nchannels = 3;
+    gettextureinfo(file.filename, "nchannels", nchannels);
+    if (nchannels <= 2) {
+        float g = texture(file.filename, st.x, st.y,
+                          "firstchannel", 0, "nchannels", 1,
+                          "interp", filtertype,
+                          "swrap", uaddressmode, "twrap", vaddressmode
+#if OSL_VERSION_MAJOR >= 1 && OSL_VERSION_MINOR >= 14
+                          , "colorspace", file.colorspace
+#endif
+                          );
+        out = color(g, g, g);
+        return;
+    }
+
     out = texture(file.filename, st.x, st.y,
                   "subimage", layer, "interp", filtertype,
                   "missingcolor", missingColor,
