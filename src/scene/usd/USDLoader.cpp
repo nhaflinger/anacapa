@@ -1193,9 +1193,12 @@ static Camera buildCamera(const UsdPrim& prim,
         return cam;
     }
 
-    spdlog::info("USDLoader: camera '{}' origin=({:.2f},{:.2f},{:.2f}) fov={:.1f}° (pinhole)",
+    Vec3f fwd = safeNormalize(target - origin);
+    spdlog::info("USDLoader: camera '{}' origin=({:.2f},{:.2f},{:.2f}) "
+                 "fwd=({:.2f},{:.2f},{:.2f}) fov={:.1f}° (pinhole)",
                  prim.GetPath().GetString(),
-                 origin.x, origin.y, origin.z, vfovDeg);
+                 origin.x, origin.y, origin.z,
+                 fwd.x, fwd.y, fwd.z, vfovDeg);
 
     Camera cam = Camera::makePinhole(origin, target, up, vfovDeg, filmWidth, filmHeight);
     cam.focalLength = focalLen_world;
@@ -1689,10 +1692,56 @@ LoadedScene loadUSD(const std::string& path,
             // Check for a texture file
             std::string texturePath;
             SdfAssetPath ap;
-            if (dome.GetTextureFileAttr().Get(&ap))
+            if (dome.GetTextureFileAttr().Get(&ap)) {
                 texturePath = ap.GetResolvedPath().empty()
                             ? ap.GetAssetPath()
                             : ap.GetResolvedPath();
+
+                // Blender may export environment textures with a <UDIM> token when
+                // the filename ends in _NNNN (e.g. sky_1920.jpg → sky_<UDIM>.jpg).
+                // USD's resolver cannot expand UDIM for DomeLights, so we recover the
+                // actual file by scanning the directory for a match.
+                if (texturePath.find("<UDIM>") != std::string::npos) {
+                    // Make the path absolute relative to the USD stage directory.
+                    namespace fs = std::filesystem;
+                    fs::path raw(texturePath);
+                    if (raw.is_relative())
+                        raw = fs::path(stageDir) / raw;
+
+                    // Build a glob prefix/suffix around the <UDIM> token.
+                    std::string stem = raw.string();
+                    auto udimPos = stem.find("<UDIM>");
+                    std::string prefix = stem.substr(0, udimPos);
+                    std::string suffix = stem.substr(udimPos + 6); // len("<UDIM>") = 6
+
+                    std::string found;
+                    std::error_code ec;
+                    for (auto& entry : fs::directory_iterator(raw.parent_path(), ec)) {
+                        std::string s = entry.path().string();
+                        if (s.substr(0, prefix.size()) == prefix &&
+                            s.size() >= prefix.size() + suffix.size() &&
+                            s.substr(s.size() - suffix.size()) == suffix) {
+                            found = s;
+                            break;
+                        }
+                    }
+                    if (!found.empty()) {
+                        spdlog::info("USDLoader: domeLight UDIM path '{}' resolved to '{}'",
+                                     texturePath, found);
+                        texturePath = found;
+                    } else {
+                        spdlog::warn("USDLoader: domeLight UDIM path '{}' — no matching "
+                                     "file found in '{}'", texturePath,
+                                     raw.parent_path().string());
+                    }
+                } else if (!texturePath.empty()) {
+                    // Resolve relative paths against the stage directory.
+                    namespace fs = std::filesystem;
+                    fs::path p(texturePath);
+                    if (p.is_relative())
+                        texturePath = (fs::path(stageDir) / p).string();
+                }
+            }
 
             // Bounds placeholder — updated after all meshes are loaded
             auto domeLight = std::make_unique<DomeLight>(

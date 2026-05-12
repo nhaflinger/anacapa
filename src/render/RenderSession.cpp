@@ -175,18 +175,18 @@ void RenderSession::loadScene() {
         }
 
         // ---- Override lights: replace all USD lights with a diagnostic light --
-        if (m_settings.overrideLights && !m_scene.lights.empty()) {
-            spdlog::info("--override-lights: discarding {} USD light(s), "
+        if (m_settings.overrideLights &&
+                (!m_scene.lights.empty() || m_scene.envLight != nullptr)) {
+            spdlog::info("--override-lights: discarding {} USD light(s) + envLight, "
                          "installing white directional light", m_scene.lights.size());
             m_scene.lights.clear();
             m_scene.envLight = nullptr;
             m_lights.clear();
         }
 
-        // ---- Auto-sun: add a headlamp if the scene has no lights -----------
-        // The light is fixed to the camera and points in the camera's forward
-        // direction so every surface in the frustum is illuminated.
-        if (m_scene.lights.empty()) {
+        // ---- Auto-sun: add a headlamp if the scene has no punctual lights --
+        // Also fires when override-lights cleared everything (envLight only scenes).
+        if (m_scene.lights.empty() && m_scene.envLight == nullptr) {
             BBox3f bounds = computeSceneBounds(m_geomPool);
             Vec3f  center = bounds.valid() ? bounds.centroid() : Vec3f{};
             float  radius = bounds.valid()
@@ -481,6 +481,20 @@ void RenderSession::render() {
     // DomeLight (HDRI environment) — set up before prepare() so the integrator
     // can see envLight during subpath tracing.
     if (!m_settings.envPath.empty()) {
+        // Evict any DomeLight that loadUSD already installed (e.g. a dark USD
+        // DomeLight) so NEE doesn't sample a stale envLight alongside the new one.
+        if (m_scene.envLight) {
+            auto* old = m_scene.envLight;
+            m_scene.lights.erase(
+                std::remove(m_scene.lights.begin(), m_scene.lights.end(), old),
+                m_scene.lights.end());
+            m_lights.erase(
+                std::remove_if(m_lights.begin(), m_lights.end(),
+                    [old](const auto& p){ return p.get() == old; }),
+                m_lights.end());
+            m_scene.envLight = nullptr;
+        }
+
         BBox3f bounds = computeSceneBounds(m_geomPool);
         float radius  = bounds.valid()
             ? bounds.diagonal().length() * 0.5f * 2.f : 10.f;
@@ -493,7 +507,7 @@ void RenderSession::render() {
         m_scene.envLight = dome.get();
         m_scene.lights.push_back(dome.get());
         m_lights.push_back(std::move(dome));
-        spdlog::info("DomeLight: '{}' intensity={:.2f}",
+        spdlog::info("DomeLight override: '{}' intensity={:.2f}",
                      m_settings.envPath, m_settings.envIntensity);
     }
 
