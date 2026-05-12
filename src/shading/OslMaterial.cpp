@@ -256,6 +256,46 @@ public:
         }
         return false;
     }
+
+    // String-based get_matrix/get_inverse_matrix: called by OSL when evaluating
+    // transform("object", P) or transform("world", P) in shader code.
+    // "object" → object2common = object-to-world; inverse = world-to-object.
+    // Convention: Mat4f is column-vector; Imath Matrix44 is row-vector.
+    // Transpose on copy: result.x[i][j] = m.m[j][i].
+    bool get_matrix(OSL::ShaderGlobals* sg, OSL::Matrix44& result,
+                    OSL::ustringhash from, float /*time*/) override {
+        if (!sg || !sg->renderstate) return false;
+        static const OSL::ustringhash s_object(OSL::ustring("object"));
+        if (from != s_object) return false;
+        const ShadingContext* ctx =
+            static_cast<const ShadingContext*>(sg->renderstate);
+        const Mat4f& m = ctx->objectToWorld;
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                result.x[i][j] = m.m[j][i];
+        return true;
+    }
+    bool get_matrix(OSL::ShaderGlobals* sg, OSL::Matrix44& result,
+                    OSL::ustringhash from) override {
+        return get_matrix(sg, result, from, 0.f);
+    }
+    bool get_inverse_matrix(OSL::ShaderGlobals* sg, OSL::Matrix44& result,
+                            OSL::ustringhash to, float /*time*/) override {
+        if (!sg || !sg->renderstate) return false;
+        static const OSL::ustringhash s_object(OSL::ustring("object"));
+        if (to != s_object) return false;
+        const ShadingContext* ctx =
+            static_cast<const ShadingContext*>(sg->renderstate);
+        const Mat4f& m = ctx->worldToObject;
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                result.x[i][j] = m.m[j][i];
+        return true;
+    }
+    bool get_inverse_matrix(OSL::ShaderGlobals* sg, OSL::Matrix44& result,
+                            OSL::ustringhash to) override {
+        return get_inverse_matrix(sg, result, to, 0.f);
+    }
 #else
     bool texture(OSL::ustring filename,
                  TextureHandle* texture_handle,
@@ -311,7 +351,84 @@ public:
         }
         return false;
     }
+
+    bool get_matrix(OSL::ShaderGlobals* sg, OSL::Matrix44& result,
+                    OSL::ustring from, float /*time*/) override {
+        if (!sg || !sg->renderstate) return false;
+        if (from != OSL::ustring("object")) return false;
+        const ShadingContext* ctx =
+            static_cast<const ShadingContext*>(sg->renderstate);
+        const Mat4f& m = ctx->objectToWorld;
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                result.x[i][j] = m.m[j][i];
+        return true;
+    }
+    bool get_matrix(OSL::ShaderGlobals* sg, OSL::Matrix44& result,
+                    OSL::ustring from) override {
+        return get_matrix(sg, result, from, 0.f);
+    }
+    bool get_inverse_matrix(OSL::ShaderGlobals* sg, OSL::Matrix44& result,
+                            OSL::ustring to, float /*time*/) override {
+        if (!sg || !sg->renderstate) return false;
+        if (to != OSL::ustring("object")) return false;
+        const ShadingContext* ctx =
+            static_cast<const ShadingContext*>(sg->renderstate);
+        const Mat4f& m = ctx->worldToObject;
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                result.x[i][j] = m.m[j][i];
+        return true;
+    }
+    bool get_inverse_matrix(OSL::ShaderGlobals* sg, OSL::Matrix44& result,
+                            OSL::ustring to) override {
+        return get_inverse_matrix(sg, result, to, 0.f);
+    }
 #endif
+
+    // get_matrix / get_inverse_matrix — called by OSL when evaluating
+    // position(space="object") or any transform() call referencing "object".
+    // sg.object2common is set to a non-null sentinel before shader execution;
+    // OSL passes it back here so we know which space is being requested.
+    // The actual matrices are fetched from the ShadingContext in renderstate.
+    //
+    // CONVENTION NOTE: our Mat4f is column-vector (translation in column 3,
+    // result = M * v).  OSL's Imath::Matrix44 is row-vector (translation in
+    // row 3, result = v * M).  A raw memcpy would give OSL the transpose of
+    // the intended matrix, so we copy with i/j swapped to transpose on the way in.
+    bool get_matrix(OSL::ShaderGlobals* sg, OSL::Matrix44& result,
+                    OSL::TransformationPtr xform, float /*time*/) override {
+        if (!xform || !sg || !sg->renderstate) return false;
+        const ShadingContext* ctx =
+            static_cast<const ShadingContext*>(sg->renderstate);
+        const Mat4f& m = ctx->objectToWorld;
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                result.x[i][j] = m.m[j][i];
+        return true;
+    }
+
+    bool get_matrix(OSL::ShaderGlobals* sg, OSL::Matrix44& result,
+                    OSL::TransformationPtr xform) override {
+        return get_matrix(sg, result, xform, 0.f);
+    }
+
+    bool get_inverse_matrix(OSL::ShaderGlobals* sg, OSL::Matrix44& result,
+                            OSL::TransformationPtr xform, float /*time*/) override {
+        if (!xform || !sg || !sg->renderstate) return false;
+        const ShadingContext* ctx =
+            static_cast<const ShadingContext*>(sg->renderstate);
+        const Mat4f& m = ctx->worldToObject;
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                result.x[i][j] = m.m[j][i];
+        return true;
+    }
+
+    bool get_inverse_matrix(OSL::ShaderGlobals* sg, OSL::Matrix44& result,
+                            OSL::TransformationPtr xform) override {
+        return get_inverse_matrix(sg, result, xform, 0.f);
+    }
 };
 
 // ===========================================================================
@@ -1299,6 +1416,9 @@ private:
         sg.backfacing = false;
         // Pass the ShadingContext so get_attribute can serve hair globals.
         sg.renderstate = const_cast<ShadingContext*>(&ctx);
+        // Non-null sentinel; get_matrix/get_inverse_matrix read actual O2W
+        // from renderstate, so any non-null pointer works as the "object" key.
+        sg.object2common = static_cast<OSL::TransformationPtr>(&ctx);
         // dPdv carries the fiber tangent for curve hits; OSL hair shaders can
         // read it directly or via getattribute("hair_tangent", ...).
         if (ctx.isCurve)

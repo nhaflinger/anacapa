@@ -709,10 +709,15 @@ void BVHBackend::fillSurfaceInteraction(const BVHTriTrav& trav,
         si.ng = safeNormalize(worldXfm->transformNormal(attrib.n));
         si.n  = safeNormalize(worldXfm->transformNormal(
                     attrib.sn0 * w + attrib.sn1 * u + attrib.sn2 * v));
+        si.objectToWorld = *worldXfm;
+        si.worldToObject = worldXfm->inverse();
     } else {
         si.p  = trav.v0 + trav.e1 * u + trav.e2 * v;
         si.ng = attrib.n;
         si.n  = safeNormalize(attrib.sn0 * w + attrib.sn1 * u + attrib.sn2 * v);
+        const MeshDesc& mesh = m_pool.mesh(trav.meshID());
+        si.objectToWorld = mesh.staticObjectToWorld;
+        si.worldToObject = mesh.staticWorldToObject;
     }
 
     // Align geometric normal with the shading normal hemisphere.  USD scenes

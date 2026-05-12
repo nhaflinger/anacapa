@@ -24,18 +24,25 @@ struct ShadingContext {
     float strandV = 0.f;              // parametric position along strand ∈ [0,1] (root=0, tip=1); 0 for surfaces
     bool  isCurve = false;            // true when the hit is on a hair/curve primitive
 
+    // Object-to-world (and its inverse) at the hit point. Used by OSL
+    // position(space="object") to transform P from world to object space.
+    Mat4f objectToWorld = Mat4f::identity();
+    Mat4f worldToObject = Mat4f::identity();
+
     // Whether the ray hit the front face (dot(wo, ng) > 0)
     bool  frontFace = true;
 
     // Construct from a SurfaceInteraction + incoming ray direction
     ShadingContext(const SurfaceInteraction& si, Vec3f rayDir) {
-        p       = si.p;
-        ng      = si.ng;
-        uv      = si.uv;
-        color   = si.color;
-        h       = si.h;
-        strandV = si.strandV;
-        isCurve = si.isCurve;
+        p             = si.p;
+        ng            = si.ng;
+        uv            = si.uv;
+        color         = si.color;
+        h             = si.h;
+        strandV       = si.strandV;
+        isCurve       = si.isCurve;
+        objectToWorld = si.objectToWorld;
+        worldToObject = si.worldToObject;
 
         frontFace = dot(-rayDir, ng) > 0.f;
         // Flip normals for consistent outward convention

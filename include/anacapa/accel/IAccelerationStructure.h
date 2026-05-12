@@ -27,6 +27,11 @@ struct SurfaceInteraction {
     float    h          = 0.f;  // Hair impact parameter ∈ (-1,1): px/halfW from ray-space intersection
     Vec3f    color      = {1.f, 1.f, 1.f};  // per-strand color propagated from StrandDesc
 
+    // Object-to-world transform at the time of intersection. Used by OSL
+    // shaders to evaluate position(space="object"). Identity for hair hits.
+    Mat4f    objectToWorld = Mat4f::identity();
+    Mat4f    worldToObject = Mat4f::identity();
+
     // Filled in by the scene after intersection, not by the BVH
     const void* material = nullptr;  // IMaterial* — void* avoids circular include
 };

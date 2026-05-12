@@ -1041,8 +1041,22 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
 
     if (hasMotion) {
         desc.motionKeys = std::move(motionKeys);
+    } else {
+        // Static meshes: positions baked to world space. Store the O2W so that
+        // OSL position(space="object") can invert it to recover object coords.
+        Mat4f o2w = toMat4f(xform);
+        if (zUp) {
+            // Same Z-up correction applied in collectMotionKeys
+            Mat4f c;
+            c.m[0][0]=1; c.m[0][1]=0;  c.m[0][2]=0; c.m[0][3]=0;
+            c.m[1][0]=0; c.m[1][1]=0;  c.m[1][2]=1; c.m[1][3]=0;
+            c.m[2][0]=0; c.m[2][1]=-1; c.m[2][2]=0; c.m[2][3]=0;
+            c.m[3][0]=0; c.m[3][1]=0;  c.m[3][2]=0; c.m[3][3]=1;
+            o2w = c * o2w;
+        }
+        desc.staticObjectToWorld = o2w;
+        desc.staticWorldToObject = o2w.inverse();
     }
-    // Static meshes: positions already in world space; motionKeys stays empty.
 
     if (outFaceTriStart) *outFaceTriStart = std::move(faceTriStart);
     if (outFaceTriCount) *outFaceTriCount = std::move(faceTriCount);
@@ -1066,8 +1080,10 @@ static uint32_t extractSubsetMesh(
     GeometryPool&                   pool)
 {
     MeshDesc sub;
-    sub.name       = fullMesh.name;
-    sub.motionKeys = fullMesh.motionKeys;
+    sub.name                 = fullMesh.name;
+    sub.motionKeys           = fullMesh.motionKeys;
+    sub.staticObjectToWorld  = fullMesh.staticObjectToWorld;
+    sub.staticWorldToObject  = fullMesh.staticWorldToObject;
 
     for (int fi : faceIndices) {
         if (fi < 0 || fi >= (int)faceTriStart.size()) continue;
@@ -1465,8 +1481,10 @@ LoadedScene loadUSD(const std::string& path,
                 if (anySubsets) {
                     const MeshDesc& fullMesh = result.geomPool.mesh(meshID);
                     MeshDesc residual;
-                    residual.name       = fullMesh.name;
-                    residual.motionKeys = fullMesh.motionKeys;
+                    residual.name                = fullMesh.name;
+                    residual.motionKeys          = fullMesh.motionKeys;
+                    residual.staticObjectToWorld = fullMesh.staticObjectToWorld;
+                    residual.staticWorldToObject = fullMesh.staticWorldToObject;
 
                     for (int fi = 0; fi < (int)faceCoveredBySubset.size(); ++fi) {
                         if (faceCoveredBySubset[fi]) continue;  // skip — already in a subset mesh
@@ -1532,14 +1550,17 @@ LoadedScene loadUSD(const std::string& path,
             Vec3f uHalf = transformPoint(xform, GfVec3d(width * 0.5, 0, 0), zUp) - center;
             Vec3f vHalf = transformPoint(xform, GfVec3d(0, height * 0.5, 0), zUp) - center;
 
-            // When normalize=true, USD intensity is irradiance (W/m²).
-            // Our AreaLight Le is radiance (W/m²/sr); for a Lambertian emitter: Le = E/π.
-            float leScale = normalize ? (1.f / 3.14159265f) : 1.f;
+            // Blender always exports normalize=true with intensity = energy/π.
+            // To recover radiance: Le = intensity/area (Power = Le*area*π = energy).
+            // normalize=false: intensity is raw radiance.
+            float lightArea = cross(uHalf, vHalf).length() * 4.f;
+            float leScale = normalize ? (1.f / lightArea) : 1.f;
             Spectrum Le = {color[0] * intensity * leScale,
                            color[1] * intensity * leScale,
                            color[2] * intensity * leScale};
 
-            auto light = std::make_unique<AreaLight>(center, uHalf, vHalf, Le);
+            // Swap u/v so cross(uHalf,vHalf) = -Z local = USD emit direction
+            auto light = std::make_unique<AreaLight>(center, vHalf, uHalf, Le);
             result.sceneView.lights.push_back(light.get());
             result.lights.push_back(std::move(light));
 
@@ -1603,7 +1624,9 @@ LoadedScene loadUSD(const std::string& path,
             Vec3f xEdge = transformPoint(xform, GfVec3d(radius, 0, 0), zUp) - center;
             Vec3f yEdge = transformPoint(xform, GfVec3d(0, radius, 0), zUp) - center;
 
-            float leScale = normalize ? (1.f / 3.14159265f) : 1.f;
+            // Same Blender convention: intensity=energy/π, normalize=true.
+            float diskArea = 3.14159265f * radius * radius;
+            float leScale = normalize ? (1.f / diskArea) : 1.f;
             Spectrum Le = {color[0] * intensity * leScale,
                            color[1] * intensity * leScale,
                            color[2] * intensity * leScale};
@@ -1614,7 +1637,8 @@ LoadedScene loadUSD(const std::string& path,
             Vec3f uDir = xEdge.lengthSq() > 1e-12f ? xEdge * (halfSide / xEdge.length()) : Vec3f{halfSide, 0, 0};
             Vec3f vDir = yEdge.lengthSq() > 1e-12f ? yEdge * (halfSide / yEdge.length()) : Vec3f{0, 0, halfSide};
 
-            auto light = std::make_unique<AreaLight>(center, uDir, vDir, Le);
+            // Swap u/v so cross(uDir,vDir) = -Z local = USD emit direction
+            auto light = std::make_unique<AreaLight>(center, vDir, uDir, Le);
             result.sceneView.lights.push_back(light.get());
             result.lights.push_back(std::move(light));
 

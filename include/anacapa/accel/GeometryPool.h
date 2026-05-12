@@ -41,6 +41,12 @@ struct MeshDesc {
     // Positions are kept in object space when motionKeys is non-empty.
     std::vector<MotionKey> motionKeys;
 
+    // Static O2W: the world transform baked into vertex positions for static
+    // meshes (motionKeys empty). Needed to reconstruct object-space coords for
+    // OSL position(space="object") calls. Identity if unknown.
+    Mat4f staticObjectToWorld = Mat4f::identity();
+    Mat4f staticWorldToObject = Mat4f::identity();
+
     bool hasMotion() const { return !motionKeys.empty(); }
 
     // Convenience: transform at shutter-open (first key)

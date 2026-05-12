@@ -2202,16 +2202,14 @@ class _MtlxBuilder:
         mx_node.addInput('diminish',   'float').setValue(rough)
 
         # Apply scale via position transform
-        pos_n = self._ng.addNode('multiply', self._uid('nscale'), 'vector3')
         tc    = self._ng.addNode('position', self._uid('pos'), 'vector3')
         tc.addInput('space', 'string').setValueString('object')
-        pi = pos_n.addInput('in1', 'vector3')
-        pi.setNodeName(tc.getName())
-        pos_n.addInput('in2', 'vector3').setValueString(f'{scale}, {scale}, {scale}')
-        pos_out = pos_n.addOutput('out', 'vector3')
 
-        noise_pos = mx_node.addInput('position', 'vector3')
-        noise_pos.setNodeName(pos_n.getName())
+        pos_n = self._ng.addNode('multiply', self._uid('nscale'), 'vector3')
+        pos_n.addInput('in1', 'vector3').setNodeName(tc.getName())
+        pos_n.addInput('in2', 'vector3').setValueString(f'{scale}, {scale}, {scale}')
+
+        mx_node.addInput('position', 'vector3').setNodeName(pos_n.getName())
 
         return mx_node.addOutput('out', 'float')
 
