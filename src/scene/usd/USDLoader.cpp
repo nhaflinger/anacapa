@@ -1868,23 +1868,21 @@ LoadedScene loadUSD(const std::string& path,
             const IMaterial* imat = result.sceneView.materials[mid];
             if (!imat) continue;
 
-            const auto* smat = dynamic_cast<const StandardSurfaceMaterial*>(imat);
-            if (!smat) continue;
-
-            const StandardSurfaceMaterial::Params& sp = smat->params();
-            if (sp.emission <= 0.f) continue;
-
-            // Use the constant emission color.  For texture-driven emission the
-            // constant fallback is (0,0,0); fall back to a warm white so the mesh
-            // still contributes to direct illumination (NEE).  The intensity is
-            // approximate — texture-driven emitters self-illuminate via Le() at
-            // full accuracy, but NEE needs a finite Le to sample toward them.
-            Spectrum Le = sp.emission_color.value * sp.emission;
-            if (isBlack(Le)) {
-                if (!sp.emission_color.path.empty())
-                    Le = {sp.emission * 1.f, sp.emission * 0.7f, sp.emission * 0.3f}; // warm orange approximation
-                else
-                    continue;  // truly black emitter, skip
+            // Determine proxy Le: check StandardSurface first, then OslMaterial probe.
+            Spectrum Le = {};
+            if (const auto* smat = dynamic_cast<const StandardSurfaceMaterial*>(imat)) {
+                const StandardSurfaceMaterial::Params& sp = smat->params();
+                if (sp.emission <= 0.f) continue;
+                Le = sp.emission_color.value * sp.emission;
+                if (isBlack(Le)) {
+                    if (!sp.emission_color.path.empty())
+                        Le = {sp.emission * 1.f, sp.emission * 0.7f, sp.emission * 0.3f};
+                    else
+                        continue;
+                }
+            } else {
+                Le = imat->probeEmission();
+                if (isBlack(Le)) continue;
             }
 
             // Compute tight AABB of this mesh in world space

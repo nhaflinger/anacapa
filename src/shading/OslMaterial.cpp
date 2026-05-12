@@ -1179,6 +1179,12 @@ public:
             float lum = luminance(diffuseColor);
             m_baseColor = (lum > 1e-4f) ? diffuseColor : Spectrum{0.5f, 0.5f, 0.5f};
 
+            // Cache emission from probe for auto-registration of emissive meshes.
+            for (auto& l : lobes) {
+                if (l.kind == OslLobe::Kind::Emission)
+                    m_probeEmission = m_probeEmission + l.emittance;
+            }
+
             // Cache roughness from the dominant GGX lobe for the GPU preview.
             // alpha2 = roughness^4 in Disney convention, so roughness = (alpha2)^0.25.
             float bestWeight = 0.f;
@@ -1255,6 +1261,7 @@ public:
         return m_baseColor;
     }
     float    roughness() const override { return m_roughness; }
+    Spectrum probeEmission() const override { return m_probeEmission; }
 
     // ---------- Le: emitted radiance ----------
     Spectrum Le(const ShadingContext& ctx, Vec3f wo) const override {
@@ -1386,6 +1393,7 @@ private:
     Spectrum                    m_transmittanceTint = {};
     Spectrum                    m_baseColor         = {0.5f, 0.5f, 0.5f};
     float                       m_roughness         = 1.0f;  // from dominant GGX lobe, cached at ctor
+    Spectrum                    m_probeEmission     = {};    // emission at uv=(0.5,0.5), cached at ctor
 
     // Fallback Marschner material used when ctx.isCurve == true.
     // Constructed at OslMaterial init from the probed OSL closure parameters.

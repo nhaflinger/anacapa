@@ -81,6 +81,11 @@ public:
         return {};
     }
 
+    // Representative emission from a probe evaluation at uv=(0.5,0.5).
+    // Non-zero if this material emits light; used to auto-register emissive
+    // meshes as AreaLights for NEE.  Returns {} for non-emitting materials.
+    virtual Spectrum probeEmission() const { return {}; }
+
     // Hemispherical albedo — the surface reflectance, used as a denoising hint.
     // Returns black for emitters and unimplemented materials.
     virtual Spectrum reflectance(const ShadingContext& ctx) const {
