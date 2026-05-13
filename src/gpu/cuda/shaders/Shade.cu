@@ -1287,11 +1287,26 @@ extern "C" __global__ void __raygen__wf_bounce()
     bool   prevWasDelta = (st.flags & kWfPrevWasDelta) != 0;
     bool   causticChain = (st.flags & kWfCausticChain) != 0;
     uint32_t rng        = st.rng;
+    uint32_t glassDepth = st.glassDepth;
     const uint32_t bounce  = st.bounce;
     const float    rayTime = st.rayTime;
 
-    // Hit the scene.
-    TraceResult hit = trace(rayOrig, rayDir, 1e-4f, 1e10f, rayTime);
+    // Glass hops do not consume the host-loop budget — handle them inline
+    // here, looping back to trace until we hit a non-glass surface, an emitter,
+    // a miss, or the glass-depth cap.  This mirrors the megakernel's
+    // `if (bounce > 0) --bounce; ++glassDepth; continue` bookkeeping, so a
+    // hollow transparent object with many internal interfaces can resolve
+    // inside one bounce launch instead of stalling halfway through.
+    TraceResult hit;
+    float3      hitPos;
+    float3      geomN;
+    float3      n;
+    uint32_t    matIdx;
+    GpuMaterial mat;
+    float3      baseColor;
+    float3      emissive;
+    while (true) {
+    hit = trace(rayOrig, rayDir, 1e-4f, 1e10f, rayTime);
 
     // ---- Miss ---------------------------------------------------------------
     if (!hit.valid) {
@@ -1329,7 +1344,7 @@ extern "C" __global__ void __raygen__wf_bounce()
         return;
     }
 
-    const float3 hitPos = rayOrig + rayDir * hit.t;
+    hitPos = rayOrig + rayDir * hit.t;
 
     // ----------------------------------------------------------------
     // Hair hit — uses its own per-primitive metadata buffer and the
@@ -1497,15 +1512,15 @@ extern "C" __global__ void __raygen__wf_bounce()
         return;
     }
 
-    float3 geomN = interpolateNormal(hit.primID, hit.bary,
-                                      params.normals, params.indices);
-    float3 n = geomN;
+    geomN = interpolateNormal(hit.primID, hit.bary,
+                              params.normals, params.indices);
+    n = geomN;
     if (dot(-1.0f * rayDir, n) < 0.0f) n = -1.0f * n;
 
-    uint32_t matIdx  = (hit.meshID < params.numMaterials) ? hit.meshID : 0u;
-    GpuMaterial mat  = params.materials[matIdx];
-    float3 baseColor = make3(mat.baseColor);
-    float3 emissive  = make3(mat.emissive);
+    matIdx    = (hit.meshID < params.numMaterials) ? hit.meshID : 0u;
+    mat       = params.materials[matIdx];
+    baseColor = make3(mat.baseColor);
+    emissive  = make3(mat.emissive);
 
     // ---- Emitter Le ---------------------------------------------------------
     if (mat.type == kMatEmissive) {
@@ -1527,29 +1542,75 @@ extern "C" __global__ void __raygen__wf_bounce()
         st.L = {L.x, L.y, L.z};
         st.flags |= kWfTerminated;
         st.rng = rng;
+        st.glassDepth = glassDepth;
         params.wfRays[flatIdx] = st;
         return;
     }
 
+    // ---- Glass: refract/reflect inline, loop back to trace -----------------
+    if (mat.type == kMatGlass) {
+        bool   entering = dot(rayDir, geomN) < 0.0f;
+        float3 faceN    = entering ? geomN : -1.0f * geomN;
+        float  eta      = entering ? (1.0f / mat.specularIOR) : mat.specularIOR;
+        float  cosI     = dot(-1.0f * rayDir, faceN);
+        float  Fr       = fresnelDielectric(cosI, 1.0f / eta);
+        float3 wiGlass;
+        if (rand01(rng) < Fr) {
+            wiGlass = reflect(rayDir, faceN);
+            rayOrig = hitPos + faceN * 1e-4f;
+        } else {
+            wiGlass = refract(rayDir, faceN, eta);
+            if (dot(wiGlass, wiGlass) < 0.5f) {
+                wiGlass = reflect(rayDir, faceN);
+                rayOrig = hitPos + faceN * 1e-4f;
+            } else {
+                wiGlass = normalize(wiGlass);
+                rayOrig = hitPos - faceN * 1e-4f;
+            }
+        }
+        rayDir       = normalize(wiGlass);
+        prevBsdfPdf  = 1.0f;
+        prevN        = faceN;
+        prevWasDelta = true;
+        if (mat.causticGenerator) causticChain = true;
+        ++glassDepth;
+        if (glassDepth >= 16u) {
+            // Hit the cap — terminate with whatever L we've accumulated.
+            st.origin     = {rayOrig.x, rayOrig.y, rayOrig.z};
+            st.dir        = {rayDir.x,  rayDir.y,  rayDir.z};
+            st.L          = {L.x, L.y, L.z};
+            st.prevN      = {prevN.x, prevN.y, prevN.z};
+            st.prevBsdfPdf = prevBsdfPdf;
+            st.rng        = rng;
+            st.glassDepth = glassDepth;
+            st.flags      = kWfPrevWasDelta | kWfTerminated
+                          | (causticChain ? kWfCausticChain : 0u);
+            params.wfRays[flatIdx] = st;
+            return;
+        }
+        continue;  // loop back to trace
+    }
+
+    break;  // non-delta, non-emissive — fall through to NEE/RR/sample below
+    } // end while (true)
+
     float3 wo = -1.0f * rayDir;
 
-    // ---- NEE + photon-map (non-glass only) ---------------------------------
-    if (mat.type != kMatGlass) {
-        L += throughput * sampleDirect(hitPos, n, wo,
-                                       mat.type, baseColor,
-                                       mat.roughness, mat.metalness,
-                                       mat.specular,
-                                       rng, rayTime);
-        // Photon map only fires at the first non-glass hit on the camera path,
-        // signalled by prevWasDelta still being set from the camera-vertex
-        // initialisation (gets cleared after the first diffuse/glossy bounce).
-        if (prevWasDelta) {
-            float3 Lcaustic = queryPhotonMap(hitPos, n, wo,
-                                              mat.type, baseColor,
-                                              mat.roughness, mat.metalness,
-                                              mat.specular);
-            L += throughput * Lcaustic;
-        }
+    // ---- NEE + photon-map (mat is non-glass / non-emissive here) -----------
+    L += throughput * sampleDirect(hitPos, n, wo,
+                                   mat.type, baseColor,
+                                   mat.roughness, mat.metalness,
+                                   mat.specular,
+                                   rng, rayTime);
+    // Photon map only fires at the first non-glass hit on the camera path,
+    // signalled by prevWasDelta still being set from the camera-vertex
+    // initialisation (gets cleared after the first diffuse/glossy bounce).
+    if (prevWasDelta) {
+        float3 Lcaustic = queryPhotonMap(hitPos, n, wo,
+                                          mat.type, baseColor,
+                                          mat.roughness, mat.metalness,
+                                          mat.specular);
+        L += throughput * Lcaustic;
     }
 
     // ---- Russian roulette --------------------------------------------------
@@ -1571,50 +1632,7 @@ extern "C" __global__ void __raygen__wf_bounce()
     float3 bsdfF;
     bool   isDelta = false;
 
-    if (mat.type == kMatGlass) {
-        // Delta refract/reflect.  Throughput stays unchanged (no BSDF
-        // attenuation, no cosI scaling), and glassDepth bumps instead of
-        // bounce so the path's non-delta depth budget isn't consumed —
-        // matches the megakernel's `if (bounce > 0) --bounce; ++glassDepth`
-        // bookkeeping.
-        bool   entering = dot(rayDir, geomN) < 0.0f;
-        float3 faceN    = entering ? geomN : -1.0f * geomN;
-        float  eta      = entering ? (1.0f / mat.specularIOR) : mat.specularIOR;
-        float  cosI     = dot(-1.0f * rayDir, faceN);
-        float  Fr       = fresnelDielectric(cosI, 1.0f / eta);
-        if (rand01(rng) < Fr) {
-            wi = reflect(rayDir, faceN);
-            rayOrig = hitPos + faceN * 1e-4f;
-        } else {
-            wi = refract(rayDir, faceN, eta);
-            if (dot(wi, wi) < 0.5f) {
-                wi = reflect(rayDir, faceN);
-                rayOrig = hitPos + faceN * 1e-4f;
-            } else {
-                wi = normalize(wi);
-                rayOrig = hitPos - faceN * 1e-4f;
-            }
-        }
-
-        // Commit the delta bounce directly; skip the post-loop throughput
-        // multiply which would scale by cosI and break delta physics.
-        rayDir = normalize(wi);
-        st.origin     = {rayOrig.x, rayOrig.y, rayOrig.z};
-        st.dir        = {rayDir.x,  rayDir.y,  rayDir.z};
-        // throughput, L, prevN, prevBsdfPdf=1 carried over
-        st.prevBsdfPdf = 1.0f;
-        st.prevN      = {prevN.x, prevN.y, prevN.z};
-        st.rng        = rng;
-        st.bounce     = bounce;                    // unchanged
-        st.glassDepth = st.glassDepth + 1u;
-        st.flags      = kWfPrevWasDelta;
-        // Caustic chain extends through this delta hop if it was already alive
-        // or if this glass is a caustic generator.
-        if (causticChain || mat.causticGenerator) st.flags |= kWfCausticChain;
-        if (st.glassDepth >= 16) st.flags |= kWfTerminated;
-        params.wfRays[flatIdx] = st;
-        return;
-    } else if (mat.type == kMatGGX && mat.roughness < 0.95f) {
+    if (mat.type == kMatGGX && mat.roughness < 0.95f) {
         float  alpha  = mat.roughness * mat.roughness;
         float  alpha2 = alpha * alpha;
         float3 F0     = lerp3(make_float3(0.04f, 0.04f, 0.04f), baseColor, mat.metalness);
@@ -1683,7 +1701,10 @@ extern "C" __global__ void __raygen__wf_bounce()
     st.prevBsdfPdf = bsdfPdf;
     st.rng        = rng;
     st.bounce     = bounce + 1;
-    st.flags      = isDelta ? kWfPrevWasDelta : 0u;
+    st.glassDepth = glassDepth;
+    // Non-delta sample clears the caustic chain so the next photon-map
+    // query / emitter Le at a downstream delta chain starts fresh.
+    st.flags      = 0u;
     // Hit max depth? Terminate so finalize collects L cleanly.
     if (st.bounce > params.cam.maxDepth) st.flags |= kWfTerminated;
     params.wfRays[flatIdx] = st;
