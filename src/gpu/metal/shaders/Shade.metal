@@ -576,9 +576,12 @@ static float3 shadowTransmittance(
         GpuMaterial mat = materials[matIdx];
 
         if (mat.type == kMatGlass) {
-            // When the photon map is active, glass is a delta surface — opaque
-            // to shadow rays, just like the CPU shadowTransmittance fix.
-            if (blockGlass) return float3(0);
+            // Glass is opaque to shadow rays only when a photon map is active
+            // AND this specific material is flagged as a caustic generator.
+            // Non-flagged glass keeps attenuating NEE by its transmission tint
+            // so ordinary windows / drinking glasses pass shadow light correctly
+            // even when --integrator photon is enabled.
+            if (blockGlass && mat.causticGenerator) return float3(0);
 
             // Without a photon map, attenuate by transmission so glass still
             // passes some light through (approximate but better than hard black).
@@ -1552,7 +1555,9 @@ kernel void photonTrace(
             }
             r.min_distance = 1e-4f;
             r.max_distance = 1e10f;
-            ++numSpecular;
+            // Only specular bounces through caustic-flagged glass count toward
+            // "this photon is a caustic photon" — see ShadowRay.h / IMaterial.
+            if (mat.causticGenerator) ++numSpecular;
             // Delta surface — throughput unchanged
 
         } else {

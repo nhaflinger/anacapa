@@ -101,7 +101,13 @@ void PhotonMapIntegrator::tracePhotons(const SceneView& scene) {
 
                 photonRay = spawnRay(si.p, si.n, bs.wi);
                 photonRay.skipStrandID = si.isCurve ? si.strandID : ~0u;
-                ++numSpecular;
+                // Only specular bounces through caustic-flagged surfaces count
+                // toward "this photon is a caustic photon."  A photon that
+                // refracts through a non-flagged window before hitting the
+                // floor is just direct lighting — let NEE carry that, and
+                // don't store the photon (it'd be wasted storage + bias).
+                if (mat->isCausticGenerator())
+                    ++numSpecular;
             } else {
                 // Diffuse surface: store as caustic photon if we bounced through specular
                 if (numSpecular > 0) {
@@ -220,6 +226,12 @@ Spectrum PhotonMapIntegrator::Li(const Ray& ray, const SceneView& scene,
     Vec3f prevP        = {};
     bool  prevWasDelta = true;
     bool  firstHit     = true;
+    // Tracks whether the current delta chain (since the last non-delta vertex)
+    // has crossed at least one caustic-flagged surface.  When true, an emitter
+    // hit at the end of the chain is already counted by the photon density
+    // estimate that fired at the previous diffuse vertex — adding Le here too
+    // would double-count, so we suppress it.
+    bool  causticChain = false;
 
     for (uint32_t bounce = 0; bounce <= m_maxDepth; ++bounce) {
         TraceResult hit = scene.accel->trace(r);
@@ -228,7 +240,7 @@ Spectrum PhotonMapIntegrator::Li(const Ray& ray, const SceneView& scene,
             Spectrum bg = scene.envLight
                 ? scene.envLight->Le({}, {}, r.direction)
                 : scene.envRadiance;
-            if (!isBlack(bg)) {
+            if (!isBlack(bg) && !causticChain) {
                 float weight = 1.f;
                 if (!prevWasDelta && bounce > 0) {
                     float lpdf = emitterPdf(prevP, r.direction, scene);
@@ -274,9 +286,11 @@ Spectrum PhotonMapIntegrator::Li(const Ray& ray, const SceneView& scene,
             firstHit  = false;
         }
 
-        // Emitter Le with MIS weight
+        // Emitter Le with MIS weight.  Suppressed if the path reached this
+        // vertex through a caustic-flagged delta chain — the photon density
+        // estimate at the previous diffuse vertex already counted it.
         Spectrum Le = mat->Le(ctx, wo);
-        if (!isBlack(Le)) {
+        if (!isBlack(Le) && !causticChain) {
             float weight = 1.f;
             if (!prevWasDelta && bounce > 0) {
                 float lpdf = emitterPdf(prevP, r.direction, scene);
@@ -314,6 +328,13 @@ Spectrum PhotonMapIntegrator::Li(const Ray& ray, const SceneView& scene,
         prevP        = si.p;
         prevBsdfPdf  = bs.pdf;
         prevWasDelta = bs.isDelta();
+        // Maintain the "delta chain crossed a caustic-flagged surface" flag.
+        // A non-delta bounce resets it (the next chain starts fresh from this
+        // diffuse vertex, whose photon density estimate already fired above).
+        if (!bs.isDelta())
+            causticChain = false;
+        else if (mat->isCausticGenerator())
+            causticChain = true;
 
         beta *= bs.f / bs.pdf;
         r = spawnRay(si.p, si.n, bs.wi);
@@ -357,7 +378,7 @@ Spectrum PhotonMapIntegrator::estimateDirect(const SurfaceInteraction& si,
     Ray shadowRay = spawnRayTo(si.p, si.n, si.p + ls.wi * ls.dist);
     shadowRay.time = sceneTime;
     shadowRay.skipStrandID = si.isCurve ? si.strandID : ~0u;
-    Spectrum Tr = shadowTransmittance(shadowRay, scene);
+    Spectrum Tr = shadowTransmittance(shadowRay, scene, /*deltaOpaque=*/true);
     if (isBlack(Tr)) return {};
 
     float weight = ls.isDelta

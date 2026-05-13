@@ -72,6 +72,11 @@ struct GpuMaterial {
     // for UsdPreviewSurface, 1.0 for explicit metals, 0 for non-glossy.
     // Used by the energy-conserving spec/diff balance in the GPU shader.
     float      specular;
+    // Caustic-generator opt-in (see IMaterial::isCausticGenerator).  When 0
+    // the surface uses ordinary NEE-through-glass transmittance even with a
+    // photon map active; when 1 the photon-map gate fires here.
+    uint32_t   causticGenerator;
+    uint32_t   _pad0;
 };
 
 // ---------------------------------------------------------------------------
@@ -244,6 +249,7 @@ struct WfRayState {
 enum : uint32_t {
     kWfTerminated   = 1u << 0,
     kWfPrevWasDelta = 1u << 1,
+    kWfCausticChain = 1u << 2,  // delta chain crossed a caustic-flagged surface
 };
 
 #endif // ANACAPA_CUDA_SHARED_TYPES_H

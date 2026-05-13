@@ -76,6 +76,11 @@ struct GpuMaterial {
     // Specular layer strength [0,1] — MaterialX standard_surface `specular` knob.
     // Multiplies the dielectric Fresnel in the energy-conserving spec/diff balance.
     float           specular;
+    // Caustic-generator opt-in (see IMaterial::isCausticGenerator).  When 0
+    // the surface uses ordinary NEE-through-glass transmittance even with a
+    // photon map active; when 1 the photon-map gate fires here.
+    uint32_t        causticGenerator;
+    uint32_t        _pad0;
 };
 
 // ---------------------------------------------------------------------------

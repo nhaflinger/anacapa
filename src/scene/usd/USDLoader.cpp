@@ -497,6 +497,15 @@ static StandardSurfaceMaterial::Params resolveOpenPBRParams(
     else if (p.metalness.value > 0.01f)
         p.specular = FloatTOV(0.0f);
 
+    // Caustic opt-in: a custom bool input `anacapa_caustic` flags this surface
+    // as a caustic generator for the photon map integrator.  Off by default so
+    // existing scenes with ordinary glass keep using NEE transmittance.
+    if (UsdShadeInput causticIn = surface.GetInput(TfToken("anacapa_caustic"))) {
+        bool causticVal = false;
+        causticIn.Get(&causticVal);
+        p.caustic = causticVal;
+    }
+
     return p;
 }
 
@@ -769,6 +778,15 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                 }
             }
         }
+    }
+
+    // Caustic opt-in (UsdPreviewSurface): same custom bool as the OpenPBR
+    // parser.  Off by default so existing scenes with ordinary glass keep
+    // using NEE transmittance even in --integrator photon.
+    if (UsdShadeInput causticIn = surface.GetInput(TfToken("anacapa_caustic"))) {
+        bool causticVal = false;
+        causticIn.Get(&causticVal);
+        p.caustic = causticVal;
     }
 
     return std::make_unique<StandardSurfaceMaterial>(p);

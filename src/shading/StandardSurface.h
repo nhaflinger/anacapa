@@ -312,6 +312,7 @@ public:
         FloatTOV     opacity       = FloatTOV(1.0f);
         float        transmission  = 0.0f;   // 0 = opaque, 1 = fully transmissive (glass)
         bool         alphaMask     = false;  // true = opacity driven by texture alpha channel
+        bool         caustic       = false;  // photon map opt-in (see IMaterial::isCausticGenerator)
 
         // Emission
         float        emission       = 0.0f;
@@ -365,6 +366,8 @@ public:
         if (r < 0.001f && m_p.transmission > 0.001f && m < 0.001f) return true;
         return r < 0.001f && (m > 0.999f || s > 0.f);
     }
+
+    bool isCausticGenerator() const override { return m_p.caustic; }
 
     float roughness() const override { return m_p.roughness.value; }
     float metalness() const override { return m_p.metalness.value; }

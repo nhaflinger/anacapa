@@ -358,12 +358,13 @@ float3 shadowTransmittance(float3 origin, float3 dir, float tMax, float rayTime)
         GpuMaterial mat = params.materials[matIdx];
 
         if (mat.type == kMatGlass) {
-            // When the photon map is active, glass is opaque to shadow rays:
-            // the map is the sole carrier of transmitted/refracted light, so
-            // attenuating NEE through glass too would double-count.  Without
-            // a map, attenuate by transmission so glass still casts soft
-            // colored shadows.
-            if (params.cam.photonMapEnabled) return make_float3(0.0f, 0.0f, 0.0f);
+            // Glass is opaque to shadow rays only when (a) a photon map is
+            // active and (b) this specific material is flagged as a caustic
+            // generator — the photon map then carries that energy.  Non-flagged
+            // glass keeps attenuating NEE by its transmission tint so ordinary
+            // windows / drinking glasses pass shadow light correctly even in
+            // --integrator photon.
+            if (params.cam.photonMapEnabled && mat.causticGenerator) return make_float3(0.0f, 0.0f, 0.0f);
             T *= mat.transmission;
             if (compmax(T) < 1e-4f) return make_float3(0.0f, 0.0f, 0.0f);
             remaining -= hit.t + 1e-4f;
@@ -1097,6 +1098,12 @@ extern "C" __global__ void __raygen__rg()
         // throughput < 0.5 and add negligible caustic contribution while
         // costing ~70% of the per-hit hash-grid work — skip them.
         bool   pmQueried    = false;
+        // Tracks whether the current delta chain (since the last non-delta
+        // vertex) has crossed at least one caustic-flagged surface.  When
+        // true, an emitter / env hit at the end of the chain is already
+        // counted by the photon density estimate — suppress Le to avoid
+        // double-count.
+        bool   causticChain = false;
 
         for (uint32_t bounce = 0; bounce <= params.cam.maxDepth; ++bounce) {
             TraceResult hit = trace(rayOrig, rayDir, 1e-4f, 1e10f, rayTime);
@@ -1113,7 +1120,7 @@ extern "C" __global__ void __raygen__rg()
                 } else if (params.cam.hasEnvLight) {
                     envColor = make3(params.cam.envLe);
                 }
-                if (compmax(envColor) > 0.0f) {
+                if (compmax(envColor) > 0.0f && !causticChain) {
                     float weight = 1.0f;
                     if (!prevWasDelta && bounce > 0) {
                         // NEE dome-sampling PDF.  HDRI importance sampling when CDFs
@@ -1281,6 +1288,7 @@ extern "C" __global__ void __raygen__rg()
                 prevBsdfPdf  = bsdfPdf;
                 prevN        = ribbonN;
                 prevWasDelta = false;
+                causticChain = false;  // non-delta bounce resets the chain
                 continue;  // skip mesh material code
             }
 
@@ -1300,19 +1308,21 @@ extern "C" __global__ void __raygen__rg()
             // between the BSDF PDF that produced this ray and the rect-light
             // PDF, summed over all rect lights with uniform selection.
             if (mat.type == kMatEmissive) {
-                float weight = 1.0f;
-                if (!prevWasDelta && bounce > 0) {
-                    float lpdf = 0.0f;
-                    for (uint32_t li = 0; li < params.numLights; ++li) {
-                        if (params.lights[li].type == kLightRect) {
-                            float spdf = rectLightSolidAnglePdf(
-                                params.lights[li], hitPos, rayDir, hit.t);
-                            if (spdf > 0.0f) lpdf += spdf / float(params.numLights);
+                if (!causticChain) {
+                    float weight = 1.0f;
+                    if (!prevWasDelta && bounce > 0) {
+                        float lpdf = 0.0f;
+                        for (uint32_t li = 0; li < params.numLights; ++li) {
+                            if (params.lights[li].type == kLightRect) {
+                                float spdf = rectLightSolidAnglePdf(
+                                    params.lights[li], hitPos, rayDir, hit.t);
+                                if (spdf > 0.0f) lpdf += spdf / float(params.numLights);
+                            }
                         }
+                        if (lpdf > 0.0f) weight = powerHeuristic(prevBsdfPdf, lpdf);
                     }
-                    if (lpdf > 0.0f) weight = powerHeuristic(prevBsdfPdf, lpdf);
+                    L += throughput * emissive * weight;
                 }
-                L += throughput * emissive * weight;
                 break;
             }
 
@@ -1372,6 +1382,7 @@ extern "C" __global__ void __raygen__rg()
                 prevBsdfPdf  = 1.0f;
                 prevN        = faceN;
                 prevWasDelta = true;
+                if (mat.causticGenerator) causticChain = true;
                 if (++glassDepth >= 16) break;
                 if (bounce > 0) --bounce;
                 continue;
@@ -1440,6 +1451,7 @@ extern "C" __global__ void __raygen__rg()
             prevBsdfPdf  = bsdfPdf;
             prevN        = n;
             prevWasDelta = false;
+            causticChain = false;  // diffuse bounce resets the caustic chain
         }
 
         // Firefly clamp: scale L down if its luminance exceeds the threshold.
@@ -1595,7 +1607,11 @@ extern "C" __global__ void __raygen__photon()
                     rayOrig = hitPos - faceN * 1e-4f;
                 }
             }
-            ++numSpecular;
+            // Only count specular bounces through caustic-flagged glass —
+            // ordinary windows / drinking glasses without the flag deliver
+            // direct lighting that NEE already covers (and would otherwise
+            // produce wasted photons that show up as splotchy bias).
+            if (mat.causticGenerator) ++numSpecular;
             continue;
         }
 
@@ -1713,6 +1729,7 @@ extern "C" __global__ void __raygen__wf_bounce()
     float3 prevN      = make3(st.prevN);
     float  prevBsdfPdf= st.prevBsdfPdf;
     bool   prevWasDelta = (st.flags & kWfPrevWasDelta) != 0;
+    bool   causticChain = (st.flags & kWfCausticChain) != 0;
     uint32_t rng        = st.rng;
     const uint32_t bounce  = st.bounce;
     const float    rayTime = st.rayTime;
@@ -1725,7 +1742,7 @@ extern "C" __global__ void __raygen__wf_bounce()
         float3 envColor = make_float3(0.0f, 0.0f, 0.0f);
         if (params.cam.hasEnvLight && params.envTexture != 0)      envColor = evalEnvmap(rayDir);
         else if (params.cam.hasEnvLight)                            envColor = make3(params.cam.envLe);
-        if (compmax(envColor) > 0.0f) {
+        if (compmax(envColor) > 0.0f && !causticChain) {
             float weight = 1.0f;
             if (!prevWasDelta && bounce > 0) {
                 float lpdf = 0.0f;
@@ -1769,19 +1786,21 @@ extern "C" __global__ void __raygen__wf_bounce()
 
     // ---- Emitter Le ---------------------------------------------------------
     if (mat.type == kMatEmissive) {
-        float weight = 1.0f;
-        if (!prevWasDelta && bounce > 0) {
-            float lpdf = 0.0f;
-            for (uint32_t li = 0; li < params.numLights; ++li) {
-                if (params.lights[li].type == kLightRect) {
-                    float spdf = rectLightSolidAnglePdf(
-                        params.lights[li], hitPos, rayDir, hit.t);
-                    if (spdf > 0.0f) lpdf += spdf / float(params.numLights);
+        if (!causticChain) {
+            float weight = 1.0f;
+            if (!prevWasDelta && bounce > 0) {
+                float lpdf = 0.0f;
+                for (uint32_t li = 0; li < params.numLights; ++li) {
+                    if (params.lights[li].type == kLightRect) {
+                        float spdf = rectLightSolidAnglePdf(
+                            params.lights[li], hitPos, rayDir, hit.t);
+                        if (spdf > 0.0f) lpdf += spdf / float(params.numLights);
+                    }
                 }
+                if (lpdf > 0.0f) weight = powerHeuristic(prevBsdfPdf, lpdf);
             }
-            if (lpdf > 0.0f) weight = powerHeuristic(prevBsdfPdf, lpdf);
+            L += throughput * emissive * weight;
         }
-        L += throughput * emissive * weight;
         st.L = {L.x, L.y, L.z};
         st.flags |= kWfTerminated;
         st.rng = rng;
@@ -1866,6 +1885,9 @@ extern "C" __global__ void __raygen__wf_bounce()
         st.bounce     = bounce;                    // unchanged
         st.glassDepth = st.glassDepth + 1u;
         st.flags      = kWfPrevWasDelta;
+        // Caustic chain extends through this delta hop if it was already alive
+        // or if this glass is a caustic generator.
+        if (causticChain || mat.causticGenerator) st.flags |= kWfCausticChain;
         if (st.glassDepth >= 16) st.flags |= kWfTerminated;
         params.wfRays[flatIdx] = st;
         return;

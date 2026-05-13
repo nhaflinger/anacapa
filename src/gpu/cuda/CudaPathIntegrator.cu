@@ -65,7 +65,9 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
     gm.specularIOR = 1.5f;
     gm.specular    = 0.5f;       // matches MaterialX standard_surface default
     gm.type        = kMatLambertian;
+    gm.causticGenerator = 0u;
     if (!mat) return gm;
+    gm.causticGenerator = mat->isCausticGenerator() ? 1u : 0u;
 
     // Sample emission and reflectance up front for every material — UsdPreview-
     // Surface lights load as StandardSurfaceMaterial with emissive_color set, not

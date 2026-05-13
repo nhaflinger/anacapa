@@ -22,9 +22,17 @@ namespace anacapa {
 // `shadowRay` should already be spawned (offset + tMax set to the distance
 //  to the light).  This function re-uses the same tMax but advances the
 //  origin past each transparent surface it encounters.
+//
+// `deltaOpaque` — when true, delta (specular) surfaces block the shadow ray.
+// This is the right behavior only when a photon map is the sole carrier of
+// caustic light through those surfaces; otherwise NEE would double-count.
+// In pure path/BDPT mode (no photon map) leave it false: blocking NEE
+// through glass with no compensating photon contribution just deletes energy
+// and produces a fake hard shadow with no physical justification.
 // ---------------------------------------------------------------------------
 inline Spectrum shadowTransmittance(Ray ray,
                                     const SceneView& scene,
+                                    bool deltaOpaque = false,
                                     int maxTransparent = 8)
 {
     Spectrum T = {1.f, 1.f, 1.f};
@@ -38,10 +46,12 @@ inline Spectrum shadowTransmittance(Ray ray,
                                ? scene.materials[si.meshID] : nullptr;
         if (!mat) return {};   // unknown geometry, treat as opaque
 
-        // Delta (specular) surfaces — mirror or perfect glass — are opaque to
-        // shadow rays.  The photon map is the sole source of light that passes
-        // through these materials, so NEE must not also count it.
-        if (mat->isDelta()) return {};
+        // Delta (specular) surfaces — only opaque when (a) the caller has a
+        // photon map running and (b) this specific material is opted in as a
+        // caustic generator.  Non-flagged glass keeps using transmittanceColor()
+        // so windows, drinking glasses, etc. still pass shadow rays correctly
+        // in --integrator photon.
+        if (deltaOpaque && mat->isDelta() && mat->isCausticGenerator()) return {};
 
         ShadingContext ctx(si, ray.direction);
         Spectrum tint = mat->transmittanceColor(ctx);

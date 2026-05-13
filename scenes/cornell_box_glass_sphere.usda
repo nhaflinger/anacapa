@@ -79,6 +79,7 @@ def Xform "World"
             float inputs:roughness = 0
             float inputs:opacity = 0
             float inputs:ior = 1.5
+            bool inputs:anacapa_caustic = true
             token outputs:surface
         }
     }

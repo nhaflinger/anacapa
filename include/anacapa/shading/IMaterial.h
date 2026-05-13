@@ -57,6 +57,16 @@ public:
     // Delta materials cannot be connected in BDPT — they must be sampled.
     virtual bool isDelta() const = 0;
 
+    // True if this material should be treated as a caustic-generating surface.
+    // The photon map integrator uses this as an opt-in: photon storage and
+    // NEE-through-delta gating only apply to surfaces flagged here.  Non-flagged
+    // glass keeps using NEE with transmittanceColor() — so a windowpane or
+    // drinking glass still passes light correctly when --integrator photon is
+    // active but the user hasn't asked for photons through it.
+    // Default: false (path/BDPT ignore this; photon mode skips caustic logic
+    // on this material).
+    virtual bool isCausticGenerator() const { return false; }
+
     // Sample an incident direction given outgoing direction wo (world space).
     // u:         2D stratified sample for direction sampling
     // uComponent: 1D sample for selecting between material components
