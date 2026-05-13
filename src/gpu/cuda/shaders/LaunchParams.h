@@ -54,6 +54,20 @@ struct LaunchParams {
     const GpuHairTri*        hairTris;
     const GpuHairMaterial*   hairMats;
 
+    // Caustic photon map — populated when cam.photonMapEnabled != 0.
+    //   photons          : numPhotons GpuPhoton entries written by the
+    //                      photon-trace raygen; read by the shade raygen
+    //                      via the hash-grid query.
+    //   hashCellStart    : numCells+1 prefix-sum bucket starts
+    //   sortedPhotonIdx  : validPhotons indices into photons[], grouped by cell
+    //   numPhotons       : total photon slots (also the photon-raygen launch size)
+    //   frameIndex       : bumped each photon-trace launch for seed variation
+    GpuPhoton*               photons;
+    const uint32_t*          hashCellStart;
+    const uint32_t*          sortedPhotonIdx;
+    uint32_t                 numPhotons;
+    uint32_t                 frameIndex;
+
     // OptiX traversable for the GAS (uint64 = OptixTraversableHandle).  Set
     // to CudaAccelStructure::traversableHandle().  Read in raygen / shadow
     // calls of optixTrace.

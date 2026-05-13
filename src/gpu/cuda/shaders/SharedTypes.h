@@ -165,6 +165,19 @@ struct GpuCameraParams {
     // 0xFFFFFFFF when the scene contains no hair.  In raygen this is compared
     // against optixGetInstanceId() to route hits into the Marschner shader.
     uint32_t  hairMeshBaseID;
+
+    // Caustic photon map hash grid (enabled when photonMapEnabled != 0).
+    // hashCellStart[numCells+1] and sortedPhotonIdx[validPhotons] live in
+    // LaunchParams; the photon array does too.  The grid is a uniform
+    // spatial partition with cellSize = searchRadius, so the 3x3x3
+    // neighbour scan inside queryHashGrid covers the full lookup radius.
+    uint32_t  photonMapEnabled;    // 0 = off
+    float     photonSearchRadius;
+    GpuFloat3 hashGridOrigin;
+    float     hashCellSize;
+    uint32_t  hashGridDimX;
+    uint32_t  hashGridDimY;
+    uint32_t  hashGridDimZ;
 };
 
 // ---------------------------------------------------------------------------
@@ -184,6 +197,18 @@ struct GpuAccumPixel {
 struct GpuSampleBatch {
     uint32_t sampleStart;
     uint32_t batchSize;
+};
+
+// ---------------------------------------------------------------------------
+// GpuPhoton — one caustic photon emitted by the photon-trace raygen.
+// power == (0, 0, 0) means no valid caustic hit (no specular bounce before
+// the first diffuse hit); those slots are skipped when building the grid.
+// ---------------------------------------------------------------------------
+struct GpuPhoton {
+    GpuFloat3 position;
+    GpuFloat3 wi;       // photon travel direction (toward surface)
+    GpuFloat3 power;    // radiant flux RGB; (0,0,0) = invalid
+    uint32_t  _pad;
 };
 
 #endif // ANACAPA_CUDA_SHARED_TYPES_H

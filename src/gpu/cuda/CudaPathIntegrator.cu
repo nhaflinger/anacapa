@@ -291,6 +291,21 @@ struct CudaPathIntegrator::Impl {
     CudaBuffer<GpuHairMaterial> d_hairMats;
     uint32_t                    hairMeshBaseID = 0xFFFFFFFFu;
 
+    // Caustic photon map — GPU trace + CPU hash grid build + GPU query.
+    CudaBuffer<GpuPhoton>       d_photons;
+    CudaBuffer<uint32_t>        d_hashCellStart;
+    CudaBuffer<uint32_t>        d_sortedPhotonIdx;
+    bool                        photonMapEnabled   = false;
+    uint32_t                    numPhotons         = 0;
+    float                       photonSearchRadius = 0.1f;
+    GpuFloat3                   hashGridOrigin     = {0.f, 0.f, 0.f};
+    float                       hashCellSize       = 0.1f;
+    uint32_t                    hashGridDimX       = 0;
+    uint32_t                    hashGridDimY       = 0;
+    uint32_t                    hashGridDimZ       = 0;
+    uint32_t                    validPhotons       = 0;
+    uint32_t                    photonFrameIndex   = 0;
+
     uint32_t numMaterials = 0;
     uint32_t numLights    = 0;
     uint32_t maxDepth     = 6;
@@ -303,16 +318,20 @@ struct CudaPathIntegrator::Impl {
     OptixProgramGroup     pgRaygen       = nullptr;
     OptixProgramGroup     pgMiss         = nullptr;
     OptixProgramGroup     pgHit          = nullptr;
+    OptixProgramGroup     pgPhotonRg     = nullptr;   // __raygen__photon
     OptixPipeline         optixPipeline  = nullptr;
     CudaByteBuffer        sbtRaygenBuf;
+    CudaByteBuffer        sbtPhotonRaygenBuf;        // SBT raygen record for photon pass
     CudaByteBuffer        sbtMissBuf;
     CudaByteBuffer        sbtHitBuf;
-    OptixShaderBindingTable sbt          = {};
+    OptixShaderBindingTable sbt          = {};      // raygenRecord = __raygen__rg
+    OptixShaderBindingTable sbtPhoton    = {};      // same but raygenRecord = __raygen__photon
     CudaBuffer<LaunchParams> d_launchParams;  // single-element buffer in device mem
     bool                  optixReady     = false;
 
     bool buildOptixPipeline(OptixDeviceContext ctx);
     void destroyOptixPipeline();
+    void buildPhotonMap(OptixDeviceContext ctx);
 #endif
 
     ~Impl() {
@@ -403,6 +422,14 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
                                         log, &logSize, &pgRaygen));
 
     pgDesc = {};
+    pgDesc.kind                     = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+    pgDesc.raygen.module            = optixModule;
+    pgDesc.raygen.entryFunctionName = "__raygen__photon";
+    logSize = sizeof(log);
+    OPTIX_CHECK(optixProgramGroupCreate(ctx, &pgDesc, 1, &pgOpts,
+                                        log, &logSize, &pgPhotonRg));
+
+    pgDesc = {};
     pgDesc.kind                   = OPTIX_PROGRAM_GROUP_KIND_MISS;
     pgDesc.miss.module            = optixModule;
     pgDesc.miss.entryFunctionName = "__miss__ms";
@@ -422,16 +449,17 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
     OptixPipelineLinkOptions linkOpts{};
     linkOpts.maxTraceDepth = 1;  // raygen is the only invoker; no recursion
 
-    OptixProgramGroup pgs[3] = { pgRaygen, pgMiss, pgHit };
+    OptixProgramGroup pgs[4] = { pgRaygen, pgPhotonRg, pgMiss, pgHit };
     logSize = sizeof(log);
     OPTIX_CHECK(optixPipelineCreate(ctx, &pipeOpts, &linkOpts,
-                                    pgs, 3, log, &logSize, &optixPipeline));
+                                    pgs, 4, log, &logSize, &optixPipeline));
 
     // ---- Stack sizes --------------------------------------------------------
     OptixStackSizes stackSizes{};
-    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgRaygen, &stackSizes, optixPipeline));
-    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgMiss,   &stackSizes, optixPipeline));
-    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgHit,    &stackSizes, optixPipeline));
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgRaygen,   &stackSizes, optixPipeline));
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgPhotonRg, &stackSizes, optixPipeline));
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgMiss,     &stackSizes, optixPipeline));
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgHit,      &stackSizes, optixPipeline));
 
     uint32_t dcStackTrav = 0, dcStackState = 0, contStack = 0;
     OPTIX_CHECK(optixUtilComputeStackSizes(&stackSizes,
@@ -444,13 +472,18 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
                                           /*maxTraversableDepth=*/2));
 
     // ---- Shader binding table -----------------------------------------------
-    SbtRecord raygenRec{}, missRec{}, hitRec{};
-    OPTIX_CHECK(optixSbtRecordPackHeader(pgRaygen, &raygenRec));
-    OPTIX_CHECK(optixSbtRecordPackHeader(pgMiss,   &missRec));
-    OPTIX_CHECK(optixSbtRecordPackHeader(pgHit,    &hitRec));
+    SbtRecord raygenRec{}, photonRaygenRec{}, missRec{}, hitRec{};
+    OPTIX_CHECK(optixSbtRecordPackHeader(pgRaygen,   &raygenRec));
+    OPTIX_CHECK(optixSbtRecordPackHeader(pgPhotonRg, &photonRaygenRec));
+    OPTIX_CHECK(optixSbtRecordPackHeader(pgMiss,     &missRec));
+    OPTIX_CHECK(optixSbtRecordPackHeader(pgHit,      &hitRec));
 
     sbtRaygenBuf = CudaByteBuffer(sizeof(SbtRecord));
     sbtRaygenBuf.upload(reinterpret_cast<const uint8_t*>(&raygenRec), sizeof(SbtRecord));
+
+    sbtPhotonRaygenBuf = CudaByteBuffer(sizeof(SbtRecord));
+    sbtPhotonRaygenBuf.upload(reinterpret_cast<const uint8_t*>(&photonRaygenRec),
+                                sizeof(SbtRecord));
 
     sbtMissBuf = CudaByteBuffer(sizeof(SbtRecord));
     sbtMissBuf.upload(reinterpret_cast<const uint8_t*>(&missRec), sizeof(SbtRecord));
@@ -467,6 +500,10 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
     sbt.hitgroupRecordStrideInBytes  = sizeof(SbtRecord);
     sbt.hitgroupRecordCount          = 1;
 
+    // sbtPhoton shares miss/hit with sbt; only the raygen record differs.
+    sbtPhoton                           = sbt;
+    sbtPhoton.raygenRecord              = sbtPhotonRaygenBuf.devPtr();
+
     // ---- Launch params buffer (re-used across launches) ---------------------
     d_launchParams = CudaBuffer<LaunchParams>(1);
 
@@ -481,10 +518,11 @@ void CudaPathIntegrator::Impl::destroyOptixPipeline()
     if (optixPipeline) optixPipelineDestroy(optixPipeline);
     if (pgHit)         optixProgramGroupDestroy(pgHit);
     if (pgMiss)        optixProgramGroupDestroy(pgMiss);
+    if (pgPhotonRg)    optixProgramGroupDestroy(pgPhotonRg);
     if (pgRaygen)      optixProgramGroupDestroy(pgRaygen);
     if (optixModule)   optixModuleDestroy(optixModule);
     optixPipeline = nullptr;
-    pgHit = pgMiss = pgRaygen = nullptr;
+    pgHit = pgMiss = pgPhotonRg = pgRaygen = nullptr;
     optixModule = nullptr;
     optixReady = false;
 }
@@ -537,6 +575,151 @@ void CudaPathIntegrator::setPixelFilter(const PixelFilter* f) {
     m_impl->pixelFilterBins   = static_cast<uint32_t>(signs.size());
     m_impl->pixelFilterRadius = f->radius();
 }
+
+void CudaPathIntegrator::setPhotonMap(int numPhotons, float searchRadius) {
+    m_impl->photonMapEnabled   = (numPhotons > 0);
+    m_impl->numPhotons         = static_cast<uint32_t>(std::max(0, numPhotons));
+    m_impl->photonSearchRadius = searchRadius;
+}
+
+#ifdef ANACAPA_ENABLE_OPTIX
+// ---------------------------------------------------------------------------
+// buildPhotonMap — GPU photon trace → host hash grid build → device upload.
+//
+// Mirrors MetalPathIntegrator::buildPhotonMap step for step:
+//   1. allocate the photon output buffer
+//   2. fill LaunchParams in photon-trace mode and optixLaunch __raygen__photon
+//   3. download photons, compute AABB of valid hits
+//   4. assign each photon to a uniform-grid cell, sort by cell, build a
+//      prefix-sum cellStart array + sortedPhotonIdx list
+//   5. upload both to the device for the shade kernel's hash-grid query
+// ---------------------------------------------------------------------------
+void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
+{
+    if (!optixReady || numPhotons == 0) return;
+
+    printf("[info]  CudaPathIntegrator: tracing %u photons on GPU...\n", numPhotons);
+
+    // ---- 1. Photon output buffer ------------------------------------------
+    d_photons = CudaBuffer<GpuPhoton>(numPhotons);
+    if (!d_photons.isValid()) {
+        fprintf(stderr, "[error] CudaPathIntegrator::buildPhotonMap: "
+                        "photon alloc failed (%u entries)\n", numPhotons);
+        photonMapEnabled = false;
+        return;
+    }
+    d_photons.zero();
+
+    // ---- 2. Launch the photon raygen --------------------------------------
+    CUstream stream = static_cast<CUstream>(ctx->cuStream());
+    LaunchParams params{};
+    params.cam.imageWidth      = 1;
+    params.cam.imageHeight     = 1;
+    params.cam.maxDepth        = 8;
+    params.cam.hairMeshBaseID  = accel->hairMeshBaseID();
+    params.cam.photonMapEnabled = 0;   // photon-trace doesn't consume the map
+    params.cam.shutterOpen     = 0.f;
+    params.cam.shutterClose    = 0.f;
+    params.lights              = d_lights.ptr();
+    params.numLights           = numLights;
+    params.materials           = d_materials.ptr();
+    params.numMaterials        = numMaterials;
+    params.normals             = reinterpret_cast<const GpuFloat3*>(accel->normalBuffer());
+    params.indices             = reinterpret_cast<const uint32_t*>(accel->indexBuffer());
+    params.triMeshIDs          = reinterpret_cast<const uint32_t*>(accel->triMeshIDBuffer());
+    params.meshVertexOffsets   = reinterpret_cast<const uint32_t*>(accel->meshVertexOffsetBuffer());
+    params.meshIndexOffsets    = reinterpret_cast<const uint32_t*>(accel->meshIndexOffsetBuffer());
+    params.photons             = d_photons.ptr();
+    params.numPhotons          = numPhotons;
+    params.frameIndex          = photonFrameIndex++;
+    params.handle              = accel->traversableHandle();
+
+    d_launchParams.upload(&params, 1);
+    OPTIX_CHECK(optixLaunch(optixPipeline, stream,
+                            d_launchParams.devPtr(),
+                            sizeof(LaunchParams),
+                            &sbtPhoton,
+                            numPhotons, /*h=*/1, /*d=*/1));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    // ---- 3. Download photons + compute AABB of valid hits ------------------
+    std::vector<GpuPhoton> hostPhotons;
+    d_photons.download(hostPhotons);
+
+    float minX =  1e30f, minY =  1e30f, minZ =  1e30f;
+    float maxX = -1e30f, maxY = -1e30f, maxZ = -1e30f;
+    uint32_t validCount = 0;
+    for (uint32_t i = 0; i < numPhotons; ++i) {
+        const GpuPhoton& ph = hostPhotons[i];
+        if (ph.power.x == 0.f && ph.power.y == 0.f && ph.power.z == 0.f) continue;
+        ++validCount;
+        minX = std::min(minX, ph.position.x);
+        minY = std::min(minY, ph.position.y);
+        minZ = std::min(minZ, ph.position.z);
+        maxX = std::max(maxX, ph.position.x);
+        maxY = std::max(maxY, ph.position.y);
+        maxZ = std::max(maxZ, ph.position.z);
+    }
+    validPhotons = validCount;
+    printf("[info]  CudaPathIntegrator: %u valid caustic photons (of %u traced)\n",
+           validCount, numPhotons);
+
+    if (validCount == 0) {
+        d_hashCellStart   = CudaBuffer<uint32_t>{};
+        d_sortedPhotonIdx = CudaBuffer<uint32_t>{};
+        return;
+    }
+
+    // ---- 4. Build the uniform hash grid on the host ------------------------
+    const float cs = photonSearchRadius;
+    hashCellSize = cs;
+    minX -= cs; minY -= cs; minZ -= cs;
+    maxX += cs; maxY += cs; maxZ += cs;
+    hashGridOrigin = {minX, minY, minZ};
+    hashGridDimX = static_cast<uint32_t>(std::ceil((maxX - minX) / cs)) + 1u;
+    hashGridDimY = static_cast<uint32_t>(std::ceil((maxY - minY) / cs)) + 1u;
+    hashGridDimZ = static_cast<uint32_t>(std::ceil((maxZ - minZ) / cs)) + 1u;
+    uint32_t numCells = hashGridDimX * hashGridDimY * hashGridDimZ;
+
+    struct PhotonCell { uint32_t photonIdx; uint32_t cellIdx; };
+    std::vector<PhotonCell> assignments;
+    assignments.reserve(validCount);
+    for (uint32_t i = 0; i < numPhotons; ++i) {
+        const GpuPhoton& ph = hostPhotons[i];
+        if (ph.power.x == 0.f && ph.power.y == 0.f && ph.power.z == 0.f) continue;
+        uint32_t ix = static_cast<uint32_t>((ph.position.x - minX) / cs);
+        uint32_t iy = static_cast<uint32_t>((ph.position.y - minY) / cs);
+        uint32_t iz = static_cast<uint32_t>((ph.position.z - minZ) / cs);
+        ix = std::min(ix, hashGridDimX - 1u);
+        iy = std::min(iy, hashGridDimY - 1u);
+        iz = std::min(iz, hashGridDimZ - 1u);
+        uint32_t cellIdx = iz * hashGridDimX * hashGridDimY
+                         + iy * hashGridDimX + ix;
+        assignments.push_back({i, cellIdx});
+    }
+    std::sort(assignments.begin(), assignments.end(),
+              [](const PhotonCell& a, const PhotonCell& b) {
+                  return a.cellIdx < b.cellIdx;
+              });
+
+    std::vector<uint32_t> cellStart(numCells + 1, 0);
+    for (const auto& pc : assignments) cellStart[pc.cellIdx + 1]++;
+    for (uint32_t c = 0; c < numCells; ++c) cellStart[c + 1] += cellStart[c];
+
+    std::vector<uint32_t> sortedIdx(validCount);
+    for (uint32_t i = 0; i < validCount; ++i)
+        sortedIdx[i] = assignments[i].photonIdx;
+
+    // ---- 5. Upload to device -----------------------------------------------
+    d_hashCellStart = CudaBuffer<uint32_t>(cellStart.size());
+    d_hashCellStart.upload(cellStart);
+    d_sortedPhotonIdx = CudaBuffer<uint32_t>(sortedIdx.size());
+    d_sortedPhotonIdx.upload(sortedIdx);
+
+    printf("[info]  CudaPathIntegrator: photon hash grid %ux%ux%u (%u cells)\n",
+           hashGridDimX, hashGridDimY, hashGridDimZ, numCells);
+}
+#endif  // ANACAPA_ENABLE_OPTIX
 
 // ---------------------------------------------------------------------------
 // prepare() — build accel, upload materials/lights/HDRI
@@ -659,6 +842,20 @@ void CudaPathIntegrator::prepare(const SceneView& scene) {
            m_impl->numMaterials, m_impl->numLights,
            m_impl->accel->totalVertices(),
            m_impl->accel->totalTriangles());
+
+#ifdef ANACAPA_ENABLE_OPTIX
+    // GPU caustic photon map.  Requires the OptiX pipeline (specifically the
+    // __raygen__photon entry) to be built before launch.  buildPhotonMap is
+    // a no-op when photonMapEnabled is false or numPhotons == 0.
+    if (m_impl->photonMapEnabled) {
+        if (m_impl->buildOptixPipeline(
+                static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()))) {
+            m_impl->buildPhotonMap(
+                static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()));
+        }
+    }
+#endif
+
     m_impl->preparedOnce = true;
 }
 
@@ -735,6 +932,24 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.pixelFilterRadius = pixelFilterRadius;
     p.hairTris          = reinterpret_cast<const GpuHairTri*>(accel->hairTriBuffer());
     p.hairMats          = d_hairMats.isValid() ? d_hairMats.ptr() : nullptr;
+    // Caustic photon map — gated on having actual valid photons so a
+    // configured-but-empty map (e.g. no glass in the scene) doesn't query.
+    const bool pmActive = photonMapEnabled && validPhotons > 0
+                           && d_hashCellStart.isValid()
+                           && d_sortedPhotonIdx.isValid()
+                           && d_photons.isValid();
+    p.cam.photonMapEnabled   = pmActive ? 1u : 0u;
+    p.cam.photonSearchRadius = photonSearchRadius;
+    p.cam.hashGridOrigin     = hashGridOrigin;
+    p.cam.hashCellSize       = hashCellSize;
+    p.cam.hashGridDimX       = hashGridDimX;
+    p.cam.hashGridDimY       = hashGridDimY;
+    p.cam.hashGridDimZ       = hashGridDimZ;
+    p.photons                = d_photons.isValid()         ? d_photons.ptr()         : nullptr;
+    p.hashCellStart          = d_hashCellStart.isValid()   ? d_hashCellStart.ptr()   : nullptr;
+    p.sortedPhotonIdx        = d_sortedPhotonIdx.isValid() ? d_sortedPhotonIdx.ptr() : nullptr;
+    p.numPhotons             = numPhotons;
+    p.frameIndex             = photonFrameIndex;
     p.handle            = accel->traversableHandle();
 }
 

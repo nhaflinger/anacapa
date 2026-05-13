@@ -358,6 +358,12 @@ float3 shadowTransmittance(float3 origin, float3 dir, float tMax, float rayTime)
         GpuMaterial mat = params.materials[matIdx];
 
         if (mat.type == kMatGlass) {
+            // When the photon map is active, glass is opaque to shadow rays:
+            // the map is the sole carrier of transmitted/refracted light, so
+            // attenuating NEE through glass too would double-count.  Without
+            // a map, attenuate by transmission so glass still casts soft
+            // colored shadows.
+            if (params.cam.photonMapEnabled) return make_float3(0.0f, 0.0f, 0.0f);
             T *= mat.transmission;
             if (compmax(T) < 1e-4f) return make_float3(0.0f, 0.0f, 0.0f);
             remaining -= hit.t + 1e-4f;
@@ -941,6 +947,83 @@ PixelFilterSample samplePixelFilter(float u1, float u2)
     return s;
 }
 
+// ---------------------------------------------------------------------------
+// Caustic photon map — uniform-cell hash grid density estimate.
+//
+// Mirrors the Metal queryHashGrid: 3x3x3 neighbour scan around the hit-cell,
+// flat-kernel inside the search radius, BSDF evaluation at each photon's
+// arrival direction.  When the camera params disable the map or the buffer
+// pointers are null this is a fast no-op.
+// ---------------------------------------------------------------------------
+static __forceinline__ __device__
+float3 queryPhotonMap(float3 p, float3 n, float3 wo,
+                       uint32_t matType, float3 baseColor,
+                       float roughness, float metalness, float specular)
+{
+    if (!params.cam.photonMapEnabled
+        || params.hashCellStart   == nullptr
+        || params.sortedPhotonIdx == nullptr
+        || params.photons         == nullptr)
+        return make_float3(0.f, 0.f, 0.f);
+
+    const float r  = params.cam.photonSearchRadius;
+    const float r2 = r * r;
+    const float cs = params.cam.hashCellSize;
+
+    float3 orig = make3(params.cam.hashGridOrigin);
+    float3 rel  = p - orig;
+
+    int cx = (int)floorf(rel.x / cs);
+    int cy = (int)floorf(rel.y / cs);
+    int cz = (int)floorf(rel.z / cs);
+
+    const int dimX = (int)params.cam.hashGridDimX;
+    const int dimY = (int)params.cam.hashGridDimY;
+    const int dimZ = (int)params.cam.hashGridDimZ;
+
+    float3 Laccum = make_float3(0.f, 0.f, 0.f);
+
+    #pragma unroll
+    for (int dz = -1; dz <= 1; ++dz)
+    #pragma unroll
+    for (int dy = -1; dy <= 1; ++dy)
+    #pragma unroll
+    for (int dx = -1; dx <= 1; ++dx) {
+        int nx = cx + dx, ny = cy + dy, nz = cz + dz;
+        if (nx < 0 || ny < 0 || nz < 0) continue;
+        if (nx >= dimX || ny >= dimY || nz >= dimZ) continue;
+
+        uint32_t cellIdx = (uint32_t)nz * (uint32_t)dimX * (uint32_t)dimY
+                         + (uint32_t)ny * (uint32_t)dimX
+                         + (uint32_t)nx;
+        uint32_t start = params.hashCellStart[cellIdx];
+        uint32_t end   = params.hashCellStart[cellIdx + 1];
+
+        for (uint32_t i = start; i < end; ++i) {
+            const GpuPhoton ph = params.photons[params.sortedPhotonIdx[i]];
+            float3 phPos = make3(ph.position);
+            float3 diff  = phPos - p;
+            if (dot(diff, diff) > r2) continue;
+
+            // wi (toward surface) negated → light direction at the hit.
+            float3 wi   = -1.0f * make3(ph.wi);
+            float  cosI = dot(n, wi);
+            if (cosI <= 0.f) continue;
+
+            float3 f = make_float3(0.f, 0.f, 0.f);
+            if (matType == kMatLambertian) {
+                f = baseColor * (1.0f / CUDART_PI_F);
+            } else if (matType == kMatGGX) {
+                f = evalLayeredBSDF(wo, wi, n, baseColor,
+                                     roughness, metalness, specular);
+            }
+            Laccum += f * make3(ph.power);
+        }
+    }
+
+    return Laccum * (1.0f / (CUDART_PI_F * r2));
+}
+
 // ===========================================================================
 // OptiX programs
 // ===========================================================================
@@ -1229,6 +1312,15 @@ extern "C" __global__ void __raygen__rg()
                                                mat.roughness, mat.metalness,
                                                mat.specular,
                                                rng, rayTime);
+
+                // Caustic photon map density estimate — adds the indirect
+                // light arriving through specular paths that NEE can't sample.
+                // No-op when the map is disabled or empty.
+                float3 Lcaustic = queryPhotonMap(hitPos, n, wo,
+                                                  mat.type, baseColor,
+                                                  mat.roughness, mat.metalness,
+                                                  mat.specular);
+                L += throughput * Lcaustic;
             }
 
             // Russian roulette
@@ -1378,4 +1470,129 @@ extern "C" __global__ void __closesthit__ch()
 extern "C" __global__ void __miss__ms()
 {
     optixSetPayload_0(0u);
+}
+
+// ---------------------------------------------------------------------------
+// __raygen__photon — one thread per photon slot.
+//
+// Selects a light, samples a position + direction, then traces the photon
+// through the scene.  Stored on the first diffuse hit AFTER ≥1 specular
+// (glass) bounce — caustic photons only.  Empty slots have power = (0,0,0)
+// so the host hash-grid builder can skip them.
+//
+// Shares the closesthit/miss/SBT with __raygen__rg; the host dispatches it
+// by swapping the SBT raygenRecord pointer at launch time.
+// ---------------------------------------------------------------------------
+extern "C" __global__ void __raygen__photon()
+{
+    const uint3 idx = optixGetLaunchIndex();
+    const uint32_t gid = idx.x;
+    if (gid >= params.numPhotons) return;
+
+    // Default to "invalid slot" — the host hash-grid builder filters these out.
+    params.photons[gid].power = {0.f, 0.f, 0.f};
+
+    if (params.numLights == 0) return;
+
+    uint32_t rng = pcg(pcg(gid) ^ (params.frameIndex * 2654435761u + 1234567u));
+
+    // Uniform light selection.  Same convention as sampleDirect; rectangles
+    // are the only light type that produces useful caustics here.
+    uint32_t lightIdx = uint32_t(rand01(rng) * float(params.numLights)) % params.numLights;
+    const GpuLight& light = params.lights[lightIdx];
+    float lightSelectPdf = 1.0f / float(params.numLights);
+
+    float3 pos    = make_float3(0.f, 0.f, 0.f);
+    float3 dir    = make_float3(0.f, 0.f, 0.f);
+    float3 Le     = make_float3(0.f, 0.f, 0.f);
+    float3 lightN = make_float3(0.f, 0.f, 0.f);
+    float  pdfPos = 0.f, pdfDir = 0.f;
+
+    if (light.type == kLightRect) {
+        float3 lpos = make3(light.position);
+        float3 luH  = make3(light.uHalf);
+        float3 lvH  = make3(light.vHalf);
+        float2 u    = rand2(rng);
+        pos    = lpos + luH * (2.0f * u.x - 1.0f) + lvH * (2.0f * u.y - 1.0f);
+        pdfPos = 1.0f / fmaxf(1e-7f, light.area);
+        lightN = make3(light.normal);
+        dir    = cosineSampleHemisphere(rand2(rng), lightN);
+        float cosTheta = fmaxf(0.f, dot(dir, lightN));
+        pdfDir = fmaxf(1e-7f, cosTheta / CUDART_PI_F);
+        Le     = make3(light.Le);
+    } else {
+        // Directional / dome lights focus to infinity (no useful caustics),
+        // and sphere lights aren't supported by this backend yet.  Bail.
+        return;
+    }
+
+    if (pdfPos <= 0.f || pdfDir <= 0.f) return;
+
+    // Initial radiant flux — matches CPU PhotonMapIntegrator + Metal photonTrace.
+    float cosTheta = fmaxf(0.f, dot(dir, lightN));
+    float invDen = 1.0f
+                 / fmaxf(1e-30f,
+                          lightSelectPdf * pdfPos * pdfDir * float(params.numPhotons));
+    float3 power = Le * (cosTheta * invDen);
+
+    float3 rayOrig = pos + lightN * 1e-3f;
+    float3 rayDir  = dir;
+    const float rayTime = 0.5f;  // mid-frame; matches Metal photonTrace
+
+    int numSpecular = 0;
+
+    for (int bounce = 0; bounce < 8; ++bounce) {
+        TraceResult hit = trace(rayOrig, rayDir, 1e-4f, 1e10f, rayTime);
+        if (!hit.valid) break;
+
+        // Skip hair and other non-mesh hits — caustic photons should land on
+        // mesh triangles where they'll be queried by the hash grid.
+        const bool isHair = (params.cam.hairMeshBaseID != 0xFFFFFFFFu
+                              && hit.instanceID >= params.cam.hairMeshBaseID);
+        if (isHair) break;
+
+        uint32_t matIdx = (hit.meshID < params.numMaterials) ? hit.meshID : 0u;
+        GpuMaterial mat = params.materials[matIdx];
+
+        if (mat.type == kMatEmissive) break;  // emitter — stop
+
+        float3 hitPos = rayOrig + rayDir * hit.t;
+        float3 geomN  = interpolateNormal(hit.primID, hit.bary,
+                                           params.normals, params.indices);
+
+        if (mat.type == kMatGlass) {
+            // Delta refract/reflect with Russian-roulette branch.  Throughput
+            // unchanged for delta paths; no tinting/absorption in glass here.
+            bool   entering = dot(rayDir, geomN) < 0.f;
+            float3 faceN    = entering ? geomN : (-1.0f * geomN);
+            float  eta      = entering ? (1.0f / mat.specularIOR) : mat.specularIOR;
+            float  cosI     = fmaxf(0.f, dot(-1.0f * rayDir, faceN));
+            float  Fr       = fresnelDielectric(cosI, 1.0f / eta);
+
+            if (rand01(rng) < Fr) {
+                rayDir = reflect(rayDir, faceN);
+                rayOrig = hitPos + faceN * 1e-4f;
+            } else {
+                float3 refr = refract(rayDir, faceN, eta);
+                if (dot(refr, refr) < 0.5f) {
+                    rayDir  = reflect(rayDir, faceN);
+                    rayOrig = hitPos + faceN * 1e-4f;
+                } else {
+                    rayDir  = normalize(refr);
+                    rayOrig = hitPos - faceN * 1e-4f;
+                }
+            }
+            ++numSpecular;
+            continue;
+        }
+
+        // Diffuse / glossy hit.  Store the photon iff we've had at least one
+        // specular bounce — otherwise direct lighting already covers it.
+        if (numSpecular > 0) {
+            params.photons[gid].position = {hitPos.x, hitPos.y, hitPos.z};
+            params.photons[gid].wi       = {rayDir.x, rayDir.y, rayDir.z};
+            params.photons[gid].power    = {power.x, power.y, power.z};
+        }
+        break;
+    }
 }

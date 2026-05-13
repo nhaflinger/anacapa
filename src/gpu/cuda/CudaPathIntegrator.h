@@ -53,6 +53,11 @@ public:
     // non-owning and must outlive the integrator.
     void setPixelFilter(const PixelFilter* f) override;
 
+    // Enable GPU caustic photon map.  Must be called before prepare().
+    // numPhotons: total photon slots traced per render (0 = disabled).
+    // searchRadius: density-estimate radius in world units.
+    void setPhotonMap(int numPhotons, float searchRadius);
+
     // Zero the persistent accumulation buffer.
     // Call before starting a fresh render (scene/camera change) so stale
     // samples from the previous render do not bleed into the new one.
