@@ -316,25 +316,22 @@ struct CudaPathIntegrator::Impl {
 
 #ifdef ANACAPA_ENABLE_OPTIX
     // Pipeline state — created lazily on first render.  Lives until destructor.
+    // Single pipeline hosts all four raygens (photon + 3 wavefront stages).
     OptixModule           optixModule    = nullptr;
-    OptixProgramGroup     pgRaygen       = nullptr;
     OptixProgramGroup     pgMiss         = nullptr;
     OptixProgramGroup     pgHit          = nullptr;
     OptixProgramGroup     pgPhotonRg     = nullptr;   // __raygen__photon
     OptixProgramGroup     pgWfPrimary    = nullptr;
     OptixProgramGroup     pgWfBounce     = nullptr;
     OptixProgramGroup     pgWfFinalize   = nullptr;
-    OptixPipeline         optixPipeline  = nullptr;   // megakernel (shade + photon)
-    OptixPipeline         wfPipeline     = nullptr;   // wavefront (3 raygens)
-    CudaByteBuffer        sbtRaygenBuf;
-    CudaByteBuffer        sbtPhotonRaygenBuf;        // SBT raygen record for photon pass
+    OptixPipeline         wfPipeline     = nullptr;
+    CudaByteBuffer        sbtPhotonRaygenBuf;
     CudaByteBuffer        sbtWfPrimaryBuf;
     CudaByteBuffer        sbtWfBounceBuf;
     CudaByteBuffer        sbtWfFinalizeBuf;
     CudaByteBuffer        sbtMissBuf;
     CudaByteBuffer        sbtHitBuf;
-    OptixShaderBindingTable sbt           = {};   // megakernel: __raygen__rg
-    OptixShaderBindingTable sbtPhoton     = {};   //              __raygen__photon
+    OptixShaderBindingTable sbtPhoton     = {};   // __raygen__photon
     OptixShaderBindingTable sbtWfPrimary  = {};
     OptixShaderBindingTable sbtWfBounce   = {};
     OptixShaderBindingTable sbtWfFinalize = {};
@@ -344,7 +341,6 @@ struct CudaPathIntegrator::Impl {
     // Wavefront state buffer (allocated lazily by renderFrameWavefront).
     CudaBuffer<WfRayState> d_wfRays;
     uint32_t               wfRayCount    = 0;
-    bool                   wavefrontMode = false;
 
     bool buildOptixPipeline(OptixDeviceContext ctx);
     void destroyOptixPipeline();
@@ -443,14 +439,6 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
 
     pgDesc.kind                     = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
     pgDesc.raygen.module            = optixModule;
-    pgDesc.raygen.entryFunctionName = "__raygen__rg";
-    logSize = sizeof(log);
-    OPTIX_CHECK(optixProgramGroupCreate(ctx, &pgDesc, 1, &pgOpts,
-                                        log, &logSize, &pgRaygen));
-
-    pgDesc = {};
-    pgDesc.kind                     = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
-    pgDesc.raygen.module            = optixModule;
     pgDesc.raygen.entryFunctionName = "__raygen__photon";
     logSize = sizeof(log);
     OPTIX_CHECK(optixProgramGroupCreate(ctx, &pgDesc, 1, &pgOpts,
@@ -472,71 +460,6 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
     OPTIX_CHECK(optixProgramGroupCreate(ctx, &pgDesc, 1, &pgOpts,
                                         log, &logSize, &pgHit));
 
-    // ---- Pipeline -----------------------------------------------------------
-    OptixPipelineLinkOptions linkOpts{};
-    linkOpts.maxTraceDepth = 1;  // raygen is the only invoker; no recursion
-
-    OptixProgramGroup pgs[4] = { pgRaygen, pgPhotonRg, pgMiss, pgHit };
-    logSize = sizeof(log);
-    OPTIX_CHECK(optixPipelineCreate(ctx, &pipeOpts, &linkOpts,
-                                    pgs, 4, log, &logSize, &optixPipeline));
-
-    // ---- Stack sizes --------------------------------------------------------
-    OptixStackSizes stackSizes{};
-    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgRaygen,   &stackSizes, optixPipeline));
-    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgPhotonRg, &stackSizes, optixPipeline));
-    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgMiss,     &stackSizes, optixPipeline));
-    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgHit,      &stackSizes, optixPipeline));
-
-    uint32_t dcStackTrav = 0, dcStackState = 0, contStack = 0;
-    OPTIX_CHECK(optixUtilComputeStackSizes(&stackSizes,
-                                           /*maxTraceDepth=*/1,
-                                           /*maxCCDepth=*/0,
-                                           /*maxDCDepth=*/0,
-                                           &dcStackTrav, &dcStackState, &contStack));
-    OPTIX_CHECK(optixPipelineSetStackSize(optixPipeline,
-                                          dcStackTrav, dcStackState, contStack,
-                                          /*maxTraversableDepth=*/2));
-
-    // ---- Shader binding table -----------------------------------------------
-    SbtRecord raygenRec{}, photonRaygenRec{}, missRec{}, hitRec{};
-    OPTIX_CHECK(optixSbtRecordPackHeader(pgRaygen,   &raygenRec));
-    OPTIX_CHECK(optixSbtRecordPackHeader(pgPhotonRg, &photonRaygenRec));
-    OPTIX_CHECK(optixSbtRecordPackHeader(pgMiss,     &missRec));
-    OPTIX_CHECK(optixSbtRecordPackHeader(pgHit,      &hitRec));
-
-    sbtRaygenBuf = CudaByteBuffer(sizeof(SbtRecord));
-    sbtRaygenBuf.upload(reinterpret_cast<const uint8_t*>(&raygenRec), sizeof(SbtRecord));
-
-    sbtPhotonRaygenBuf = CudaByteBuffer(sizeof(SbtRecord));
-    sbtPhotonRaygenBuf.upload(reinterpret_cast<const uint8_t*>(&photonRaygenRec),
-                                sizeof(SbtRecord));
-
-    sbtMissBuf = CudaByteBuffer(sizeof(SbtRecord));
-    sbtMissBuf.upload(reinterpret_cast<const uint8_t*>(&missRec), sizeof(SbtRecord));
-
-    sbtHitBuf = CudaByteBuffer(sizeof(SbtRecord));
-    sbtHitBuf.upload(reinterpret_cast<const uint8_t*>(&hitRec), sizeof(SbtRecord));
-
-    sbt                              = {};
-    sbt.raygenRecord                 = sbtRaygenBuf.devPtr();
-    sbt.missRecordBase               = sbtMissBuf.devPtr();
-    sbt.missRecordStrideInBytes      = sizeof(SbtRecord);
-    sbt.missRecordCount              = 1;
-    sbt.hitgroupRecordBase           = sbtHitBuf.devPtr();
-    sbt.hitgroupRecordStrideInBytes  = sizeof(SbtRecord);
-    sbt.hitgroupRecordCount          = 1;
-
-    // sbtPhoton shares miss/hit with sbt; only the raygen record differs.
-    sbtPhoton                           = sbt;
-    sbtPhoton.raygenRecord              = sbtPhotonRaygenBuf.devPtr();
-
-    // -----------------------------------------------------------------------
-    // Wavefront pipeline — built unconditionally (cheap; only consumes a few
-    // KiB of SBT records) so the user can toggle setWavefrontMode at run
-    // time without re-initialising OptiX.  The shade megakernel pipeline
-    // above stays untouched, so non-wavefront renders pay zero overhead.
-    // -----------------------------------------------------------------------
     auto makeRaygenPg = [&](const char* entry, OptixProgramGroup& outPg) {
         OptixProgramGroupDesc d{};
         d.kind                     = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
@@ -550,17 +473,25 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
     makeRaygenPg("__raygen__wf_bounce",   pgWfBounce);
     makeRaygenPg("__raygen__wf_finalize", pgWfFinalize);
 
-    OptixProgramGroup wfPgs[5] = {
-        pgWfPrimary, pgWfBounce, pgWfFinalize, pgMiss, pgHit
+    // ---- Pipeline -----------------------------------------------------------
+    // Single pipeline links every raygen plus the shared miss/hit programs.
+    // Photon-trace renders share this pipeline with the three wavefront
+    // raygens so OptiX builds and stack-sizes everything once.
+    OptixPipelineLinkOptions linkOpts{};
+    linkOpts.maxTraceDepth = 1;  // raygen is the only invoker; no recursion
+
+    OptixProgramGroup wfPgs[6] = {
+        pgWfPrimary, pgWfBounce, pgWfFinalize, pgPhotonRg, pgMiss, pgHit
     };
     logSize = sizeof(log);
     OPTIX_CHECK(optixPipelineCreate(ctx, &pipeOpts, &linkOpts,
-                                    wfPgs, 5, log, &logSize, &wfPipeline));
+                                    wfPgs, 6, log, &logSize, &wfPipeline));
 
     OptixStackSizes wfStack{};
     OPTIX_CHECK(optixUtilAccumulateStackSizes(pgWfPrimary,  &wfStack, wfPipeline));
     OPTIX_CHECK(optixUtilAccumulateStackSizes(pgWfBounce,   &wfStack, wfPipeline));
     OPTIX_CHECK(optixUtilAccumulateStackSizes(pgWfFinalize, &wfStack, wfPipeline));
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgPhotonRg,   &wfStack, wfPipeline));
     OPTIX_CHECK(optixUtilAccumulateStackSizes(pgMiss,       &wfStack, wfPipeline));
     OPTIX_CHECK(optixUtilAccumulateStackSizes(pgHit,        &wfStack, wfPipeline));
     {
@@ -575,19 +506,39 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
                                               /*maxTraversableDepth=*/2));
     }
 
-    // Build three raygen SBT records; miss+hit are shared with the megakernel.
+    // ---- Shader binding table -----------------------------------------------
+    SbtRecord missRec{}, hitRec{};
+    OPTIX_CHECK(optixSbtRecordPackHeader(pgMiss, &missRec));
+    OPTIX_CHECK(optixSbtRecordPackHeader(pgHit,  &hitRec));
+
+    sbtMissBuf = CudaByteBuffer(sizeof(SbtRecord));
+    sbtMissBuf.upload(reinterpret_cast<const uint8_t*>(&missRec), sizeof(SbtRecord));
+
+    sbtHitBuf = CudaByteBuffer(sizeof(SbtRecord));
+    sbtHitBuf.upload(reinterpret_cast<const uint8_t*>(&hitRec), sizeof(SbtRecord));
+
+    OptixShaderBindingTable sbtCommon{};
+    sbtCommon.missRecordBase              = sbtMissBuf.devPtr();
+    sbtCommon.missRecordStrideInBytes     = sizeof(SbtRecord);
+    sbtCommon.missRecordCount             = 1;
+    sbtCommon.hitgroupRecordBase          = sbtHitBuf.devPtr();
+    sbtCommon.hitgroupRecordStrideInBytes = sizeof(SbtRecord);
+    sbtCommon.hitgroupRecordCount         = 1;
+
+    // Build the four raygen SBT records; miss+hit are shared.
     auto packAndUpload = [&](OptixProgramGroup pg, CudaByteBuffer& buf,
                               OptixShaderBindingTable& out) {
         SbtRecord rec{};
         OPTIX_CHECK(optixSbtRecordPackHeader(pg, &rec));
         buf = CudaByteBuffer(sizeof(SbtRecord));
         buf.upload(reinterpret_cast<const uint8_t*>(&rec), sizeof(SbtRecord));
-        out = sbt;
+        out = sbtCommon;
         out.raygenRecord = buf.devPtr();
     };
-    packAndUpload(pgWfPrimary,  sbtWfPrimaryBuf,  sbtWfPrimary);
-    packAndUpload(pgWfBounce,   sbtWfBounceBuf,   sbtWfBounce);
-    packAndUpload(pgWfFinalize, sbtWfFinalizeBuf, sbtWfFinalize);
+    packAndUpload(pgPhotonRg,   sbtPhotonRaygenBuf, sbtPhoton);
+    packAndUpload(pgWfPrimary,  sbtWfPrimaryBuf,    sbtWfPrimary);
+    packAndUpload(pgWfBounce,   sbtWfBounceBuf,     sbtWfBounce);
+    packAndUpload(pgWfFinalize, sbtWfFinalizeBuf,   sbtWfFinalize);
 
     // ---- Launch params buffer (re-used across launches) ---------------------
     d_launchParams = CudaBuffer<LaunchParams>(1);
@@ -601,18 +552,16 @@ void CudaPathIntegrator::Impl::destroyOptixPipeline()
 {
     if (!optixReady) return;
     if (wfPipeline)    optixPipelineDestroy(wfPipeline);
-    if (optixPipeline) optixPipelineDestroy(optixPipeline);
     if (pgWfFinalize)  optixProgramGroupDestroy(pgWfFinalize);
     if (pgWfBounce)    optixProgramGroupDestroy(pgWfBounce);
     if (pgWfPrimary)   optixProgramGroupDestroy(pgWfPrimary);
     if (pgHit)         optixProgramGroupDestroy(pgHit);
     if (pgMiss)        optixProgramGroupDestroy(pgMiss);
     if (pgPhotonRg)    optixProgramGroupDestroy(pgPhotonRg);
-    if (pgRaygen)      optixProgramGroupDestroy(pgRaygen);
     if (optixModule)   optixModuleDestroy(optixModule);
-    wfPipeline = optixPipeline = nullptr;
+    wfPipeline = nullptr;
     pgWfFinalize = pgWfBounce = pgWfPrimary = nullptr;
-    pgHit = pgMiss = pgPhotonRg = pgRaygen = nullptr;
+    pgHit = pgMiss = pgPhotonRg = nullptr;
     optixModule = nullptr;
     optixReady = false;
 }
@@ -672,11 +621,6 @@ void CudaPathIntegrator::setPhotonMap(int numPhotons, float searchRadius) {
     m_impl->photonSearchRadius = searchRadius;
 }
 
-void CudaPathIntegrator::setWavefrontMode(bool on) {
-    m_impl->wavefrontMode = on;
-    if (on) printf("[info]  CudaPathIntegrator: wavefront mode enabled\n");
-}
-
 #ifdef ANACAPA_ENABLE_OPTIX
 // ---------------------------------------------------------------------------
 // buildPhotonMap — GPU photon trace → host hash grid build → device upload.
@@ -733,7 +677,7 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
     params.handle              = accel->traversableHandle();
 
     d_launchParams.upload(&params, 1);
-    OPTIX_CHECK(optixLaunch(optixPipeline, stream,
+    OPTIX_CHECK(optixLaunch(wfPipeline, stream,
                             d_launchParams.devPtr(),
                             sizeof(LaunchParams),
                             &sbtPhoton,
@@ -1283,90 +1227,15 @@ bool CudaPathIntegrator::renderFrame(const SceneView& scene,
             static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()))) {
         return false;
     }
-    // Route to wavefront experimental path when enabled.  Photon-trace
-    // still uses the megakernel pipeline (its raygen is small), but the
-    // shade-time photon-map query is already implemented in
-    // __raygen__wf_bounce, so photon mode benefits from wavefront too.
-    // Hair scenes are now also handled — Marschner BSDF NEE + sampling
-    // lives inside __raygen__wf_bounce alongside the mesh material code.
-    const bool wfPath = m_impl->wavefrontMode;
-    if (wfPath) {
-        return m_impl->renderFrameWavefront(scene,
-                                              filmWidth, filmHeight,
-                                              sampleStart, sampleCount, film);
-    }
+    return m_impl->renderFrameWavefront(scene,
+                                          filmWidth, filmHeight,
+                                          sampleStart, sampleCount, film);
 #else
     fprintf(stderr, "[error] CudaPathIntegrator: built without ANACAPA_ENABLE_OPTIX\n");
+    (void)stream; (void)scene; (void)filmWidth; (void)filmHeight;
+    (void)sampleStart; (void)sampleCount; (void)film;
     return false;
 #endif
-
-    // Use the persistent accum buffer — accumulates across calls.
-    // clearAccum() should be called when starting a fresh render (new scene/camera).
-    m_impl->ensureAccum(filmWidth, filmHeight);
-    CudaBuffer<GpuAccumPixel>& d_accum = m_impl->d_accum;
-    // Bail cleanly on VRAM exhaustion so the caller falls back to per-tile
-    // dispatch instead of submitting a launch with a null accum pointer.
-    if (!d_accum.isValid()) {
-        fprintf(stderr, "[error] CudaPathIntegrator::renderFrame: "
-                        "persistent accum alloc failed (%u x %u) — "
-                        "falling back to tile dispatch\n",
-                filmWidth, filmHeight);
-        return false;
-    }
-
-    // Dispatch kBatchSize samples per launch — each thread traces the full
-    // batch and accumulates locally before writing to the accum buffer.
-    constexpr uint32_t kBatchSize    = 4;
-    constexpr uint32_t kMergeInterval = 4;  // flush to film every N dispatches
-
-    auto flushToFilm = [&]() {
-        std::vector<GpuAccumPixel> h_accum;
-        d_accum.download(h_accum);
-        TileBuffer tb(0, 0, filmWidth, filmHeight);
-        for (uint32_t py = 0; py < filmHeight; ++py) {
-            for (uint32_t px = 0; px < filmWidth; ++px) {
-                const GpuAccumPixel& p = h_accum[py * filmWidth + px];
-                float w = p.weight > 0.f ? p.weight : 1.f;
-                tb.add(px, py, p.r / w, p.g / w, p.b / w, w);
-                tb.addLumSq(px, py, p.sumLumSq);
-            }
-        }
-        film.mergeTile(tb);
-    };
-
-    uint32_t dispatches = 0;
-    for (uint32_t s = 0; s < sampleCount; s += kBatchSize) {
-        uint32_t thisBatch = std::min(kBatchSize, sampleCount - s);
-        LaunchParams params{};
-        m_impl->fillLaunchParams(params, scene,
-            filmWidth, filmHeight,
-            0, 0, filmWidth, filmHeight,
-            sampleStart + s, thisBatch,
-            d_accum.ptr());
-
-#ifdef ANACAPA_ENABLE_OPTIX
-        m_impl->d_launchParams.upload(&params, 1);
-        OPTIX_CHECK(optixLaunch(m_impl->optixPipeline, stream,
-                                m_impl->d_launchParams.devPtr(),
-                                sizeof(LaunchParams),
-                                &m_impl->sbt,
-                                filmWidth, filmHeight, /*depth=*/1));
-#endif
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-        cudaError_t err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            fprintf(stderr, "[error] CudaPathIntegrator::renderFrame: %s\n",
-                    cudaGetErrorString(err));
-            return false;
-        }
-
-        if ((++dispatches) % kMergeInterval == 0)
-            flushToFilm();
-    }
-
-    // Final flush
-    flushToFilm();
-    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1381,78 +1250,21 @@ void CudaPathIntegrator::renderTile(const SceneView& scene,
 {
     if (!isValid() || !m_impl->preparedOnce) return;
 
-    cudaStream_t stream = static_cast<cudaStream_t>(m_impl->ctx->cuStream());
-
 #ifdef ANACAPA_ENABLE_OPTIX
     if (!m_impl->buildOptixPipeline(
             static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()))) {
         return;
     }
-    // Wavefront route — same gating as renderFrame.
-    if (m_impl->wavefrontMode) {
-        uint32_t tw = std::min(tile.width,  filmWidth  - tile.x0);
-        uint32_t th = std::min(tile.height, filmHeight - tile.y0);
-        m_impl->renderTileWavefront(scene,
-                                      filmWidth, filmHeight,
-                                      tile.x0, tile.y0, tw, th,
-                                      tile.sampleStart, tile.sampleCount,
-                                      out);
-        return;
-    }
+    uint32_t tw = std::min(tile.width,  filmWidth  - tile.x0);
+    uint32_t th = std::min(tile.height, filmHeight - tile.y0);
+    m_impl->renderTileWavefront(scene,
+                                  filmWidth, filmHeight,
+                                  tile.x0, tile.y0, tw, th,
+                                  tile.sampleStart, tile.sampleCount,
+                                  out);
 #else
-    return;
+    (void)scene; (void)tile; (void)filmWidth; (void)filmHeight; (void)out;
 #endif
-
-    uint32_t tileW = std::min(tile.width,  filmWidth  - tile.x0);
-    uint32_t tileH = std::min(tile.height, filmHeight - tile.y0);
-
-    CudaBuffer<GpuAccumPixel> d_accum(tileW * tileH);
-    // Bail cleanly on VRAM exhaustion.  Without this the launch below
-    // would scribble into a null device pointer and the download would
-    // produce arbitrary host memory contents — the source of the
-    // "tiles in the wrong place" symptom on low-memory GPUs.
-    if (!d_accum.isValid()) {
-        fprintf(stderr, "[error] CudaPathIntegrator::renderTile: "
-                        "d_accum alloc failed (%u x %u)\n", tileW, tileH);
-        return;
-    }
-    d_accum.zero();
-
-    LaunchParams params{};
-    m_impl->fillLaunchParams(params, scene,
-        filmWidth, filmHeight,
-        tile.x0, tile.y0, tileW, tileH,
-        tile.sampleStart, tile.sampleCount,
-        d_accum.ptr());
-
-#ifdef ANACAPA_ENABLE_OPTIX
-    m_impl->d_launchParams.upload(&params, 1);
-    OPTIX_CHECK(optixLaunch(m_impl->optixPipeline, stream,
-                            m_impl->d_launchParams.devPtr(),
-                            sizeof(LaunchParams),
-                            &m_impl->sbt,
-                            tileW, tileH, /*depth=*/1));
-#endif
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        fprintf(stderr, "[error] CudaPathIntegrator::renderTile: "
-                        "launch failed (%u x %u): %s\n",
-                tileW, tileH, cudaGetErrorString(err));
-        return;
-    }
-
-    std::vector<GpuAccumPixel> h_accum;
-    d_accum.download(h_accum);
-
-    for (uint32_t ty = 0; ty < tileH; ++ty) {
-        for (uint32_t tx = 0; tx < tileW; ++tx) {
-            const GpuAccumPixel& p = h_accum[ty * tileW + tx];
-            float w = p.weight > 0.f ? p.weight : 1.f;
-            out.add(tx, ty, p.r / w, p.g / w, p.b / w, w);
-            out.addLumSq(tx, ty, p.sumLumSq);
-        }
-    }
 }
 
 } // namespace anacapa

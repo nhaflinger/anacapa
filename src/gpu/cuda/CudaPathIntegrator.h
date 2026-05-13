@@ -58,13 +58,6 @@ public:
     // searchRadius: density-estimate radius in world units.
     void setPhotonMap(int numPhotons, float searchRadius);
 
-    // Experimental: switch the renderFrame path from the megakernel raygen
-    // to a wavefront pipeline (primary -> bounce x N -> finalize).  Targets
-    // register-pressure-limited NVIDIA GPUs (A400 in particular).  Set
-    // before prepare().  Hair + photon-map paths currently take the
-    // megakernel codepath regardless of this flag.
-    void setWavefrontMode(bool on);
-
     // Zero the persistent accumulation buffer.
     // Call before starting a fresh render (scene/camera change) so stale
     // samples from the previous render do not bleed into the new one.
