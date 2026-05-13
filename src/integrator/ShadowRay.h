@@ -38,6 +38,11 @@ inline Spectrum shadowTransmittance(Ray ray,
                                ? scene.materials[si.meshID] : nullptr;
         if (!mat) return {};   // unknown geometry, treat as opaque
 
+        // Delta (specular) surfaces — mirror or perfect glass — are opaque to
+        // shadow rays.  The photon map is the sole source of light that passes
+        // through these materials, so NEE must not also count it.
+        if (mat->isDelta()) return {};
+
         ShadingContext ctx(si, ray.direction);
         Spectrum tint = mat->transmittanceColor(ctx);
         if (isBlack(tint)) return {};   // opaque surface blocks the light

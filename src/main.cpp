@@ -24,8 +24,15 @@ int main(int argc, char** argv) {
 
     std::string integratorName = "path";
     app.add_option("--integrator", integratorName,
-                   "Integrator: path (default) or bdpt")
+                   "Integrator: path (default), bdpt, or photon")
        ->default_val("path");
+
+    app.add_option("--num-photons", settings.numPhotons,
+                   "Photon map: total photons emitted per frame (default 500000)")
+       ->default_val(500'000);
+    app.add_option("--photon-radius", settings.photonRadius,
+                   "Photon map: density estimate search radius in world units (default 0.1)")
+       ->default_val(0.1f);
 
     app.add_option("--firefly-clamp", settings.fireflyClamp,
                    "Max luminance per path sample; applies to path, BDPT, and GPU integrators (0=off, default=10)")
@@ -137,6 +144,8 @@ int main(int argc, char** argv) {
 
     if (integratorName == "path")
         settings.integrator = anacapa::IntegratorType::Path;
+    else if (integratorName == "photon")
+        settings.integrator = anacapa::IntegratorType::PhotonMap;
     else
         settings.integrator = anacapa::IntegratorType::BDPT;
 

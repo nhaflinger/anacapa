@@ -18,7 +18,7 @@
 
 namespace anacapa {
 
-enum class IntegratorType { Path, BDPT };
+enum class IntegratorType { Path, BDPT, PhotonMap };
 
 struct RenderSettings {
     uint32_t       imageWidth      = 800;
@@ -76,6 +76,10 @@ struct RenderSettings {
     // Higher = smoother ribbons, more triangles, slower commit but same render cost.
     // Applied to both the CPU (CurveBrute) and GPU (MetalAccelStructure) pipelines.
     int            hairTessSteps     = 4;
+
+    // Photon mapping parameters (IntegratorType::PhotonMap only).
+    int   numPhotons    = 500'000; // Total photons emitted per frame
+    float photonRadius  = 0.1f;   // Search radius for density estimate (world units)
 
     // Debug: when >= 0, primary rays that hit a different mesh return black.
     // Useful for isolating which pixels belong to a given mesh, and for testing

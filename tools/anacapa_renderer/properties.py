@@ -32,10 +32,36 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
     integrator: bpy.props.EnumProperty(
         name="Integrator",
         items=[
-            ("path", "Path",  "Unidirectional path tracer"),
-            ("bdpt", "BDPT",  "Bidirectional path tracer"),
+            ("path",   "Path",       "Unidirectional path tracer"),
+            ("bdpt",   "BDPT",       "Bidirectional path tracer"),
+            ("photon", "Path + Photon Map", "Path tracer + photon map passes (caustics, SSS, volumes)"),
         ],
         default="path",
+    )
+
+    # Photon map settings (visible when integrator == photon)
+    pm_caustics: bpy.props.BoolProperty(
+        name="Caustic Map",
+        description="Trace photons through specular surfaces to produce sharp caustics "
+                    "and correct glass shadows",
+        default=True,
+    )
+    pm_subsurface: bpy.props.BoolProperty(
+        name="Subsurface Map",
+        description="Trace photons into SSS volumes for correct color bleeding and "
+                    "scattering (not yet implemented)",
+        default=False,
+    )
+    num_photons: bpy.props.IntProperty(
+        name="Photon Count",
+        description="Total photons emitted from lights per frame",
+        default=500000, min=1000, max=10000000,
+    )
+    photon_radius: bpy.props.FloatProperty(
+        name="Search Radius",
+        description="Photon density estimate search radius in world units. "
+                    "Smaller = sharper but noisier; larger = blurrier but cleaner",
+        default=0.1, min=0.001, max=10.0,
     )
     tile_size: bpy.props.IntProperty(
         name="Tile Size", default=64, min=8, max=512)

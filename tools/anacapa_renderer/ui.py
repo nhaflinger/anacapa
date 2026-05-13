@@ -29,6 +29,13 @@ class ANACAPA_PT_sampling(bpy.types.Panel):
         layout.prop(s, "samples")
         layout.prop(s, "max_depth")
         layout.prop(s, "integrator")
+        if s.integrator == "photon":
+            box = layout.box()
+            box.prop(s, "pm_caustics")
+            box.prop(s, "pm_subsurface")
+            col = box.column(align=True)
+            col.prop(s, "num_photons")
+            col.prop(s, "photon_radius")
         layout.prop(s, "tile_size")
         layout.prop(s, "num_threads")
 

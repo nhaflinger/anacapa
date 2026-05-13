@@ -3,6 +3,7 @@
 #include "../accel/CurveBrute.h"
 #include "../integrator/PathIntegrator.h"
 #include "../integrator/BDPTIntegrator.h"
+#include "../integrator/PhotonMapIntegrator.h"
 #ifdef ANACAPA_ENABLE_METAL
 #  include "../gpu/metal/MetalPathIntegrator.h"
 #endif
@@ -551,6 +552,12 @@ void RenderSession::render() {
         if (m_settings.integrator == IntegratorType::BDPT)
             m_integrator = std::make_unique<BDPTIntegrator>(m_settings.maxDepth,
                                                                m_settings.fireflyClamp);
+        else if (m_settings.integrator == IntegratorType::PhotonMap)
+            m_integrator = std::make_unique<PhotonMapIntegrator>(m_settings.maxDepth,
+                                                                    2,
+                                                                    m_settings.fireflyClamp,
+                                                                    m_settings.numPhotons,
+                                                                    m_settings.photonRadius);
         else
             m_integrator = std::make_unique<PathIntegrator>(m_settings.maxDepth,
                                                                2,
