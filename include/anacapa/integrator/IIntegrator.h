@@ -48,6 +48,15 @@ struct Camera {
     float shutterOpen  = 0.f;
     float shutterClose = 0.f;
 
+    // Camera motion blur — close-state vectors (= open-state when hasMotion=false).
+    // generateRay() lerps between open and close at the sample's timeU value,
+    // composing naturally with DoF (aperture offset applied after the lerp).
+    Vec3f  originClose;
+    Vec3f  lowerLeftClose;
+    Vec3f  horizontalClose;
+    Vec3f  verticalClose;
+    bool   hasMotion = false;
+
     static Camera makePinhole(Vec3f from, Vec3f at, Vec3f up,
                                float vfovDegrees,
                                uint32_t width, uint32_t height) {
@@ -71,7 +80,12 @@ struct Camera {
         cam.basisV          = v;
         cam.imageWidth      = width;
         cam.imageHeight     = height;
-        // apertureRadius and focalDistance stay 0 — pure pinhole
+        // Close-state defaults to open-state (static camera)
+        cam.originClose      = cam.origin;
+        cam.horizontalClose  = cam.horizontal;
+        cam.verticalClose    = cam.vertical;
+        cam.lowerLeftClose   = cam.lowerLeftCorner;
+        // apertureRadius, focalDistance, hasMotion stay at defaults
         return cam;
     }
 
@@ -99,17 +113,34 @@ struct Camera {
         float t = (static_cast<float>(imageHeight - 1 - py) + jitterV)
                 / static_cast<float>(imageHeight);
 
-        Vec3f target = lowerLeftCorner + horizontal*s + vertical*t;
-
         // timeU is already the normalized shutter parameter in [0,1).
         // The open/close geometry is sampled at shutterOpen and shutterClose
         // by the scene loader, so timeU=0 → open geometry, timeU→1 → close
         // geometry regardless of the sign or magnitude of the shutter interval.
-        // Storing the raw frame-time (shutterOpen + timeU*(shutterClose-shutterOpen))
-        // produced negative ray.time for center-shutter renders, which extrapolated
-        // hair geometry backward and broke both BVH traversal and interpolateO2W.
+
+        // Camera motion blur: lerp camera position and image plane at timeU.
+        // DoF aperture offset is then applied on top of the lerped origin so
+        // both effects compose correctly (moving camera with a fast lens).
+        Vec3f orig, ll, horiz, vert;
+        if (hasMotion) {
+            auto lerpV = [](Vec3f a, Vec3f b, float u) {
+                return Vec3f{a.x + (b.x-a.x)*u, a.y + (b.y-a.y)*u, a.z + (b.z-a.z)*u};
+            };
+            orig  = lerpV(origin,          originClose,     timeU);
+            ll    = lerpV(lowerLeftCorner, lowerLeftClose,  timeU);
+            horiz = lerpV(horizontal,      horizontalClose, timeU);
+            vert  = lerpV(vertical,        verticalClose,   timeU);
+        } else {
+            orig  = origin;
+            ll    = lowerLeftCorner;
+            horiz = horizontal;
+            vert  = vertical;
+        }
+
+        Vec3f target = ll + horiz*s + vert*t;
+
         if (apertureRadius <= 0.f) {
-            Ray r{origin, normalize(target - origin)};
+            Ray r{orig, normalize(target - orig)};
             r.time = timeU;
             return r;
         }
@@ -133,16 +164,14 @@ struct Camera {
             diskX = r * std::cos(phi);
             diskY = r * std::sin(phi);
         }
-        Vec3f lensPoint = origin
+        Vec3f lensPoint = orig
                         + basisU * (diskX * apertureRadius)
                         + basisV * (diskY * apertureRadius);
 
         // The focal point is where the pinhole ray intersects the focal plane.
-        // pinholeDir scaled so its z-component (along -w) equals focalDistance.
-        Vec3f pinholeDir = normalize(target - origin);
-        Vec3f focalPoint = origin + pinholeDir * focalDistance;
+        Vec3f pinholeDir = normalize(target - orig);
+        Vec3f focalPoint = orig + pinholeDir * focalDistance;
 
-        // Rays from all lens points converge at the focal point.
         Ray r{lensPoint, normalize(focalPoint - lensPoint)};
         r.time = timeU;
         return r;

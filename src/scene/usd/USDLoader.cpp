@@ -1151,7 +1151,7 @@ static Camera buildCamera(const UsdPrim& prim,
     GfMatrix4d localToWorld(1.0);
     UsdGeomXformable xformable(prim);
     xformable.GetLocalTransformation(&localToWorld, &resetXformStack,
-                                      UsdTimeCode::Default());
+                                      xformCache.GetTime());
     GfMatrix4d parentXform = xformCache.GetParentToWorldTransform(prim);
     GfMatrix4d fullXform   = localToWorld * parentXform;
 
@@ -1862,6 +1862,27 @@ LoadedScene loadUSD(const std::string& path,
 
     if (selectedCamPrim) {
         result.camera = buildCamera(selectedCamPrim, xformCache, filmWidth, filmHeight, zUp);
+
+        // Camera motion blur: if the shutter window is active, read the close-state
+        // transform and populate the Camera's motion fields.
+        if (enableMotionBlur) {
+            Camera camClose = buildCamera(selectedCamPrim, xformCacheT1, filmWidth, filmHeight, zUp);
+            Camera& cam     = *result.camera;
+            if (camClose.origin.x != cam.origin.x ||
+                camClose.origin.y != cam.origin.y ||
+                camClose.origin.z != cam.origin.z ||
+                camClose.lowerLeftCorner.x != cam.lowerLeftCorner.x) {
+                cam.originClose      = camClose.origin;
+                cam.lowerLeftClose   = camClose.lowerLeftCorner;
+                cam.horizontalClose  = camClose.horizontal;
+                cam.verticalClose    = camClose.vertical;
+                cam.hasMotion        = true;
+                spdlog::info("USDLoader: camera motion blur — open=({:.3f},{:.3f},{:.3f}) "
+                             "close=({:.3f},{:.3f},{:.3f})",
+                             cam.origin.x, cam.origin.y, cam.origin.z,
+                             cam.originClose.x, cam.originClose.y, cam.originClose.z);
+            }
+        }
 
         // Read shutter:open / shutter:close from the camera prim.
         // Must use UsdTimeCode::Default() for non-time-varying attributes and

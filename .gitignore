@@ -12,6 +12,7 @@ scenes/*
 !scenes/cornell_box.usda
 !scenes/cornell_box_motion.usda
 !scenes/cornell_box_glass_sphere.usda
+!scenes/cornell_box_camera_motion_blur.usda
 
 # macOS
 .DS_Store

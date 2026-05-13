@@ -830,6 +830,12 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     camParams.hashGridDimX      = m_impl->hashGridDimX;
     camParams.hashGridDimY      = m_impl->hashGridDimY;
     camParams.hashGridDimZ      = m_impl->hashGridDimZ;
+    // Camera motion blur
+    camParams.hasMotion = cam.hasMotion ? 1u : 0u;
+    camParams.originClose     = {cam.originClose.x,     cam.originClose.y,     cam.originClose.z};
+    camParams.lowerLeftClose  = {cam.lowerLeftClose.x,  cam.lowerLeftClose.y,  cam.lowerLeftClose.z};
+    camParams.horizontalClose = {cam.horizontalClose.x, cam.horizontalClose.y, cam.horizontalClose.z};
+    camParams.verticalClose   = {cam.verticalClose.x,   cam.verticalClose.y,   cam.verticalClose.z};
 
     // Use the persistent accum buffer — allocates only on first call or size change.
     // clearAccum() should be called when starting a fresh render (new scene/camera).
@@ -1023,6 +1029,12 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
     camParams.hashGridDimX      = m_impl->hashGridDimX;
     camParams.hashGridDimY      = m_impl->hashGridDimY;
     camParams.hashGridDimZ      = m_impl->hashGridDimZ;
+    // Camera motion blur
+    camParams.hasMotion = cam.hasMotion ? 1u : 0u;
+    camParams.originClose     = {cam.originClose.x,     cam.originClose.y,     cam.originClose.z};
+    camParams.lowerLeftClose  = {cam.lowerLeftClose.x,  cam.lowerLeftClose.y,  cam.lowerLeftClose.z};
+    camParams.horizontalClose = {cam.horizontalClose.x, cam.horizontalClose.y, cam.horizontalClose.z};
+    camParams.verticalClose   = {cam.verticalClose.x,   cam.verticalClose.y,   cam.verticalClose.z};
 
     // Tile-sized accum buffer (gid is local; shader writes gid.y*tileW+gid.x)
     size_t accumBytes   = tileW * tileH * sizeof(GpuAccumPixel);

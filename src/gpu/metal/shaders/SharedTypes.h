@@ -185,6 +185,19 @@ struct GpuCameraParams {
     // 0xFFFFFFFF when the scene contains no hair.
     uint32_t  hairMeshBaseID;
 
+    // Camera motion blur — close-state image plane (= open-state when hasMotion=0).
+    // The shade kernel lerps between open and close at rayTime before shooting.
+    // Aperture disk offset for DoF is applied after the lerp so both compose.
+    GpuFloat3 originClose;
+    float     _padOC;
+    GpuFloat3 lowerLeftClose;
+    float     _padLC;
+    GpuFloat3 horizontalClose;
+    float     _padHC;
+    GpuFloat3 verticalClose;
+    float     _padVC;
+    uint32_t  hasMotion;      // 0 = static camera, 1 = lerp at rayTime
+
     // Caustic photon map hash grid (enabled when photonMapEnabled != 0).
     // cellStart[numCells+1] and sortedPhotonIdx[numPhotons] are bound at
     // buffers 21 and 22; the photon array is at buffer 23.

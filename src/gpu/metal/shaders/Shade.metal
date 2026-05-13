@@ -990,10 +990,16 @@ kernel void shade(
 
     uint globalPixelIdx = py * cam.imageWidth + px;
 
-    float3 origin = float3(cam.origin.x, cam.origin.y, cam.origin.z);
-    float3 horiz  = float3(cam.horizontal.x, cam.horizontal.y, cam.horizontal.z);
-    float3 vert   = float3(cam.vertical.x,   cam.vertical.y,   cam.vertical.z);
-    float3 ll     = float3(cam.lowerLeft.x,  cam.lowerLeft.y,  cam.lowerLeft.z);
+    // Open-state camera vectors
+    float3 camOrig0 = float3(cam.origin.x,     cam.origin.y,     cam.origin.z);
+    float3 camH0    = float3(cam.horizontal.x,  cam.horizontal.y,  cam.horizontal.z);
+    float3 camV0    = float3(cam.vertical.x,    cam.vertical.y,    cam.vertical.z);
+    float3 camLL0   = float3(cam.lowerLeft.x,   cam.lowerLeft.y,   cam.lowerLeft.z);
+    // Close-state camera vectors (== open-state when hasMotion==0, so mix() is a no-op)
+    float3 camOrig1 = float3(cam.originClose.x,     cam.originClose.y,     cam.originClose.z);
+    float3 camH1    = float3(cam.horizontalClose.x,  cam.horizontalClose.y,  cam.horizontalClose.z);
+    float3 camV1    = float3(cam.verticalClose.x,    cam.verticalClose.y,    cam.verticalClose.z);
+    float3 camLL1   = float3(cam.lowerLeftClose.x,   cam.lowerLeftClose.y,   cam.lowerLeftClose.z);
 
     intersector<triangle_data, instancing, primitive_motion> isect;
     isect.accept_any_intersection(false);
@@ -1011,6 +1017,15 @@ kernel void shade(
 
         // Sample shutter time uniformly within [shutterOpen, shutterClose]
         float rayTime = cam.shutterOpen + rand01(rng) * (cam.shutterClose - cam.shutterOpen);
+
+        // Camera motion blur: lerp image-plane at rayTime
+        float camT = (cam.shutterClose > cam.shutterOpen + 1e-6f)
+                   ? clamp((rayTime - cam.shutterOpen) / (cam.shutterClose - cam.shutterOpen), 0.f, 1.f)
+                   : 0.f;
+        float3 origin = mix(camOrig0, camOrig1, camT);
+        float3 horiz  = mix(camH0,    camH1,    camT);
+        float3 vert   = mix(camV0,    camV1,    camT);
+        float3 ll     = mix(camLL0,   camLL1,   camT);
 
         // Pixel reconstruction filter — importance-sampled jitter with
         // ±1 sign weight for filters with negative lobes.

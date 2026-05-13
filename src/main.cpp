@@ -137,7 +137,6 @@ int main(int argc, char** argv) {
                    "(CPU and GPU). Higher = smoother curves. Default 4.")
        ->default_val(4)
        ->check(CLI::Range(1, 32));
-
     CLI11_PARSE(app, argc, argv);
 
     settings.frameSet = (frameOpt->count() > 0);
