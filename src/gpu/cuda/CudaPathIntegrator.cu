@@ -1287,10 +1287,9 @@ bool CudaPathIntegrator::renderFrame(const SceneView& scene,
     // still uses the megakernel pipeline (its raygen is small), but the
     // shade-time photon-map query is already implemented in
     // __raygen__wf_bounce, so photon mode benefits from wavefront too.
-    // Hair scenes currently fall back — the Marschner BSDF path hasn't
-    // been ported to wavefront yet.
-    const bool wfPath = m_impl->wavefrontMode
-                       && (m_impl->accel->hairMeshBaseID() == 0xFFFFFFFFu);
+    // Hair scenes are now also handled — Marschner BSDF NEE + sampling
+    // lives inside __raygen__wf_bounce alongside the mesh material code.
+    const bool wfPath = m_impl->wavefrontMode;
     if (wfPath) {
         return m_impl->renderFrameWavefront(scene,
                                               filmWidth, filmHeight,
@@ -1389,10 +1388,8 @@ void CudaPathIntegrator::renderTile(const SceneView& scene,
             static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()))) {
         return;
     }
-    // Wavefront route — same gating as renderFrame.  Hair scenes still
-    // fall through to the megakernel tile dispatch below.
-    if (m_impl->wavefrontMode
-            && m_impl->accel->hairMeshBaseID() == 0xFFFFFFFFu) {
+    // Wavefront route — same gating as renderFrame.
+    if (m_impl->wavefrontMode) {
         uint32_t tw = std::min(tile.width,  filmWidth  - tile.x0);
         uint32_t th = std::min(tile.height, filmHeight - tile.y0);
         m_impl->renderTileWavefront(scene,
