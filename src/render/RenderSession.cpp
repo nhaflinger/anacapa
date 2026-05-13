@@ -540,6 +540,8 @@ void RenderSession::render() {
             cudaIntegrator->setFireflyClamp(m_settings.fireflyClamp);
             if (m_settings.integrator == IntegratorType::PhotonMap)
                 cudaIntegrator->setPhotonMap(m_settings.numPhotons, m_settings.photonRadius);
+            if (m_settings.cudaWavefront)
+                cudaIntegrator->setWavefrontMode(true);
             m_integrator = std::move(cudaIntegrator);
         } else {
             spdlog::warn("--interactive: CUDA backend unavailable, "

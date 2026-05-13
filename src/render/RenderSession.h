@@ -81,6 +81,11 @@ struct RenderSettings {
     int   numPhotons    = 500'000; // Total photons emitted per frame
     float photonRadius  = 0.1f;   // Search radius for density estimate (world units)
 
+    // Experimental: CUDA-only wavefront path tracer (primary -> bounce x N
+    // -> finalize, loop on host).  Targets register-pressure-limited NVIDIA
+    // GPUs.  No effect on Metal or CPU.
+    bool  cudaWavefront = false;
+
     // Debug: when >= 0, primary rays that hit a different mesh return black.
     // Useful for isolating which pixels belong to a given mesh, and for testing
     // that mesh's shading in isolation.  Indirect bounces are unaffected.

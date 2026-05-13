@@ -1609,3 +1609,365 @@ extern "C" __global__ void __raygen__photon()
         break;
     }
 }
+
+// ===========================================================================
+// Wavefront path tracer — experimental CUDA-only architecture.
+//
+// The megakernel __raygen__rg runs the entire path (primary + N bounces +
+// NEE + accumulation) inside a single OptiX raygen.  On register-constrained
+// GPUs (the RTX A400 in particular) the resulting kernel hits low occupancy
+// because so many values are live across the bounce loop.
+//
+// The wavefront design moves the loop to the host:
+//   * __raygen__wf_primary   — one thread per (pixel, sample): generate the
+//                              camera ray, write initial state.
+//   * __raygen__wf_bounce    — one thread per ray-slot: read state, do ONE
+//                              trace + shade + sample, write state back.
+//                              Host launches this maxDepth times.
+//   * __raygen__wf_finalize  — atomic-add each ray's L into the film pixel.
+//
+// Each per-bounce kernel sees only the live state for that bounce, so the
+// register window is tighter and occupancy climbs.
+//
+// Functional parity is preserved by sharing the same trace(), sampleDirect(),
+// evalLayeredBSDF(), and queryPhotonMap() helpers as the megakernel.
+// ===========================================================================
+
+static __forceinline__ __device__
+uint32_t wfFlatIndex(uint32_t tx, uint32_t ty, uint32_t s)
+{
+    return (ty * params.cam.tileWidth + tx) * params.sampleBatch.batchSize + s;
+}
+
+extern "C" __global__ void __raygen__wf_primary()
+{
+    const uint3 idx = optixGetLaunchIndex();
+    const uint32_t tx = idx.x;
+    const uint32_t ty = idx.y;
+    const uint32_t s  = idx.z;
+
+    if (tx >= params.cam.tileWidth || ty >= params.cam.tileHeight) return;
+    if (s  >= params.sampleBatch.batchSize) return;
+
+    const uint32_t px = params.cam.tileX0 + tx;
+    const uint32_t py = params.cam.tileY0 + ty;
+    if (px >= params.cam.imageWidth || py >= params.cam.imageHeight) return;
+
+    const uint32_t flatIdx        = wfFlatIndex(tx, ty, s);
+    const uint32_t globalPixelIdx = py * params.cam.imageWidth + px;
+    const uint32_t pixelLocal     = ty * params.cam.tileWidth + tx;
+
+    uint32_t rng = pcg(pcg(globalPixelIdx) ^
+                       ((params.sampleBatch.sampleStart + s) * 2654435761u));
+
+    float rayTime = params.cam.shutterOpen;
+    if (params.cam.shutterClose > params.cam.shutterOpen) {
+        rayTime = params.cam.shutterOpen
+                + rand01(rng) * (params.cam.shutterClose - params.cam.shutterOpen);
+    }
+
+    PixelFilterSample fs = samplePixelFilter(rand01(rng), rand01(rng));
+    float jx = 0.5f + fs.dx;
+    float jy = 0.5f + fs.dy;
+    float u  = (float(px) + jx) / float(params.cam.imageWidth);
+    float v  = (float(params.cam.imageHeight - 1 - py) + jy)
+             / float(params.cam.imageHeight);
+
+    const float3 origin = make3(params.cam.origin);
+    const float3 horiz  = make3(params.cam.horizontal);
+    const float3 vert   = make3(params.cam.vertical);
+    const float3 ll     = make3(params.cam.lowerLeft);
+    const float3 rayDir = normalize(ll + u * horiz + v * vert - origin);
+
+    WfRayState st{};
+    st.origin       = {origin.x, origin.y, origin.z};
+    st.rayTime      = rayTime;
+    st.dir          = {rayDir.x, rayDir.y, rayDir.z};
+    st.flags        = kWfPrevWasDelta;
+    st.throughput   = {1.f, 1.f, 1.f};
+    st.pixelIdx     = pixelLocal;
+    st.L            = {0.f, 0.f, 0.f};
+    st.rng          = rng;
+    st.prevN        = {0.f, 0.f, 0.f};
+    st.prevBsdfPdf  = 0.f;
+    st.pixelWeight  = fs.weight;
+    st.bounce       = 0;
+    st.glassDepth   = 0;
+
+    params.wfRays[flatIdx] = st;
+}
+
+extern "C" __global__ void __raygen__wf_bounce()
+{
+    const uint3 idx = optixGetLaunchIndex();
+    const uint32_t flatIdx = idx.x;
+    if (flatIdx >= params.wfNumRays) return;
+
+    WfRayState st = params.wfRays[flatIdx];
+    if (st.flags & kWfTerminated) return;
+
+    float3 rayOrig    = make3(st.origin);
+    float3 rayDir     = make3(st.dir);
+    float3 throughput = make3(st.throughput);
+    float3 L          = make3(st.L);
+    float3 prevN      = make3(st.prevN);
+    float  prevBsdfPdf= st.prevBsdfPdf;
+    bool   prevWasDelta = (st.flags & kWfPrevWasDelta) != 0;
+    uint32_t rng        = st.rng;
+    const uint32_t bounce  = st.bounce;
+    const float    rayTime = st.rayTime;
+
+    // Hit the scene.
+    TraceResult hit = trace(rayOrig, rayDir, 1e-4f, 1e10f, rayTime);
+
+    // ---- Miss ---------------------------------------------------------------
+    if (!hit.valid) {
+        float3 envColor = make_float3(0.0f, 0.0f, 0.0f);
+        if (params.cam.hasEnvLight && params.envTexture != 0)      envColor = evalEnvmap(rayDir);
+        else if (params.cam.hasEnvLight)                            envColor = make3(params.cam.envLe);
+        if (compmax(envColor) > 0.0f) {
+            float weight = 1.0f;
+            if (!prevWasDelta && bounce > 0) {
+                float lpdf = 0.0f;
+                for (uint32_t li = 0; li < params.numLights; ++li) {
+                    if (params.lights[li].type == kLightDome) {
+                        float domePdf;
+                        if (params.cam.envMapWidth > 0
+                                && params.envMarginalCdf != nullptr
+                                && params.envConditionalCdf != nullptr) {
+                            domePdf = evalEnvPdf(rayDir,
+                                                 params.envMarginalCdf,
+                                                 params.envConditionalCdf);
+                        } else {
+                            float cosW = fmaxf(0.0f, dot(rayDir, prevN));
+                            domePdf = cosW / CUDART_PI_F;
+                        }
+                        lpdf += domePdf / float(params.numLights);
+                    }
+                }
+                if (lpdf > 0.0f) weight = powerHeuristic(prevBsdfPdf, lpdf);
+            }
+            L += throughput * envColor * weight;
+        }
+        st.L = {L.x, L.y, L.z};
+        st.flags |= kWfTerminated;
+        st.rng = rng;
+        params.wfRays[flatIdx] = st;
+        return;
+    }
+
+    const float3 hitPos = rayOrig + rayDir * hit.t;
+    float3 geomN = interpolateNormal(hit.primID, hit.bary,
+                                      params.normals, params.indices);
+    float3 n = geomN;
+    if (dot(-1.0f * rayDir, n) < 0.0f) n = -1.0f * n;
+
+    uint32_t matIdx  = (hit.meshID < params.numMaterials) ? hit.meshID : 0u;
+    GpuMaterial mat  = params.materials[matIdx];
+    float3 baseColor = make3(mat.baseColor);
+    float3 emissive  = make3(mat.emissive);
+
+    // ---- Emitter Le ---------------------------------------------------------
+    if (mat.type == kMatEmissive) {
+        float weight = 1.0f;
+        if (!prevWasDelta && bounce > 0) {
+            float lpdf = 0.0f;
+            for (uint32_t li = 0; li < params.numLights; ++li) {
+                if (params.lights[li].type == kLightRect) {
+                    float spdf = rectLightSolidAnglePdf(
+                        params.lights[li], hitPos, rayDir, hit.t);
+                    if (spdf > 0.0f) lpdf += spdf / float(params.numLights);
+                }
+            }
+            if (lpdf > 0.0f) weight = powerHeuristic(prevBsdfPdf, lpdf);
+        }
+        L += throughput * emissive * weight;
+        st.L = {L.x, L.y, L.z};
+        st.flags |= kWfTerminated;
+        st.rng = rng;
+        params.wfRays[flatIdx] = st;
+        return;
+    }
+
+    float3 wo = -1.0f * rayDir;
+
+    // ---- NEE + photon-map (non-glass only) ---------------------------------
+    if (mat.type != kMatGlass) {
+        L += throughput * sampleDirect(hitPos, n, wo,
+                                       mat.type, baseColor,
+                                       mat.roughness, mat.metalness,
+                                       mat.specular,
+                                       rng, rayTime);
+        // Photon map only fires at the first non-glass hit on the camera path,
+        // signalled by prevWasDelta still being set from the camera-vertex
+        // initialisation (gets cleared after the first diffuse/glossy bounce).
+        if (prevWasDelta) {
+            float3 Lcaustic = queryPhotonMap(hitPos, n, wo,
+                                              mat.type, baseColor,
+                                              mat.roughness, mat.metalness,
+                                              mat.specular);
+            L += throughput * Lcaustic;
+        }
+    }
+
+    // ---- Russian roulette --------------------------------------------------
+    if (bounce >= 3) {
+        float q = fmaxf(0.05f, 1.0f - compmax(throughput));
+        if (rand01(rng) < q) {
+            st.L = {L.x, L.y, L.z};
+            st.flags |= kWfTerminated;
+            st.rng = rng;
+            params.wfRays[flatIdx] = st;
+            return;
+        }
+        throughput *= (1.0f / (1.0f - q));
+    }
+
+    // ---- Sample next direction --------------------------------------------
+    float3 wi;
+    float  bsdfPdf;
+    float3 bsdfF;
+    bool   isDelta = false;
+
+    if (mat.type == kMatGlass) {
+        // Delta refract/reflect.  Throughput stays unchanged (no BSDF
+        // attenuation, no cosI scaling), and glassDepth bumps instead of
+        // bounce so the path's non-delta depth budget isn't consumed —
+        // matches the megakernel's `if (bounce > 0) --bounce; ++glassDepth`
+        // bookkeeping.
+        bool   entering = dot(rayDir, geomN) < 0.0f;
+        float3 faceN    = entering ? geomN : -1.0f * geomN;
+        float  eta      = entering ? (1.0f / mat.specularIOR) : mat.specularIOR;
+        float  cosI     = dot(-1.0f * rayDir, faceN);
+        float  Fr       = fresnelDielectric(cosI, 1.0f / eta);
+        if (rand01(rng) < Fr) {
+            wi = reflect(rayDir, faceN);
+            rayOrig = hitPos + faceN * 1e-4f;
+        } else {
+            wi = refract(rayDir, faceN, eta);
+            if (dot(wi, wi) < 0.5f) {
+                wi = reflect(rayDir, faceN);
+                rayOrig = hitPos + faceN * 1e-4f;
+            } else {
+                wi = normalize(wi);
+                rayOrig = hitPos - faceN * 1e-4f;
+            }
+        }
+
+        // Commit the delta bounce directly; skip the post-loop throughput
+        // multiply which would scale by cosI and break delta physics.
+        rayDir = normalize(wi);
+        st.origin     = {rayOrig.x, rayOrig.y, rayOrig.z};
+        st.dir        = {rayDir.x,  rayDir.y,  rayDir.z};
+        // throughput, L, prevN, prevBsdfPdf=1 carried over
+        st.prevBsdfPdf = 1.0f;
+        st.prevN      = {prevN.x, prevN.y, prevN.z};
+        st.rng        = rng;
+        st.bounce     = bounce;                    // unchanged
+        st.glassDepth = st.glassDepth + 1u;
+        st.flags      = kWfPrevWasDelta;
+        if (st.glassDepth >= 16) st.flags |= kWfTerminated;
+        params.wfRays[flatIdx] = st;
+        return;
+    } else if (mat.type == kMatGGX && mat.roughness < 0.95f) {
+        float  alpha  = mat.roughness * mat.roughness;
+        float  alpha2 = alpha * alpha;
+        float3 F0     = lerp3(make_float3(0.04f, 0.04f, 0.04f), baseColor, mat.metalness);
+        float lumSpec = (F0.x + F0.y + F0.z) / 3.0f;
+        float lumDiff = (1.0f - mat.metalness) * (baseColor.x + baseColor.y + baseColor.z) / 3.0f;
+        float pSpec   = lumSpec / fmaxf(1e-4f, lumSpec + lumDiff);
+        float pDiff   = 1.0f - pSpec;
+
+        float3 wh;
+        if (rand01(rng) < pSpec) {
+            float3 wmLocal = sampleGGX(rand2(rng), alpha2);
+            wh = toWorld(wmLocal, n);
+            if (dot(wh, n) < 0.0f) wh = -1.0f * wh;
+            wi = reflect(-1.0f * wo, wh);
+        } else {
+            wi = cosineSampleHemisphere(rand2(rng), n);
+            wh = normalize(wo + wi);
+        }
+        if (dot(wi, n) <= 0.0f) {
+            st.L = {L.x, L.y, L.z};
+            st.flags |= kWfTerminated;
+            st.rng = rng;
+            params.wfRays[flatIdx] = st;
+            return;
+        }
+        float cosII = dot(n, wi);
+        float cosO  = dot(n, wo);
+        float cosH  = fmaxf(0.0f, dot(n, wh));
+        float D     = ggxD(cosH, alpha2);
+        bsdfF = evalLayeredBSDF(wo, wi, n, baseColor,
+                                 mat.roughness, mat.metalness,
+                                 mat.specular);
+        float ggxPdf = D * cosH / fmaxf(1e-7f, 4.0f * dot(wo, wh));
+        float cosPdf = cosII / CUDART_PI_F;
+        bsdfPdf = pSpec * ggxPdf + pDiff * cosPdf;
+        rayOrig = hitPos + n * 1e-4f;
+    } else {
+        wi      = cosineSampleHemisphere(rand2(rng), n);
+        bsdfPdf = fmaxf(1e-7f, dot(n, wi)) / CUDART_PI_F;
+        if (mat.type == kMatGGX) {
+            bsdfF = evalLayeredBSDF(wo, wi, n, baseColor,
+                                     mat.roughness, mat.metalness, mat.specular);
+        } else {
+            bsdfF = baseColor * (1.0f / CUDART_PI_F);
+        }
+        rayOrig = hitPos + n * 1e-4f;
+    }
+
+    float cosI = dot(n, wi);
+    if (cosI <= 0.0f || bsdfPdf <= 0.0f) {
+        st.L = {L.x, L.y, L.z};
+        st.flags |= kWfTerminated;
+        st.rng = rng;
+        params.wfRays[flatIdx] = st;
+        return;
+    }
+    throughput *= bsdfF * cosI * (1.0f / bsdfPdf);
+
+    // ---- Pack updated state ------------------------------------------------
+    rayDir = normalize(wi);
+    st.origin     = {rayOrig.x, rayOrig.y, rayOrig.z};
+    st.dir        = {rayDir.x, rayDir.y, rayDir.z};
+    st.throughput = {throughput.x, throughput.y, throughput.z};
+    st.L          = {L.x, L.y, L.z};
+    st.prevN      = {n.x, n.y, n.z};
+    st.prevBsdfPdf = bsdfPdf;
+    st.rng        = rng;
+    st.bounce     = bounce + 1;
+    st.flags      = isDelta ? kWfPrevWasDelta : 0u;
+    // Hit max depth? Terminate so finalize collects L cleanly.
+    if (st.bounce > params.cam.maxDepth) st.flags |= kWfTerminated;
+    params.wfRays[flatIdx] = st;
+}
+
+extern "C" __global__ void __raygen__wf_finalize()
+{
+    const uint3 idx = optixGetLaunchIndex();
+    const uint32_t flatIdx = idx.x;
+    if (flatIdx >= params.wfNumRays) return;
+
+    WfRayState st = params.wfRays[flatIdx];
+    float3 L  = make3(st.L);
+    float  fw = st.pixelWeight;
+    uint32_t pix = st.pixelIdx;
+
+    // Firefly clamp (same algorithm as megakernel).
+    float lum = 0.2126f * L.x + 0.7152f * L.y + 0.0722f * L.z;
+    if (params.cam.fireflyClamp > 0.0f && lum > params.cam.fireflyClamp) {
+        float k = params.cam.fireflyClamp / lum;
+        L = L * k;
+        lum = params.cam.fireflyClamp;
+    }
+
+    // Multiple sample-slots map to the same pixel — atomics required.
+    GpuAccumPixel& out = params.accum[pix];
+    atomicAdd(&out.r,        L.x * fw);
+    atomicAdd(&out.g,        L.y * fw);
+    atomicAdd(&out.b,        L.z * fw);
+    atomicAdd(&out.weight,   fw);
+    atomicAdd(&out.sumLumSq, lum * lum);
+}

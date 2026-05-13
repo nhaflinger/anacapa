@@ -138,6 +138,12 @@ int main(int argc, char** argv) {
        ->default_val(4)
        ->check(CLI::Range(1, 32));
 
+    app.add_flag("--cuda-wavefront", settings.cudaWavefront,
+                 "Experimental: CUDA-only wavefront path tracer (primary -> "
+                 "bounce x N -> finalize, loop on host) instead of the "
+                 "megakernel raygen. Targets register-pressure-limited "
+                 "NVIDIA GPUs. Ignored on Metal/CPU.");
+
     CLI11_PARSE(app, argc, argv);
 
     settings.frameSet = (frameOpt->count() > 0);

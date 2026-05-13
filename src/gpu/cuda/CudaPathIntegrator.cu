@@ -319,19 +319,44 @@ struct CudaPathIntegrator::Impl {
     OptixProgramGroup     pgMiss         = nullptr;
     OptixProgramGroup     pgHit          = nullptr;
     OptixProgramGroup     pgPhotonRg     = nullptr;   // __raygen__photon
-    OptixPipeline         optixPipeline  = nullptr;
+    OptixProgramGroup     pgWfPrimary    = nullptr;
+    OptixProgramGroup     pgWfBounce     = nullptr;
+    OptixProgramGroup     pgWfFinalize   = nullptr;
+    OptixPipeline         optixPipeline  = nullptr;   // megakernel (shade + photon)
+    OptixPipeline         wfPipeline     = nullptr;   // wavefront (3 raygens)
     CudaByteBuffer        sbtRaygenBuf;
     CudaByteBuffer        sbtPhotonRaygenBuf;        // SBT raygen record for photon pass
+    CudaByteBuffer        sbtWfPrimaryBuf;
+    CudaByteBuffer        sbtWfBounceBuf;
+    CudaByteBuffer        sbtWfFinalizeBuf;
     CudaByteBuffer        sbtMissBuf;
     CudaByteBuffer        sbtHitBuf;
-    OptixShaderBindingTable sbt          = {};      // raygenRecord = __raygen__rg
-    OptixShaderBindingTable sbtPhoton    = {};      // same but raygenRecord = __raygen__photon
+    OptixShaderBindingTable sbt           = {};   // megakernel: __raygen__rg
+    OptixShaderBindingTable sbtPhoton     = {};   //              __raygen__photon
+    OptixShaderBindingTable sbtWfPrimary  = {};
+    OptixShaderBindingTable sbtWfBounce   = {};
+    OptixShaderBindingTable sbtWfFinalize = {};
     CudaBuffer<LaunchParams> d_launchParams;  // single-element buffer in device mem
     bool                  optixReady     = false;
+
+    // Wavefront state buffer (allocated lazily by renderFrameWavefront).
+    CudaBuffer<WfRayState> d_wfRays;
+    uint32_t               wfRayCount    = 0;
+    bool                   wavefrontMode = false;
 
     bool buildOptixPipeline(OptixDeviceContext ctx);
     void destroyOptixPipeline();
     void buildPhotonMap(OptixDeviceContext ctx);
+    bool renderFrameWavefront(const SceneView& scene,
+                                uint32_t filmWidth, uint32_t filmHeight,
+                                uint32_t sampleStart, uint32_t sampleCount,
+                                Film& film);
+    void renderTileWavefront(const SceneView& scene,
+                              uint32_t filmWidth, uint32_t filmHeight,
+                              uint32_t tileX0, uint32_t tileY0,
+                              uint32_t tileW,  uint32_t tileH,
+                              uint32_t sampleStart, uint32_t sampleCount,
+                              TileBuffer& out);
 #endif
 
     ~Impl() {
@@ -504,6 +529,64 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
     sbtPhoton                           = sbt;
     sbtPhoton.raygenRecord              = sbtPhotonRaygenBuf.devPtr();
 
+    // -----------------------------------------------------------------------
+    // Wavefront pipeline — built unconditionally (cheap; only consumes a few
+    // KiB of SBT records) so the user can toggle setWavefrontMode at run
+    // time without re-initialising OptiX.  The shade megakernel pipeline
+    // above stays untouched, so non-wavefront renders pay zero overhead.
+    // -----------------------------------------------------------------------
+    auto makeRaygenPg = [&](const char* entry, OptixProgramGroup& outPg) {
+        OptixProgramGroupDesc d{};
+        d.kind                     = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+        d.raygen.module            = optixModule;
+        d.raygen.entryFunctionName = entry;
+        size_t lg = sizeof(log);
+        OPTIX_CHECK(optixProgramGroupCreate(ctx, &d, 1, &pgOpts,
+                                            log, &lg, &outPg));
+    };
+    makeRaygenPg("__raygen__wf_primary",  pgWfPrimary);
+    makeRaygenPg("__raygen__wf_bounce",   pgWfBounce);
+    makeRaygenPg("__raygen__wf_finalize", pgWfFinalize);
+
+    OptixProgramGroup wfPgs[5] = {
+        pgWfPrimary, pgWfBounce, pgWfFinalize, pgMiss, pgHit
+    };
+    logSize = sizeof(log);
+    OPTIX_CHECK(optixPipelineCreate(ctx, &pipeOpts, &linkOpts,
+                                    wfPgs, 5, log, &logSize, &wfPipeline));
+
+    OptixStackSizes wfStack{};
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgWfPrimary,  &wfStack, wfPipeline));
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgWfBounce,   &wfStack, wfPipeline));
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgWfFinalize, &wfStack, wfPipeline));
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgMiss,       &wfStack, wfPipeline));
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgHit,        &wfStack, wfPipeline));
+    {
+        uint32_t dcStackTrav2 = 0, dcStackState2 = 0, contStack2 = 0;
+        OPTIX_CHECK(optixUtilComputeStackSizes(&wfStack,
+                                               /*maxTraceDepth=*/1,
+                                               /*maxCCDepth=*/0,
+                                               /*maxDCDepth=*/0,
+                                               &dcStackTrav2, &dcStackState2, &contStack2));
+        OPTIX_CHECK(optixPipelineSetStackSize(wfPipeline,
+                                              dcStackTrav2, dcStackState2, contStack2,
+                                              /*maxTraversableDepth=*/2));
+    }
+
+    // Build three raygen SBT records; miss+hit are shared with the megakernel.
+    auto packAndUpload = [&](OptixProgramGroup pg, CudaByteBuffer& buf,
+                              OptixShaderBindingTable& out) {
+        SbtRecord rec{};
+        OPTIX_CHECK(optixSbtRecordPackHeader(pg, &rec));
+        buf = CudaByteBuffer(sizeof(SbtRecord));
+        buf.upload(reinterpret_cast<const uint8_t*>(&rec), sizeof(SbtRecord));
+        out = sbt;
+        out.raygenRecord = buf.devPtr();
+    };
+    packAndUpload(pgWfPrimary,  sbtWfPrimaryBuf,  sbtWfPrimary);
+    packAndUpload(pgWfBounce,   sbtWfBounceBuf,   sbtWfBounce);
+    packAndUpload(pgWfFinalize, sbtWfFinalizeBuf, sbtWfFinalize);
+
     // ---- Launch params buffer (re-used across launches) ---------------------
     d_launchParams = CudaBuffer<LaunchParams>(1);
 
@@ -515,13 +598,18 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
 void CudaPathIntegrator::Impl::destroyOptixPipeline()
 {
     if (!optixReady) return;
+    if (wfPipeline)    optixPipelineDestroy(wfPipeline);
     if (optixPipeline) optixPipelineDestroy(optixPipeline);
+    if (pgWfFinalize)  optixProgramGroupDestroy(pgWfFinalize);
+    if (pgWfBounce)    optixProgramGroupDestroy(pgWfBounce);
+    if (pgWfPrimary)   optixProgramGroupDestroy(pgWfPrimary);
     if (pgHit)         optixProgramGroupDestroy(pgHit);
     if (pgMiss)        optixProgramGroupDestroy(pgMiss);
     if (pgPhotonRg)    optixProgramGroupDestroy(pgPhotonRg);
     if (pgRaygen)      optixProgramGroupDestroy(pgRaygen);
     if (optixModule)   optixModuleDestroy(optixModule);
-    optixPipeline = nullptr;
+    wfPipeline = optixPipeline = nullptr;
+    pgWfFinalize = pgWfBounce = pgWfPrimary = nullptr;
     pgHit = pgMiss = pgPhotonRg = pgRaygen = nullptr;
     optixModule = nullptr;
     optixReady = false;
@@ -580,6 +668,11 @@ void CudaPathIntegrator::setPhotonMap(int numPhotons, float searchRadius) {
     m_impl->photonMapEnabled   = (numPhotons > 0);
     m_impl->numPhotons         = static_cast<uint32_t>(std::max(0, numPhotons));
     m_impl->photonSearchRadius = searchRadius;
+}
+
+void CudaPathIntegrator::setWavefrontMode(bool on) {
+    m_impl->wavefrontMode = on;
+    if (on) printf("[info]  CudaPathIntegrator: wavefront mode enabled\n");
 }
 
 #ifdef ANACAPA_ENABLE_OPTIX
@@ -728,6 +821,207 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
     printf("[info]  CudaPathIntegrator: photon hash grid %ux%ux%u (%u cells)\n",
            hashGridDimX, hashGridDimY, hashGridDimZ, numCells);
 }
+
+// ---------------------------------------------------------------------------
+// renderFrameWavefront — experimental loop-in-host path tracer.
+//
+// Driver:
+//   primary launch     — 3D grid (tileW, tileH, batchSize), one thread per
+//                        (pixel, sample) initialises WfRayState.
+//   bounce launch * N  — 1D grid (tileW * tileH * batchSize), one thread per
+//                        ray-slot; runs one trace + shade + sample per call.
+//                        Threads whose slot is already terminated return
+//                        immediately, so the launch count stays constant
+//                        without explicit compaction.  Adding compaction is
+//                        a follow-up step if this POC pans out.
+//   finalize launch    — same 1D grid, atomic-add each ray's L into the
+//                        film accum (with firefly clamp).
+// ---------------------------------------------------------------------------
+bool CudaPathIntegrator::Impl::renderFrameWavefront(
+    const SceneView& scene,
+    uint32_t filmWidth, uint32_t filmHeight,
+    uint32_t sampleStart, uint32_t sampleCount,
+    Film& film)
+{
+    CUstream stream = static_cast<CUstream>(ctx->cuStream());
+
+    ensureAccum(filmWidth, filmHeight);
+    if (!d_accum.isValid()) {
+        fprintf(stderr, "[error] CudaPathIntegrator::renderFrameWavefront: "
+                        "accum alloc failed (%u x %u)\n", filmWidth, filmHeight);
+        return false;
+    }
+
+    constexpr uint32_t kBatchSize     = 4;
+    constexpr uint32_t kMergeInterval = 4;
+
+    // Allocate / resize the persistent ray-state buffer.
+    uint32_t needRays = filmWidth * filmHeight * kBatchSize;
+    if (!d_wfRays.isValid() || wfRayCount != needRays) {
+        d_wfRays   = CudaBuffer<WfRayState>(needRays);
+        wfRayCount = d_wfRays.isValid() ? needRays : 0;
+        if (!d_wfRays.isValid()) {
+            fprintf(stderr, "[error] CudaPathIntegrator: wavefront state "
+                            "alloc failed (%u entries, %.2f MiB)\n",
+                    needRays,
+                    double(needRays * sizeof(WfRayState)) / (1024.0 * 1024.0));
+            return false;
+        }
+    }
+
+    auto flushToFilm = [&]() {
+        std::vector<GpuAccumPixel> h_accum;
+        d_accum.download(h_accum);
+        TileBuffer tb(0, 0, filmWidth, filmHeight);
+        for (uint32_t py = 0; py < filmHeight; ++py) {
+            for (uint32_t px = 0; px < filmWidth; ++px) {
+                const GpuAccumPixel& p = h_accum[py * filmWidth + px];
+                float w = p.weight > 0.f ? p.weight : 1.f;
+                tb.add(px, py, p.r / w, p.g / w, p.b / w, w);
+                tb.addLumSq(px, py, p.sumLumSq);
+            }
+        }
+        film.mergeTile(tb);
+    };
+
+    uint32_t dispatches = 0;
+    for (uint32_t s = 0; s < sampleCount; s += kBatchSize) {
+        uint32_t thisBatch = std::min(kBatchSize, sampleCount - s);
+
+        LaunchParams params{};
+        fillLaunchParams(params, scene,
+            filmWidth, filmHeight,
+            0, 0, filmWidth, filmHeight,
+            sampleStart + s, thisBatch,
+            d_accum.ptr());
+        params.wfRays   = d_wfRays.ptr();
+        params.wfNumRays = filmWidth * filmHeight * thisBatch;
+
+        d_launchParams.upload(&params, 1);
+
+        // Primary: 3D (w, h, batch).
+        OPTIX_CHECK(optixLaunch(wfPipeline, stream,
+                                d_launchParams.devPtr(),
+                                sizeof(LaunchParams),
+                                &sbtWfPrimary,
+                                filmWidth, filmHeight, thisBatch));
+
+        // Bounce: loop in host.  Threads that hit max depth or terminate
+        // early early-out at the head of the kernel.
+        for (uint32_t b = 0; b <= params.cam.maxDepth; ++b) {
+            OPTIX_CHECK(optixLaunch(wfPipeline, stream,
+                                    d_launchParams.devPtr(),
+                                    sizeof(LaunchParams),
+                                    &sbtWfBounce,
+                                    params.wfNumRays, 1, 1));
+        }
+
+        // Finalize: gather L into the accum buffer.
+        OPTIX_CHECK(optixLaunch(wfPipeline, stream,
+                                d_launchParams.devPtr(),
+                                sizeof(LaunchParams),
+                                &sbtWfFinalize,
+                                params.wfNumRays, 1, 1));
+
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            fprintf(stderr, "[error] CudaPathIntegrator::renderFrameWavefront: %s\n",
+                    cudaGetErrorString(err));
+            return false;
+        }
+
+        if ((++dispatches) % kMergeInterval == 0) flushToFilm();
+    }
+    flushToFilm();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// renderTileWavefront — wavefront equivalent of renderTile.
+//
+// Called by the adaptive refinement pass for high-variance tiles.  Allocates
+// a tile-local accum + ray-state buffer (no shared persistent state), runs
+// primary -> bounce ×N -> finalize, then downloads accum into the host
+// TileBuffer.  Same dispatch pattern as renderFrameWavefront, just sized
+// for the tile instead of the full frame.
+// ---------------------------------------------------------------------------
+void CudaPathIntegrator::Impl::renderTileWavefront(
+    const SceneView& scene,
+    uint32_t filmWidth, uint32_t filmHeight,
+    uint32_t tileX0, uint32_t tileY0,
+    uint32_t tileW,  uint32_t tileH,
+    uint32_t sampleStart, uint32_t sampleCount,
+    TileBuffer& out)
+{
+    CUstream stream = static_cast<CUstream>(ctx->cuStream());
+
+    CudaBuffer<GpuAccumPixel> d_tileAccum(tileW * tileH);
+    if (!d_tileAccum.isValid()) {
+        fprintf(stderr, "[error] CudaPathIntegrator::renderTileWavefront: "
+                        "tile accum alloc failed (%u x %u)\n", tileW, tileH);
+        return;
+    }
+    d_tileAccum.zero();
+
+    const uint32_t needRays = tileW * tileH * sampleCount;
+    CudaBuffer<WfRayState> d_tileRays(needRays);
+    if (!d_tileRays.isValid()) {
+        fprintf(stderr, "[error] CudaPathIntegrator::renderTileWavefront: "
+                        "ray-state alloc failed (%u entries, %.2f MiB)\n",
+                needRays,
+                double(needRays * sizeof(WfRayState)) / (1024.0 * 1024.0));
+        return;
+    }
+
+    LaunchParams params{};
+    fillLaunchParams(params, scene,
+        filmWidth, filmHeight,
+        tileX0, tileY0, tileW, tileH,
+        sampleStart, sampleCount,
+        d_tileAccum.ptr());
+    params.wfRays    = d_tileRays.ptr();
+    params.wfNumRays = needRays;
+
+    d_launchParams.upload(&params, 1);
+
+    OPTIX_CHECK(optixLaunch(wfPipeline, stream,
+                            d_launchParams.devPtr(),
+                            sizeof(LaunchParams),
+                            &sbtWfPrimary,
+                            tileW, tileH, sampleCount));
+    for (uint32_t b = 0; b <= params.cam.maxDepth; ++b) {
+        OPTIX_CHECK(optixLaunch(wfPipeline, stream,
+                                d_launchParams.devPtr(),
+                                sizeof(LaunchParams),
+                                &sbtWfBounce,
+                                params.wfNumRays, 1, 1));
+    }
+    OPTIX_CHECK(optixLaunch(wfPipeline, stream,
+                            d_launchParams.devPtr(),
+                            sizeof(LaunchParams),
+                            &sbtWfFinalize,
+                            params.wfNumRays, 1, 1));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[error] CudaPathIntegrator::renderTileWavefront: %s\n",
+                cudaGetErrorString(err));
+        return;
+    }
+
+    std::vector<GpuAccumPixel> h_accum;
+    d_tileAccum.download(h_accum);
+    for (uint32_t ty = 0; ty < tileH; ++ty) {
+        for (uint32_t tx = 0; tx < tileW; ++tx) {
+            const GpuAccumPixel& p = h_accum[ty * tileW + tx];
+            float w = p.weight > 0.f ? p.weight : 1.f;
+            out.add(tx, ty, p.r / w, p.g / w, p.b / w, w);
+            out.addLumSq(tx, ty, p.sumLumSq);
+        }
+    }
+}
+
 #endif  // ANACAPA_ENABLE_OPTIX
 
 // ---------------------------------------------------------------------------
@@ -961,6 +1255,10 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.sortedPhotonIdx        = nullptr;   // unused post-compaction
     p.numPhotons             = numPhotons;
     p.frameIndex             = photonFrameIndex;
+    // Wavefront state — populated explicitly by renderFrameWavefront.  When
+    // the megakernel path is in use these stay null/zero and are ignored.
+    p.wfRays                 = nullptr;
+    p.wfNumRays              = 0;
     p.handle            = accel->traversableHandle();
 }
 
@@ -982,6 +1280,19 @@ bool CudaPathIntegrator::renderFrame(const SceneView& scene,
     if (!m_impl->buildOptixPipeline(
             static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()))) {
         return false;
+    }
+    // Route to wavefront experimental path when enabled.  Photon-trace
+    // still uses the megakernel pipeline (its raygen is small), but the
+    // shade-time photon-map query is already implemented in
+    // __raygen__wf_bounce, so photon mode benefits from wavefront too.
+    // Hair scenes currently fall back — the Marschner BSDF path hasn't
+    // been ported to wavefront yet.
+    const bool wfPath = m_impl->wavefrontMode
+                       && (m_impl->accel->hairMeshBaseID() == 0xFFFFFFFFu);
+    if (wfPath) {
+        return m_impl->renderFrameWavefront(scene,
+                                              filmWidth, filmHeight,
+                                              sampleStart, sampleCount, film);
     }
 #else
     fprintf(stderr, "[error] CudaPathIntegrator: built without ANACAPA_ENABLE_OPTIX\n");
@@ -1074,6 +1385,19 @@ void CudaPathIntegrator::renderTile(const SceneView& scene,
 #ifdef ANACAPA_ENABLE_OPTIX
     if (!m_impl->buildOptixPipeline(
             static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()))) {
+        return;
+    }
+    // Wavefront route — same gating as renderFrame.  Hair scenes still
+    // fall through to the megakernel tile dispatch below.
+    if (m_impl->wavefrontMode
+            && m_impl->accel->hairMeshBaseID() == 0xFFFFFFFFu) {
+        uint32_t tw = std::min(tile.width,  filmWidth  - tile.x0);
+        uint32_t th = std::min(tile.height, filmHeight - tile.y0);
+        m_impl->renderTileWavefront(scene,
+                                      filmWidth, filmHeight,
+                                      tile.x0, tile.y0, tw, th,
+                                      tile.sampleStart, tile.sampleCount,
+                                      out);
         return;
     }
 #else

@@ -211,4 +211,39 @@ struct GpuPhoton {
     uint32_t  _pad;
 };
 
+// ---------------------------------------------------------------------------
+// WfRayState — per-ray persistent state for the wavefront path tracer.
+//
+// The wavefront design moves the bounce loop out of the raygen kernel:
+//   - __raygen__wf_primary  generates the camera ray and writes initial state
+//   - __raygen__wf_bounce   runs ONE bounce iteration (trace + NEE + BSDF +
+//                           sample next dir) and updates state.  Host loops
+//                           this N=maxDepth times.
+//   - __raygen__wf_finalize adds L into the film pixel.
+//
+// Splitting the loop reduces per-kernel register pressure, which dominates
+// throughput on register-constrained GPUs (RTX A400 in particular).
+// ---------------------------------------------------------------------------
+struct WfRayState {
+    GpuFloat3 origin;
+    float     rayTime;       // shutter sample for this path
+    GpuFloat3 dir;
+    uint32_t  flags;         // bit 0: terminated, bit 1: prevWasDelta
+    GpuFloat3 throughput;
+    uint32_t  pixelIdx;      // flat index into the accum buffer
+    GpuFloat3 L;
+    uint32_t  rng;
+    GpuFloat3 prevN;         // for emitter-PDF MIS weight on the next vertex
+    float     prevBsdfPdf;
+    float     pixelWeight;   // pixel-filter sign weight (±1)
+    uint32_t  bounce;        // non-delta bounce depth (matches megakernel)
+    uint32_t  glassDepth;    // delta bounces taken; capped at 16
+    uint32_t  _pad;
+};
+
+enum : uint32_t {
+    kWfTerminated   = 1u << 0,
+    kWfPrevWasDelta = 1u << 1,
+};
+
 #endif // ANACAPA_CUDA_SHARED_TYPES_H

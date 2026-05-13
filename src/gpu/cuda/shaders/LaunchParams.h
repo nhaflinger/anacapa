@@ -68,6 +68,13 @@ struct LaunchParams {
     uint32_t                 numPhotons;
     uint32_t                 frameIndex;
 
+    // Wavefront ray state — used only by the wavefront raygens.
+    // wfRays is a flat array of size wfNumRays = tileW * tileH * batchSize.
+    // __raygen__wf_bounce skips entries with kWfTerminated set, so a single
+    // launch handles all surviving paths at the current depth.
+    WfRayState*              wfRays;
+    uint32_t                 wfNumRays;
+
     // OptiX traversable for the GAS (uint64 = OptixTraversableHandle).  Set
     // to CudaAccelStructure::traversableHandle().  Read in raygen / shadow
     // calls of optixTrace.
