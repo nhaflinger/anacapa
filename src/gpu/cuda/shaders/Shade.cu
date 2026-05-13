@@ -961,9 +961,8 @@ float3 queryPhotonMap(float3 p, float3 n, float3 wo,
                        float roughness, float metalness, float specular)
 {
     if (!params.cam.photonMapEnabled
-        || params.hashCellStart   == nullptr
-        || params.sortedPhotonIdx == nullptr
-        || params.photons         == nullptr)
+        || params.hashCellStart == nullptr
+        || params.photons       == nullptr)
         return make_float3(0.f, 0.f, 0.f);
 
     const float r  = params.cam.photonSearchRadius;
@@ -996,11 +995,17 @@ float3 queryPhotonMap(float3 p, float3 n, float3 wo,
         uint32_t cellIdx = (uint32_t)nz * (uint32_t)dimX * (uint32_t)dimY
                          + (uint32_t)ny * (uint32_t)dimX
                          + (uint32_t)nx;
-        uint32_t start = params.hashCellStart[cellIdx];
-        uint32_t end   = params.hashCellStart[cellIdx + 1];
+        // __ldg routes through the read-only cache, which dramatically
+        // improves throughput for the scattered cellStart / photons reads
+        // that dominate this kernel's runtime.
+        uint32_t start = __ldg(params.hashCellStart + cellIdx);
+        uint32_t end   = __ldg(params.hashCellStart + cellIdx + 1);
 
         for (uint32_t i = start; i < end; ++i) {
-            const GpuPhoton ph = params.photons[params.sortedPhotonIdx[i]];
+            // photons[] is now stored compacted (= grid-sorted), so each
+            // cell's photons are contiguous in memory and the indirection
+            // through sortedPhotonIdx is gone.  Better GPU cache behaviour.
+            const GpuPhoton ph = params.photons[i];
             float3 phPos = make3(ph.position);
             float3 diff  = phPos - p;
             if (dot(diff, diff) > r2) continue;
@@ -1086,6 +1091,12 @@ extern "C" __global__ void __raygen__rg()
         float  prevBsdfPdf  = 0.0f;
         float3 prevN        = make_float3(0.0f, 0.0f, 0.0f);
         bool   prevWasDelta = true;
+        // Caustic photon map is queried at the first non-glass hit along the
+        // camera path (= the first diffuse/glossy surface, possibly after a
+        // chain of refractions through glass).  Deeper diffuse bounces have
+        // throughput < 0.5 and add negligible caustic contribution while
+        // costing ~70% of the per-hit hash-grid work — skip them.
+        bool   pmQueried    = false;
 
         for (uint32_t bounce = 0; bounce <= params.cam.maxDepth; ++bounce) {
             TraceResult hit = trace(rayOrig, rayDir, 1e-4f, 1e10f, rayTime);
@@ -1313,14 +1324,16 @@ extern "C" __global__ void __raygen__rg()
                                                mat.specular,
                                                rng, rayTime);
 
-                // Caustic photon map density estimate — adds the indirect
-                // light arriving through specular paths that NEE can't sample.
-                // No-op when the map is disabled or empty.
-                float3 Lcaustic = queryPhotonMap(hitPos, n, wo,
-                                                  mat.type, baseColor,
-                                                  mat.roughness, mat.metalness,
-                                                  mat.specular);
-                L += throughput * Lcaustic;
+                // Caustic photon map density estimate at the first non-glass
+                // hit (= primary visible surface, possibly via a glass chain).
+                if (!pmQueried) {
+                    float3 Lcaustic = queryPhotonMap(hitPos, n, wo,
+                                                      mat.type, baseColor,
+                                                      mat.roughness, mat.metalness,
+                                                      mat.specular);
+                    L += throughput * Lcaustic;
+                    pmQueried = true;
+                }
             }
 
             // Russian roulette

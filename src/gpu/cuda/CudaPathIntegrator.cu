@@ -600,15 +600,18 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
 
     printf("[info]  CudaPathIntegrator: tracing %u photons on GPU...\n", numPhotons);
 
-    // ---- 1. Photon output buffer ------------------------------------------
-    d_photons = CudaBuffer<GpuPhoton>(numPhotons);
-    if (!d_photons.isValid()) {
+    // ---- 1. Photon-trace scratch buffer (full numPhotons slots).
+    // Local to this function — replaced by a compacted, cell-sorted device
+    // buffer at the end so the shade kernel doesn't drag 8 MB of mostly-
+    // invalid photons through L2 on every hash lookup.
+    CudaBuffer<GpuPhoton> traceBuf(numPhotons);
+    if (!traceBuf.isValid()) {
         fprintf(stderr, "[error] CudaPathIntegrator::buildPhotonMap: "
                         "photon alloc failed (%u entries)\n", numPhotons);
         photonMapEnabled = false;
         return;
     }
-    d_photons.zero();
+    traceBuf.zero();
 
     // ---- 2. Launch the photon raygen --------------------------------------
     CUstream stream = static_cast<CUstream>(ctx->cuStream());
@@ -629,7 +632,7 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
     params.triMeshIDs          = reinterpret_cast<const uint32_t*>(accel->triMeshIDBuffer());
     params.meshVertexOffsets   = reinterpret_cast<const uint32_t*>(accel->meshVertexOffsetBuffer());
     params.meshIndexOffsets    = reinterpret_cast<const uint32_t*>(accel->meshIndexOffsetBuffer());
-    params.photons             = d_photons.ptr();
+    params.photons             = traceBuf.ptr();   // raygen writes into this
     params.numPhotons          = numPhotons;
     params.frameIndex          = photonFrameIndex++;
     params.handle              = accel->traversableHandle();
@@ -644,7 +647,7 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
 
     // ---- 3. Download photons + compute AABB of valid hits ------------------
     std::vector<GpuPhoton> hostPhotons;
-    d_photons.download(hostPhotons);
+    traceBuf.download(hostPhotons);
 
     float minX =  1e30f, minY =  1e30f, minZ =  1e30f;
     float maxX = -1e30f, maxY = -1e30f, maxZ = -1e30f;
@@ -665,6 +668,7 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
            validCount, numPhotons);
 
     if (validCount == 0) {
+        d_photons         = CudaBuffer<GpuPhoton>{};
         d_hashCellStart   = CudaBuffer<uint32_t>{};
         d_sortedPhotonIdx = CudaBuffer<uint32_t>{};
         return;
@@ -706,15 +710,20 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
     for (const auto& pc : assignments) cellStart[pc.cellIdx + 1]++;
     for (uint32_t c = 0; c < numCells; ++c) cellStart[c + 1] += cellStart[c];
 
-    std::vector<uint32_t> sortedIdx(validCount);
+    // Compact photons in cell-sorted order so each cell's photons are
+    // contiguous.  The shade-kernel scan now reads photons[i] directly
+    // (no sortedPhotonIdx indirection) and stays inside one cache line
+    // for typical small cells.
+    std::vector<GpuPhoton> compacted(validCount);
     for (uint32_t i = 0; i < validCount; ++i)
-        sortedIdx[i] = assignments[i].photonIdx;
+        compacted[i] = hostPhotons[assignments[i].photonIdx];
 
-    // ---- 5. Upload to device -----------------------------------------------
+    // ---- 5. Upload compacted photons + cellStart; drop the trace buffer ---
+    d_photons = CudaBuffer<GpuPhoton>(validCount);
+    d_photons.upload(compacted);
     d_hashCellStart = CudaBuffer<uint32_t>(cellStart.size());
     d_hashCellStart.upload(cellStart);
-    d_sortedPhotonIdx = CudaBuffer<uint32_t>(sortedIdx.size());
-    d_sortedPhotonIdx.upload(sortedIdx);
+    d_sortedPhotonIdx = CudaBuffer<uint32_t>{};   // no longer needed
 
     printf("[info]  CudaPathIntegrator: photon hash grid %ux%ux%u (%u cells)\n",
            hashGridDimX, hashGridDimY, hashGridDimZ, numCells);
@@ -934,9 +943,11 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.hairMats          = d_hairMats.isValid() ? d_hairMats.ptr() : nullptr;
     // Caustic photon map — gated on having actual valid photons so a
     // configured-but-empty map (e.g. no glass in the scene) doesn't query.
+    // d_photons holds the cell-sorted compacted photons after buildPhotonMap;
+    // d_sortedPhotonIdx is intentionally dropped post-compaction so we don't
+    // require it in the gate.
     const bool pmActive = photonMapEnabled && validPhotons > 0
                            && d_hashCellStart.isValid()
-                           && d_sortedPhotonIdx.isValid()
                            && d_photons.isValid();
     p.cam.photonMapEnabled   = pmActive ? 1u : 0u;
     p.cam.photonSearchRadius = photonSearchRadius;
@@ -945,9 +956,9 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.cam.hashGridDimX       = hashGridDimX;
     p.cam.hashGridDimY       = hashGridDimY;
     p.cam.hashGridDimZ       = hashGridDimZ;
-    p.photons                = d_photons.isValid()         ? d_photons.ptr()         : nullptr;
-    p.hashCellStart          = d_hashCellStart.isValid()   ? d_hashCellStart.ptr()   : nullptr;
-    p.sortedPhotonIdx        = d_sortedPhotonIdx.isValid() ? d_sortedPhotonIdx.ptr() : nullptr;
+    p.photons                = d_photons.isValid()       ? d_photons.ptr()       : nullptr;
+    p.hashCellStart          = d_hashCellStart.isValid() ? d_hashCellStart.ptr() : nullptr;
+    p.sortedPhotonIdx        = nullptr;   // unused post-compaction
     p.numPhotons             = numPhotons;
     p.frameIndex             = photonFrameIndex;
     p.handle            = accel->traversableHandle();
