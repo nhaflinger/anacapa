@@ -205,8 +205,20 @@ def register():
     bpy.utils.register_class(AnacapaRenderSettings)
     bpy.types.Scene.anacapa = bpy.props.PointerProperty(type=AnacapaRenderSettings)
 
+    # Per-material: caustic-generator opt-in (drives inputs:anacapa_caustic on
+    # UsdPreviewSurface).  Only meaningful in --integrator photon mode.
+    bpy.types.Material.anacapa_caustic = bpy.props.BoolProperty(
+        name="Caustic Generator",
+        description="Flag this material as a caustic-generating surface. "
+                    "In --integrator photon, the photon map will deposit "
+                    "caustics through it and NEE will skip it. Other "
+                    "transparent materials are unaffected. Off by default.",
+        default=False,
+    )
+
 
 def unregister():
+    del bpy.types.Material.anacapa_caustic
     del bpy.types.Scene.anacapa
     bpy.utils.unregister_class(AnacapaRenderSettings)
     bpy.utils.unregister_class(AnacapaAddonPreferences)

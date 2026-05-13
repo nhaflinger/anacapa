@@ -214,6 +214,32 @@ class ANACAPA_PT_output(bpy.types.Panel):
 
 
 # ---------------------------------------------------------------------------
+# Material — per-material caustic-generator toggle
+# ---------------------------------------------------------------------------
+
+class ANACAPA_PT_material(bpy.types.Panel):
+    bl_label       = "Anacapa"
+    bl_space_type  = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context     = "material"
+    COMPAT_ENGINES = {'ANACAPA'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.engine == 'ANACAPA'
+                and context.material is not None)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        mat = context.material
+        layout.prop(mat, "anacapa_caustic")
+        if mat.anacapa_caustic:
+            layout.label(text="Active in --integrator photon mode only.",
+                         icon='INFO')
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -225,6 +251,7 @@ _classes = [
     ANACAPA_PT_lighting,
     ANACAPA_PT_camera,
     ANACAPA_PT_output,
+    ANACAPA_PT_material,
 ]
 
 

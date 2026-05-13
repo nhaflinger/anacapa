@@ -25,6 +25,23 @@ PhotonMapIntegrator::PhotonMapIntegrator(uint32_t maxDepth,
 // ---------------------------------------------------------------------------
 void PhotonMapIntegrator::prepare(const SceneView& scene) {
     m_lightSampler.build(scene.lights);
+
+    // The caustic photon map is only useful when at least one material is
+    // flagged as a caustic generator (inputs:anacapa_caustic = true).  If
+    // nothing in the scene is opted in, the photon pass will emit photons,
+    // skip every specular bounce as non-caustic, and store zero — wasting
+    // time and giving the user no visible benefit over --integrator path.
+    bool anyCaustic = false;
+    for (const IMaterial* mat : scene.materials) {
+        if (mat && mat->isCausticGenerator()) { anyCaustic = true; break; }
+    }
+    if (!anyCaustic) {
+        spdlog::warn("Photon map: no materials are flagged as caustic generators "
+                     "(inputs:anacapa_caustic). The photon pass will produce no "
+                     "caustic photons; consider --integrator path, or flag the "
+                     "focusing surfaces.");
+    }
+
     if (!scene.lights.empty())
         tracePhotons(scene);
 }

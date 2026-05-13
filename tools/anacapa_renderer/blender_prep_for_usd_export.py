@@ -4417,6 +4417,65 @@ def prepare_scene(bake_dir="."):
         remove_render_hidden()
 
 
+def _inject_caustic_flags(usd_path):
+    """
+    Walk the exported stage and write `bool inputs:anacapa_caustic = true` on
+    every UsdPreviewSurface shader whose Blender material has the
+    `anacapa_caustic` toggle set.  Materials without the toggle are left alone.
+
+    Looking up Blender state from inside Blender requires `bpy`; outside of
+    Blender (CLI testing) this is a no-op.
+    """
+    try:
+        import bpy
+    except ImportError:
+        return
+    try:
+        from pxr import Usd, UsdShade, Sdf
+    except ImportError:
+        return
+
+    flagged = {m.name for m in bpy.data.materials if getattr(m, "anacapa_caustic", False)}
+    if not flagged:
+        return
+
+    stage = Usd.Stage.Open(usd_path)
+    if not stage:
+        return
+
+    PREVIEW_ID = "UsdPreviewSurface"
+    touched = 0
+
+    for prim in stage.Traverse():
+        if not prim.IsA(UsdShade.Material):
+            continue
+        # Material prim names tend to match the Blender material name, but
+        # Blender may sanitise them (e.g. spaces → underscores).  Compare
+        # both the leaf name and the sanitised variant.
+        leaf = prim.GetName()
+        leaf_clean = leaf.replace("_", " ")
+        if leaf not in flagged and leaf_clean not in flagged:
+            continue
+
+        for desc in Usd.PrimRange(prim):
+            if not desc.IsA(UsdShade.Shader):
+                continue
+            id_attr = desc.GetAttribute("info:id")
+            if not (id_attr and id_attr.IsValid()):
+                continue
+            tok = id_attr.Get()
+            sid = tok.GetString() if hasattr(tok, "GetString") else str(tok)
+            if sid != PREVIEW_ID:
+                continue
+            shader = UsdShade.Shader(desc)
+            shader.CreateInput("anacapa_caustic", Sdf.ValueTypeNames.Bool).Set(True)
+            touched += 1
+
+    if touched:
+        stage.Save()
+        print(f"  [caustic] anacapa_caustic=true on {touched} UsdPreviewSurface shader(s)")
+
+
 def post_process_usd(usd_path, sky_texture=""):
     """
     Run USD post-processing steps after Blender's USD exporter has written
@@ -4433,6 +4492,7 @@ def post_process_usd(usd_path, sky_texture=""):
     out_dir = os.path.dirname(usd_path)
     _patch_dome_light_texture(usd_path, out_dir, explicit_sky=sky_texture)
     _inject_materialx_textures(usd_path)
+    _inject_caustic_flags(usd_path)
     mtlx_dir = os.path.join(out_dir, "materials")
     _export_materialx_graphs(mtlx_dir)
     _extract_materialx_sidecar(usd_path)

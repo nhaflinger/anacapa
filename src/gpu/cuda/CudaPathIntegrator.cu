@@ -976,6 +976,24 @@ void CudaPathIntegrator::Impl::renderTileWavefront(
 void CudaPathIntegrator::prepare(const SceneView& scene) {
     if (!isValid() || !scene.accel) return;
 
+    // Photon mode is wasted work without at least one caustic-flagged
+    // material — the photon pass would emit photons that all get skipped
+    // at storage time and contribute nothing to the shade-time density
+    // estimate.  Warn the user so they know to flag the focusing surface
+    // (or switch to --integrator path).
+    if (m_impl->photonMapEnabled) {
+        bool anyCaustic = false;
+        for (const IMaterial* mat : scene.materials) {
+            if (mat && mat->isCausticGenerator()) { anyCaustic = true; break; }
+        }
+        if (!anyCaustic) {
+            fprintf(stderr,
+                "[warn]  Photon map: no materials are flagged as caustic generators "
+                "(inputs:anacapa_caustic). The photon pass will produce no caustic "
+                "photons; consider --integrator path, or flag the focusing surfaces.\n");
+        }
+    }
+
     m_impl->accel = std::make_unique<CudaAccelStructure>(
         *m_impl->ctx, scene.accel->pool(), scene.curvePool,
         scene.hairTessSteps);

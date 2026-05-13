@@ -570,6 +570,21 @@ void MetalPathIntegrator::Impl::buildPhotonMap(
 void MetalPathIntegrator::prepare(const SceneView& scene) {
     if (!isValid() || !scene.accel) return;
 
+    // Photon mode without any caustic-flagged material is wasted work —
+    // mirror the CPU + CUDA warning.  See PhotonMapIntegrator.cpp.
+    if (m_impl->photonMapEnabled) {
+        bool anyCaustic = false;
+        for (const IMaterial* mat : scene.materials) {
+            if (mat && mat->isCausticGenerator()) { anyCaustic = true; break; }
+        }
+        if (!anyCaustic) {
+            spdlog::warn("Photon map: no materials are flagged as caustic generators "
+                         "(inputs:anacapa_caustic). The photon pass will produce no "
+                         "caustic photons; consider --integrator path, or flag the "
+                         "focusing surfaces.");
+        }
+    }
+
     id<MTLDevice>       dev = (__bridge id<MTLDevice>)      m_impl->ctx->device();
     id<MTLCommandQueue> cq  = (__bridge id<MTLCommandQueue>)m_impl->ctx->commandQueue();
 
