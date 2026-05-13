@@ -8,6 +8,7 @@ Named after Anacapa Island, part of California's Channel Islands.
 
 - **Unidirectional path tracing (Path)** with next event estimation
 - **Bidirectional path tracing (BDPT)** with multiple importance sampling and Veach MIS weights
+- **Caustic photon map** — two-pass photon mapping on top of path tracing; produces physically correct glass shadows, focused caustics, and the foundation for SSS; balanced kd-tree with median splitting, flat-kernel density estimation
 - **OpenUSD scene loading** — geometry, materials, lights, camera, and animated transforms from `.usda`/`.usdc` files
 - **Transformation motion blur** — multi-sample USD xformOps with piecewise-linear interpolation per ray; arbitrary number of time samples supported for curved blur streaks; shutter interval read automatically from the camera prim's `shutter:open`/`shutter:close`, falling back to stage `startTimeCode`/`endTimeCode`
 - **Hair and fur rendering** — RenderMan-style ray-ribbon intersection with recursive de Casteljau subdivision; Marschner 2003 BSDF (R/TT/TRT lobes, exact Fresnel, Beer's law absorption, PBRT v4 variance remapping)
@@ -132,6 +133,17 @@ DYLD_LIBRARY_PATH=~/usd/lib \
   --matassign shots/sh010/character_wet.matassign.json \
   -o images/render.exr
 
+# Render with caustic photon map (sharp glass caustics, correct glass shadows)
+./build/Darwin/anacapa --scene scenes/cornell_box.usda \
+  --integrator photon --num-photons 500000 --photon-radius 0.05 \
+  -s 128 -o images/caustic.exr
+
+# Caustic map — tune radius for sharpness vs noise tradeoff
+# Smaller radius = sharper caustic, more noise → increase --num-photons to compensate
+./build/Darwin/anacapa --scene scenes/cornell_box.usda \
+  --integrator photon --num-photons 2000000 --photon-radius 0.02 \
+  -s 128 -o images/caustic_sharp.exr
+
 # Isolate material issues (replace all lights with a single white directional)
 ./build/Darwin/anacapa --scene scenes/cornell_box.usda \
   -o images/render.exr --override-lights
@@ -167,7 +179,9 @@ DYLD_LIBRARY_PATH=~/usd/lib \
   --scene            scenes/character.usda   \
   --curves           hair_sim.abc            \
   --camera           /World/RenderCam        \
-  --integrator       bdpt                    \
+  --integrator       photon                  \
+  --num-photons      500000                  \
+  --photon-radius    0.05                    \
   --width            800                     \
   --height           800                     \
   --spp              256                     \
@@ -207,8 +221,10 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 | `-d, --depth` | `8` | Maximum number of light bounces (path depth). Lower values are faster but will miss indirect lighting and caustics through glass |
 | `-t, --threads` | `0` (auto) | Thread count; 0 = hardware concurrency |
 | `--tile-size` | `64` | Tile size in pixels |
-| `--integrator` | `path` | `bdpt` or `path` |
-| `--firefly-clamp` | `10` | BDPT: max luminance per strategy contribution; suppresses bright outliers. `0` = off |
+| `--integrator` | `path` | Rendering algorithm: `path`, `bdpt`, or `photon` (path + caustic photon map) |
+| `--num-photons` | `500000` | Photon map: total photons emitted from lights per frame. More photons = less noise in caustics at a given radius |
+| `--photon-radius` | `0.1` | Photon map: density estimate search radius in world units. Smaller = sharper but noisier caustics; scale down proportionally when increasing `--num-photons` |
+| `--firefly-clamp` | `10` | Max luminance per path contribution; suppresses bright outliers. `0` = off |
 | `--light-angle` | `0` | Angular radius for directional lights in degrees. Turns hard point sources into soft area lights with penumbras. `0` = hard shadows, `0.27` = sun, `2–5` = soft |
 | `--adaptive` | off | Enable adaptive sampling: base pass + extra samples concentrated on high-variance tiles |
 | `--adaptive-base-spp` | `0` | Adaptive base-pass SPP (`0` = auto: `spp/4`, minimum 16) |
@@ -255,14 +271,32 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 |---|---|---|
 | Diffuse indirect lighting (rooms, interiors) | `bdpt` | Light and camera subpaths connect efficiently; much lower variance than path |
 | Small / distant light sources | `bdpt` | Difficult for path tracer's random scatter to hit; BDPT connects directly |
-| Glass and specular caustics | `bdpt` | BDPT can connect a light subpath through glass to the camera; path tracer cannot |
+| Glass caustics, focused refractive light | `photon` | Photon map traces actual refraction paths; path and BDPT fake glass via transmissive shadows |
+| Glass shadows (dark region around caustic) | `photon` | Only the photon integrator casts correct opaque shadows from delta materials |
+| SSS (subsurface scattering) | `photon` | Subsurface photon map planned; path tracing SSS is possible but converges slowly |
 | Emissive surfaces (large area lights) | `path` | Large lights are easy for NEE to hit; BDPT connection overhead not worth it |
 | Outdoor / HDRI dome lighting | `path` | Sky covers a wide solid angle; random scatter hits it reliably |
 | Heavily occluded scenes (corners, crevices) | `bdpt` + `--adaptive` | BDPT handles indirect light better; adaptive concentrates samples where variance is highest |
 | Fast preview / interactive | `path` + `--interactive` | GPU backend only supports path tracing |
 | Unknown / general | `bdpt` | Default; handles more scenarios well at the cost of slightly higher per-sample overhead |
 
-Both integrators support `--adaptive` sampling. As a rule of thumb: if your scene has difficult light transport (small lights, glass, deep indirection), prefer `bdpt`. If your scene is large and open with broad lighting, `path` is faster per sample and converges equally well.
+All three integrators support `--adaptive` sampling. As a rule of thumb: if your scene has glass, caustics, or SSS, use `photon`. If it has difficult indirect lighting (small lights, deep occlusion), use `bdpt`. If it is large and open with broad lighting, `path` is fastest.
+
+### Photon map tuning
+
+The two parameters that control photon map quality trade off against each other:
+
+- **`--num-photons`** — total photons shot from lights. More = less noise in the caustic, longer photon tracing pass.
+- **`--photon-radius`** — density estimate search radius in world units. Smaller = sharper caustic, more noise. Larger = smoother caustic, more blur.
+
+Halving the radius makes the caustic 4× noisier (area drops by 4×), so it requires roughly 4× more photons to maintain the same noise level. A practical starting point:
+
+```
+--num-photons 500000 --photon-radius 0.05   # medium quality
+--num-photons 2000000 --photon-radius 0.025  # 2× sharper, ~4× more photons
+```
+
+The photon pass runs once in `prepare()` before any camera rays are traced. Render time = photon tracing + normal path tracing. For most scenes the photon tracing adds 10–30 % overhead at 500 k photons.
 
 ## Hair and Fur
 
@@ -376,7 +410,7 @@ The addon adds these panels to **Properties → Render** when the Anacapa engine
 
 | Panel | Controls |
 | --- | --- |
-| **Sampling** | Samples per pixel, integrator (`path` / `bdpt`), max depth, GPU compute, tile size, threads (with **Adaptive Sampling** sub-panel) |
+| **Sampling** | Samples per pixel, integrator (`path` / `bdpt` / `Path + Photon Map`), max depth, GPU compute, tile size, threads (with **Adaptive Sampling** sub-panel). When **Path + Photon Map** is selected, a sub-panel exposes **Caustic Map** and **Subsurface Map** toggles plus photon count and search radius |
 | **Film** | Pixel reconstruction filter (Box / Triangle / Gaussian / Mitchell-Netravali / Blackman-Harris / Catmull-Rom / Lanczos) and filter width |
 | **Lighting** | HDRI env map, env intensity, light angle, firefly clamp, override-lights/materials |
 | **Camera** | Depth of field (f-stop, focus distance), motion blur, USD camera prim path |
@@ -720,6 +754,12 @@ src/
   shading/lights/  AreaLight, DirectionalLight, DomeLight (HDRI)
   sampling/     PCGRng, HaltonSampler
   integrator/   PathIntegrator (reference), BDPTIntegrator
+                PhotonMapIntegrator — path tracing + caustic photon map;
+                  tracePhotons() shoots N rays from lights through specular
+                  surfaces and stores at first diffuse hit
+                PhotonMap — balanced heap-indexed kd-tree (median split,
+                  axis=0xFF empty sentinel); estimateRadiance() does flat-
+                  kernel density estimate Σ f·Φ / πr²
                 LightSampler (Vose alias table), MISWeight
   film/         Film — atomic accumulation, OIDN denoising, multi-layer EXR
   render/       ThreadPool, RenderSession — shutter wiring from scene or CLI
@@ -748,6 +788,8 @@ All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable
 | 7 | Working | Metal backend (Apple Silicon), pure-CUDA backend (NVIDIA/Linux/WSL2) |
 | 8 | Working | MaterialX/OSL shading — OpenPBR terminal resolution, UsdPreviewSurface texture fallback, JSON sidecar extraction |
 | 9 | Working | Hair and fur — Marschner BSDF, ray-ribbon intersection, Alembic loader, Blender addon integration, matassign pipeline |
+| 10 | Working | Caustic photon map — two-pass photon tracing through specular surfaces, balanced kd-tree, flat-kernel density estimation; correct glass shadows via opaque delta-material shadow rays |
+| 11 | Planned | Subsurface scattering — subsurface photon map pass; per-strand color bleeding |
 
 ## License
 
