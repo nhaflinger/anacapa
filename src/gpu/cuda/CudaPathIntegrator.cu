@@ -1144,6 +1144,12 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.cam.horizontal = {cam.horizontal.x,       cam.horizontal.y,      cam.horizontal.z};
     p.cam.vertical   = {cam.vertical.x,         cam.vertical.y,        cam.vertical.z};
     p.cam.lowerLeft  = {cam.lowerLeftCorner.x,  cam.lowerLeftCorner.y, cam.lowerLeftCorner.z};
+    // Camera motion blur — close-state vectors (= open-state when hasMotion=0).
+    p.cam.hasMotion       = cam.hasMotion ? 1u : 0u;
+    p.cam.originClose     = {cam.originClose.x,     cam.originClose.y,     cam.originClose.z};
+    p.cam.lowerLeftClose  = {cam.lowerLeftClose.x,  cam.lowerLeftClose.y,  cam.lowerLeftClose.z};
+    p.cam.horizontalClose = {cam.horizontalClose.x, cam.horizontalClose.y, cam.horizontalClose.z};
+    p.cam.verticalClose   = {cam.verticalClose.x,   cam.verticalClose.y,   cam.verticalClose.z};
     p.cam.imageWidth  = filmWidth;
     p.cam.imageHeight = filmHeight;
     p.cam.samplesPerPixel = sampleCount;
@@ -1157,11 +1163,12 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.cam.envRot0 = {envRot[0].x, envRot[0].y, envRot[0].z};
     p.cam.envRot1 = {envRot[1].x, envRot[1].y, envRot[1].z};
     p.cam.envRot2 = {envRot[2].x, envRot[2].y, envRot[2].z};
-    // Shutter range — accel was already built motion-aware iff any mesh has
-    // motion keys, so we always pass [0, 1] when motion is enabled.  When the
-    // GAS is static both values are 0 and rays sample a fixed time slice.
-    p.cam.shutterOpen  = accel->hasMotion() ? 0.0f : 0.0f;
-    p.cam.shutterClose = accel->hasMotion() ? 1.0f : 0.0f;
+    // Shutter range — pass through whatever the loader put on the Camera so
+    // camera motion blur (animated camera, static geometry) still gets a
+    // valid shutter window.  Geometry motion blur additionally requires the
+    // GAS to be built motion-aware, which happens upstream in the accel.
+    p.cam.shutterOpen  = cam.shutterOpen;
+    p.cam.shutterClose = cam.shutterClose;
     if (scene.envLight) {
         static const Vec3f kDirs[] = {{0,1,0},{0.577f,0.577f,0.577f},{-0.577f,0.577f,0.577f},
                                       {0.577f,0.577f,-0.577f},{-0.577f,0.577f,-0.577f}};

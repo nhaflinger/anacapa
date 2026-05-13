@@ -171,6 +171,19 @@ struct GpuCameraParams {
     // against optixGetInstanceId() to route hits into the Marschner shader.
     uint32_t  hairMeshBaseID;
 
+    // Camera motion blur — close-state image plane (= open-state when hasMotion=0).
+    // The primary raygen lerps between open and close at rayTime before shooting.
+    // Aperture disk offset for DoF is applied after the lerp so both compose.
+    GpuFloat3 originClose;
+    float     _padOC;
+    GpuFloat3 lowerLeftClose;
+    float     _padLC;
+    GpuFloat3 horizontalClose;
+    float     _padHC;
+    GpuFloat3 verticalClose;
+    float     _padVC;
+    uint32_t  hasMotion;      // 0 = static camera, 1 = lerp at rayTime
+
     // Caustic photon map hash grid (enabled when photonMapEnabled != 0).
     // hashCellStart[numCells+1] and sortedPhotonIdx[validPhotons] live in
     // LaunchParams; the photon array does too.  The grid is a uniform

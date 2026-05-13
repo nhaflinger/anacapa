@@ -1245,10 +1245,19 @@ extern "C" __global__ void __raygen__wf_primary()
     float v  = (float(params.cam.imageHeight - 1 - py) + jy)
              / float(params.cam.imageHeight);
 
-    const float3 origin = make3(params.cam.origin);
-    const float3 horiz  = make3(params.cam.horizontal);
-    const float3 vert   = make3(params.cam.vertical);
-    const float3 ll     = make3(params.cam.lowerLeft);
+    // Camera motion blur: lerp open/close image-plane vectors at rayTime.
+    // When hasMotion=0 the close-state mirrors open-state, so lerpT is a no-op.
+    float lerpT = 0.f;
+    if (params.cam.hasMotion
+            && params.cam.shutterClose > params.cam.shutterOpen + 1e-6f) {
+        lerpT = (rayTime - params.cam.shutterOpen)
+              / (params.cam.shutterClose - params.cam.shutterOpen);
+        lerpT = fminf(1.f, fmaxf(0.f, lerpT));
+    }
+    const float3 origin = lerp3(make3(params.cam.origin),     make3(params.cam.originClose),     lerpT);
+    const float3 horiz  = lerp3(make3(params.cam.horizontal), make3(params.cam.horizontalClose), lerpT);
+    const float3 vert   = lerp3(make3(params.cam.vertical),   make3(params.cam.verticalClose),   lerpT);
+    const float3 ll     = lerp3(make3(params.cam.lowerLeft),  make3(params.cam.lowerLeftClose),  lerpT);
     const float3 rayDir = normalize(ll + u * horiz + v * vert - origin);
 
     WfRayState st{};
