@@ -537,6 +537,11 @@ static float3 sampleEnvDirection(float2 u,
 // light, accumulating tint. Returns (0,0,0) if an opaque surface blocks the
 // path, or a tint <= (1,1,1) attenuated by any glass surfaces in between.
 // ---------------------------------------------------------------------------
+// blockGlass: when true (photon map enabled), glass is opaque to shadow rays.
+// The photon map is the sole source of transmitted light; letting NEE count
+// it too causes double-counting and kills the caustic shadow contrast.
+// When false (no photon map), glass attenuates rather than blocks so the
+// basic path tracer still shows some light through glass.
 static float3 shadowTransmittance(
     float3                          origin,
     float3                          dir,
@@ -547,6 +552,7 @@ static float3 shadowTransmittance(
     const device PackedFloat3*      normals,
     const device uint32_t*          indices,
     const device uint32_t*          meshIndexOffsets,
+    bool                            blockGlass,
     acceleration_structure<instancing, primitive_motion> accelStruct)
 {
     float3 T = float3(1.0f);
@@ -570,9 +576,12 @@ static float3 shadowTransmittance(
         GpuMaterial mat = materials[matIdx];
 
         if (mat.type == kMatGlass) {
-            // Attenuate by transmission weight, not baseColor.
-            // baseColor is the diffuse reflectance — black for pure glass — which
-            // would zero out all shadow rays and make objects inside appear black.
+            // When the photon map is active, glass is a delta surface — opaque
+            // to shadow rays, just like the CPU shadowTransmittance fix.
+            if (blockGlass) return float3(0);
+
+            // Without a photon map, attenuate by transmission so glass still
+            // passes some light through (approximate but better than hard black).
             T *= mat.transmission;
             if (max(T.x, max(T.y, T.z)) < 1e-4f) return float3(0);
 
@@ -668,7 +677,9 @@ static float3 sampleDirectHair(
     float3 shadowO = hitPos + ribbonN * 1e-4f;
     float3 Tr = shadowTransmittance(shadowO, wi, tMax, rayTime,
                                     materials, numMaterials,
-                                    normals, indices, meshIndexOffsets, accelStruct);
+                                    normals, indices, meshIndexOffsets,
+                                    cam.photonMapEnabled != 0,
+                                    accelStruct);
     if (max(Tr.x, max(Tr.y, Tr.z)) <= 0.f) return float3(0);
 
     // Hair BSDF evaluation
@@ -801,6 +812,7 @@ static float3 sampleDirect(
     float3 Tr = shadowTransmittance(shadowOrigin, wi, tMax, rayTime,
                                     materials, numMaterials,
                                     normals, indices, meshIndexOffsets,
+                                    cam.photonMapEnabled != 0,
                                     accelStruct);
     if (max(Tr.x, max(Tr.y, Tr.z)) <= 0.0f) return float3(0);
 
@@ -860,6 +872,82 @@ static void samplePixelFilter(float u1, float u2,
 }
 
 // ---------------------------------------------------------------------------
+// Caustic photon map — flat-kernel density estimate using the CPU-built
+// hash grid uploaded at buffers 21/22/23.
+// ---------------------------------------------------------------------------
+static float3 queryHashGrid(
+    float3                         p,
+    float3                         n,
+    float3                         wo,
+    uint                           matType,
+    float3                         baseColor,
+    float                          roughness,
+    float                          metalness,
+    float                          specular,
+    constant GpuCameraParams&      cam,
+    const device uint32_t*         cellStart,
+    const device uint32_t*         sortedPhotonIdx,
+    const device GpuPhoton*        photons,
+    const device float*            specAlbedoLUT,
+    const device float*            specAvgAlbedoLUT)
+{
+    float r  = cam.photonSearchRadius;
+    float r2 = r * r;
+    float cs = cam.hashCellSize;
+
+    float3 orig = float3(cam.hashGridOrigin.x, cam.hashGridOrigin.y, cam.hashGridOrigin.z);
+    float3 rel  = p - orig;
+
+    int cx = int(floor(rel.x / cs));
+    int cy = int(floor(rel.y / cs));
+    int cz = int(floor(rel.z / cs));
+
+    uint dimX = cam.hashGridDimX;
+    uint dimY = cam.hashGridDimY;
+    uint dimZ = cam.hashGridDimZ;
+
+    float3 Laccum = float3(0);
+
+    for (int dz = -1; dz <= 1; ++dz)
+    for (int dy = -1; dy <= 1; ++dy)
+    for (int dx = -1; dx <= 1; ++dx) {
+        int nx = cx + dx, ny = cy + dy, nz = cz + dz;
+        if (nx < 0 || ny < 0 || nz < 0) continue;
+        if (uint(nx) >= dimX || uint(ny) >= dimY || uint(nz) >= dimZ) continue;
+
+        uint cellIdx = uint(nz) * dimX * dimY + uint(ny) * dimX + uint(nx);
+        uint start   = cellStart[cellIdx];
+        uint end     = cellStart[cellIdx + 1];
+
+        for (uint i = start; i < end; ++i) {
+            GpuPhoton ph = photons[sortedPhotonIdx[i]];
+
+            float3 phPos = float3(ph.position.x, ph.position.y, ph.position.z);
+            float3 diff  = phPos - p;
+            if (dot(diff, diff) > r2) continue;
+
+            // wi toward surface — negate to get the light direction at this point
+            float3 wi = -float3(ph.wi.x, ph.wi.y, ph.wi.z);
+            float cosI = dot(n, wi);
+            if (cosI <= 0.f) continue;
+
+            float3 f = float3(0);
+            if (matType == kMatLambertian) {
+                f = baseColor * (1.f / M_PI_F);
+            } else if (matType == kMatGGX) {
+                f = evalLayeredBSDF(wo, wi, n, baseColor, roughness, metalness, specular,
+                                    cam, specAlbedoLUT, specAvgAlbedoLUT);
+            }
+
+            float3 power = float3(ph.power.x, ph.power.y, ph.power.z);
+            Laccum += f * power;
+        }
+    }
+
+    return Laccum * (1.f / (M_PI_F * r2));
+}
+
+// ---------------------------------------------------------------------------
 // Main kernel
 // ---------------------------------------------------------------------------
 kernel void shade(
@@ -884,6 +972,9 @@ kernel void shade(
     const device float*                     pixelFilterSigns  [[ buffer(18) ]],
     const device GpuHairTri*               hairTris          [[ buffer(19) ]],
     const device GpuHairMaterial*          hairMats          [[ buffer(20) ]],
+    const device uint32_t*                 hashCellStart     [[ buffer(21) ]],
+    const device uint32_t*                 sortedPhotonIdx   [[ buffer(22) ]],
+    const device GpuPhoton*                photons           [[ buffer(23) ]],
     texture2d<float, access::sample>        envTexture        [[ texture(0) ]],
     uint2                                   gid               [[ thread_position_in_grid ]])
 {
@@ -1177,6 +1268,17 @@ kernel void shade(
                                            rng, accelStruct, cam, envTexture,
                                            envMarginalCdf, envConditionalCdf,
                                            specAlbedoLUT, specAvgAlbedoLUT);
+
+            // Caustic photon map density estimate — only queried when the map
+            // has been built (photonMapEnabled != 0) and buffers are non-null.
+            if (cam.photonMapEnabled && hashCellStart != nullptr && photons != nullptr) {
+                float3 Lcaustic = queryHashGrid(hitPos, n, wo,
+                                               mat.type, baseColor,
+                                               mat.roughness, mat.metalness, mat.specular,
+                                               cam, hashCellStart, sortedPhotonIdx, photons,
+                                               specAlbedoLUT, specAvgAlbedoLUT);
+                L += throughput * Lcaustic;
+            }
         }
 
         // Russian roulette after bounce 3
@@ -1328,4 +1430,140 @@ kernel void shade(
     px_out.b        += batchL.z;
     px_out.weight   += batchWeight;
     px_out.sumLumSq += batchLumSq;
+}
+
+// ---------------------------------------------------------------------------
+// photonTrace kernel — one thread per photon slot.
+//
+// Each thread selects a light, samples a position and direction, then traces
+// the photon through the scene.  The photon is stored when it first hits a
+// diffuse surface after ≥1 specular (glass) bounce — i.e. only caustic
+// photons are stored.  Slots with no valid hit have power == (0,0,0).
+// ---------------------------------------------------------------------------
+kernel void photonTrace(
+    const device GpuLight*      lights           [[ buffer(0) ]],
+    constant uint&              numLights        [[ buffer(1) ]],
+    const device GpuMaterial*   materials        [[ buffer(2) ]],
+    constant uint&              numMaterials     [[ buffer(3) ]],
+    const device PackedFloat3*  normals          [[ buffer(4) ]],
+    const device uint32_t*      indices          [[ buffer(5) ]],
+    const device uint32_t*      meshIndexOffsets [[ buffer(6) ]],
+    device GpuPhoton*           photons          [[ buffer(7) ]],
+    constant GpuPhotonParams&   params           [[ buffer(8) ]],
+    acceleration_structure<instancing, primitive_motion> accelStruct [[ buffer(9) ]],
+    uint gid [[ thread_position_in_grid ]])
+{
+    if (gid >= params.numPhotons) return;
+
+    // Default: invalid slot
+    photons[gid].power = {0.f, 0.f, 0.f};
+
+    if (numLights == 0) return;
+
+    uint rng = pcg(pcg(gid) ^ (params.frameIndex * 2654435761u + 1234567u));
+
+    // Select light uniformly
+    uint lightIdx = uint(rand01(rng) * float(numLights)) % numLights;
+    const device GpuLight& light = lights[lightIdx];
+    float lightSelectPdf = 1.f / float(numLights);
+
+    float3 pos    = float3(0);
+    float3 dir    = float3(0);
+    float3 Le     = float3(0);
+    float3 lightN = float3(0);
+    float  pdfPos = 0.f;
+    float  pdfDir = 0.f;
+
+    if (light.type == kLightRect) {
+        float3 uH = float3(light.uHalf.x, light.uHalf.y, light.uHalf.z);
+        float3 vH = float3(light.vHalf.x, light.vHalf.y, light.vHalf.z);
+        float2 u  = rand2(rng);
+        pos = float3(light.position.x, light.position.y, light.position.z)
+            + uH * (2.f*u.x - 1.f) + vH * (2.f*u.y - 1.f);
+        pdfPos = 1.f / max(1e-7f, light.area);
+        lightN = float3(light.normal.x, light.normal.y, light.normal.z);
+        dir    = cosineSampleHemisphere(rand2(rng), lightN);
+        float cosTheta = max(0.f, dot(dir, lightN));
+        pdfDir = max(1e-7f, cosTheta / M_PI_F);
+        Le     = float3(light.Le.x, light.Le.y, light.Le.z);
+    } else if (light.type == kLightDirectional) {
+        // Directional lights emit from an infinite plane — not useful for
+        // caustics (focus to a point).  Skip.
+        return;
+    } else {
+        return;
+    }
+
+    if (pdfPos <= 0.f || pdfDir <= 0.f) return;
+
+    // Initial photon power — matches CPU PhotonMapIntegrator formula
+    float cosTheta = max(0.f, dot(dir, lightN));
+    float3 power = Le * cosTheta
+                 / (lightSelectPdf * pdfPos * pdfDir * float(params.numPhotons));
+
+    ray r;
+    r.origin       = pos + lightN * 1e-3f;
+    r.direction    = dir;
+    r.min_distance = 1e-4f;
+    r.max_distance = 1e10f;
+
+    intersector<triangle_data, instancing, primitive_motion> isect;
+    isect.accept_any_intersection(false);
+
+    int numSpecular = 0;
+
+    for (int bounce = 0; bounce < 8; ++bounce) {
+        intersection_result<triangle_data, instancing, primitive_motion> res =
+            isect.intersect(r, accelStruct, 0xFF, 0.5f);  // mid-frame time
+
+        if (res.type == intersection_type::none) break;
+
+        uint  meshID  = res.instance_id;
+        uint  matIdx  = (meshID < numMaterials) ? meshID : 0;
+        GpuMaterial mat = materials[matIdx];
+
+        float2 bary   = res.triangle_barycentric_coord;
+        uint   idxOff = meshIndexOffsets[meshID];
+        float3 n      = interpolateNormal(res.primitive_id, bary, normals, indices, idxOff);
+        float3 hitPos = r.origin + r.direction * res.distance;
+
+        if (mat.type == kMatEmissive) break;  // hit emitter — stop
+
+        if (mat.type == kMatGlass) {
+            // Specular refraction/reflection bounce
+            bool   entering = dot(r.direction, n) < 0.f;
+            float3 faceN    = entering ? n : -n;
+            float  eta      = entering ? (1.f / mat.specularIOR) : mat.specularIOR;
+            float  cosI     = dot(-r.direction, faceN);
+            float  Fr       = fresnelDielectric(cosI, 1.f / eta);
+
+            if (rand01(rng) < Fr) {
+                r.direction = reflect(r.direction, faceN);
+                r.origin    = hitPos + faceN * 1e-4f;
+            } else {
+                float3 refr = refract(r.direction, faceN, eta);
+                if (length_squared(refr) < 0.5f) {
+                    r.direction = reflect(r.direction, faceN);
+                    r.origin    = hitPos + faceN * 1e-4f;
+                } else {
+                    r.direction = normalize(refr);
+                    r.origin    = hitPos - faceN * 1e-4f;
+                }
+            }
+            r.min_distance = 1e-4f;
+            r.max_distance = 1e10f;
+            ++numSpecular;
+            // Delta surface — throughput unchanged
+
+        } else {
+            // Diffuse / GGX hit
+            if (numSpecular > 0) {
+                // Valid caustic photon — store and stop
+                photons[gid].position = {hitPos.x, hitPos.y, hitPos.z};
+                photons[gid].wi       = {r.direction.x, r.direction.y, r.direction.z};
+                photons[gid].power    = {power.x, power.y, power.z};
+            }
+            break;
+        }
+    }
 }

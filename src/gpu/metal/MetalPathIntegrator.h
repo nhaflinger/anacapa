@@ -60,6 +60,11 @@ public:
     // samples from the previous render do not bleed into the new one.
     void clearAccum();
 
+    // Enable GPU caustic photon map.  Must be called before prepare().
+    // numPhotons: total photon slots traced per render.
+    // searchRadius: density estimate radius in world units.
+    void setPhotonMap(int numPhotons, float searchRadius);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;

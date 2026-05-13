@@ -179,7 +179,17 @@ struct GpuCameraParams {
     // Hair: TLAS instance ID where the tessellated hair mesh starts.
     // 0xFFFFFFFF when the scene contains no hair.
     uint32_t  hairMeshBaseID;
-    uint32_t  _camPad[3];
+
+    // Caustic photon map hash grid (enabled when photonMapEnabled != 0).
+    // cellStart[numCells+1] and sortedPhotonIdx[numPhotons] are bound at
+    // buffers 21 and 22; the photon array is at buffer 23.
+    uint32_t  photonMapEnabled;    // 0 = off
+    float     photonSearchRadius;  // density estimate search radius
+    GpuFloat3 hashGridOrigin;      // world-space grid min corner
+    float     hashCellSize;        // cell edge length (= searchRadius)
+    uint32_t  hashGridDimX;
+    uint32_t  hashGridDimY;
+    uint32_t  hashGridDimZ;
 };
 
 // ---------------------------------------------------------------------------
@@ -199,6 +209,27 @@ struct GpuAccumPixel {
 struct GpuSampleBatch {
     uint32_t sampleStart;
     uint32_t batchSize;
+};
+
+// ---------------------------------------------------------------------------
+// GpuPhoton — one caustic photon written by the photonTrace kernel.
+// power == (0,0,0) means no valid caustic hit (no specular bounce before
+// first diffuse); these slots are skipped when building the hash grid.
+// ---------------------------------------------------------------------------
+struct GpuPhoton {
+    GpuFloat3 position;   // world-space hit position
+    GpuFloat3 wi;         // photon travel direction (toward surface)
+    GpuFloat3 power;      // radiant flux RGB (0,0,0 = invalid)
+    uint32_t  _pad;
+};
+
+// ---------------------------------------------------------------------------
+// GpuPhotonParams — uniform data for the photonTrace kernel.
+// ---------------------------------------------------------------------------
+struct GpuPhotonParams {
+    uint32_t numPhotons;   // total threads dispatched = total photon slots
+    uint32_t frameIndex;   // seed variation per frame
+    uint32_t _pad[2];
 };
 
 #endif // ANACAPA_SHARED_TYPES_H

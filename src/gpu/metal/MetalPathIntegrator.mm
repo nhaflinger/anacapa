@@ -91,6 +91,29 @@ struct MetalPathIntegrator::Impl {
     const GeometryPool* geomPool = nullptr;
     bool preparedOnce = false;
 
+    // Caustic photon map — GPU trace + CPU hash grid build + GPU query
+    id<MTLComputePipelineState> psoPhotonTrace = nil;
+    id<MTLBuffer>  photonBuf          = nil;  // GpuPhoton[numPhotons] — trace output
+    id<MTLBuffer>  hashCellStartBuf   = nil;  // uint32_t[numCells+1]
+    id<MTLBuffer>  sortedPhotonIdxBuf = nil;  // uint32_t[validPhotons]
+    uint32_t  numPhotons          = 0;
+    float     photonSearchRadius  = 0.1f;
+    bool      photonMapEnabled    = false;
+    GpuFloat3 hashGridOrigin      = {0.f, 0.f, 0.f};
+    float     hashCellSize        = 0.1f;
+    uint32_t  hashGridDimX        = 0;
+    uint32_t  hashGridDimY        = 0;
+    uint32_t  hashGridDimZ        = 0;
+    uint32_t  validPhotons        = 0;   // photons actually stored after trace
+    uint32_t  frameIndex          = 0;
+
+    void buildPhotonMap(id<MTLDevice> dev, id<MTLCommandQueue> cq,
+                        id<MTLAccelerationStructure> tlas,
+                        id<MTLBuffer> lightBufMTL, uint32_t nLights,
+                        id<MTLBuffer> matBufMTL,   uint32_t nMats,
+                        id<MTLBuffer> normalBuf, id<MTLBuffer> indexBuf,
+                        id<MTLBuffer> meshIdxOffBuf);
+
     // Ensure the persistent accum buffer is allocated and sized for (w x h).
     // Zeros the buffer if it had to be (re)allocated.
     void ensureAccum(id<MTLDevice> dev, uint32_t w, uint32_t h) {
@@ -350,7 +373,8 @@ MetalPathIntegrator::MetalPathIntegrator(const std::string& metallibPath)
     id<MTLDevice>  dev = (__bridge id<MTLDevice>) m_impl->ctx->device();
     id<MTLLibrary> lib = (__bridge id<MTLLibrary>)m_impl->ctx->library();
 
-    m_impl->psoShade = makePSO(dev, lib, "shade");
+    m_impl->psoShade      = makePSO(dev, lib, "shade");
+    m_impl->psoPhotonTrace = makePSO(dev, lib, "photonTrace");
 
     if (m_impl->psoShade)
         spdlog::info("MetalPathIntegrator: ready on '{}'", m_impl->ctx->name());
@@ -390,6 +414,152 @@ void MetalPathIntegrator::setPixelFilter(const PixelFilter* f) {
                                                  options:MTLResourceStorageModeShared];
     m_impl->pixelFilterBins   = static_cast<uint32_t>(signs.size());
     m_impl->pixelFilterRadius = f->radius();
+}
+
+void MetalPathIntegrator::setPhotonMap(int numPhotons, float searchRadius) {
+    m_impl->photonMapEnabled   = (numPhotons > 0);
+    m_impl->numPhotons         = static_cast<uint32_t>(std::max(0, numPhotons));
+    m_impl->photonSearchRadius = searchRadius;
+}
+
+// ---------------------------------------------------------------------------
+// buildPhotonMap — GPU trace → CPU hash grid build → GPU upload
+// ---------------------------------------------------------------------------
+void MetalPathIntegrator::Impl::buildPhotonMap(
+    id<MTLDevice>               dev,
+    id<MTLCommandQueue>         cq,
+    id<MTLAccelerationStructure> tlas,
+    id<MTLBuffer>               lightBufMTL, uint32_t nLights,
+    id<MTLBuffer>               matBufMTL,   uint32_t nMats,
+    id<MTLBuffer>               normalBuf,
+    id<MTLBuffer>               indexBuf,
+    id<MTLBuffer>               meshIdxOffBuf)
+{
+    if (!psoPhotonTrace || numPhotons == 0) return;
+
+    spdlog::info("MetalPathIntegrator: tracing {} photons on GPU...", numPhotons);
+
+    // --- 1. Allocate photon output buffer ---
+    size_t photonBytes = static_cast<size_t>(numPhotons) * sizeof(GpuPhoton);
+    photonBuf = [dev newBufferWithLength:photonBytes options:MTLResourceStorageModeShared];
+    memset([photonBuf contents], 0, photonBytes);
+
+    // --- 2. Upload params ---
+    GpuPhotonParams params{};
+    params.numPhotons  = numPhotons;
+    params.frameIndex  = frameIndex++;
+    id<MTLBuffer> paramsBuf = [dev newBufferWithBytes:&params
+                                               length:sizeof(params)
+                                              options:MTLResourceStorageModeShared];
+
+    uint32_t nLightsVal = nLights;
+    uint32_t nMatsVal   = nMats;
+    id<MTLBuffer> nLightsBuf = [dev newBufferWithBytes:&nLightsVal length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> nMatsBuf   = [dev newBufferWithBytes:&nMatsVal   length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
+
+    // --- 3. Dispatch photonTrace kernel ---
+    id<MTLCommandBuffer>         cmdBuf = [cq commandBuffer];
+    id<MTLComputeCommandEncoder> enc    = [cmdBuf computeCommandEncoder];
+    [enc setComputePipelineState:psoPhotonTrace];
+    [enc setBuffer:lightBufMTL   offset:0 atIndex:0];
+    [enc setBuffer:nLightsBuf    offset:0 atIndex:1];
+    [enc setBuffer:matBufMTL     offset:0 atIndex:2];
+    [enc setBuffer:nMatsBuf      offset:0 atIndex:3];
+    [enc setBuffer:normalBuf     offset:0 atIndex:4];
+    [enc setBuffer:indexBuf      offset:0 atIndex:5];
+    [enc setBuffer:meshIdxOffBuf offset:0 atIndex:6];
+    [enc setBuffer:photonBuf     offset:0 atIndex:7];
+    [enc setBuffer:paramsBuf     offset:0 atIndex:8];
+    [enc setAccelerationStructure:tlas atBufferIndex:9];
+    [enc useResource:tlas usage:MTLResourceUsageRead];
+    for (void* blasVoid : accel->blasHandles())
+        [enc useResource:(__bridge id<MTLAccelerationStructure>)blasVoid usage:MTLResourceUsageRead];
+
+    uint32_t threadCount = numPhotons;
+    MTLSize tpg = MTLSizeMake(64, 1, 1);
+    MTLSize tpGrid = MTLSizeMake((threadCount + 63u) / 64u, 1, 1);
+    [enc dispatchThreadgroups:tpGrid threadsPerThreadgroup:tpg];
+    [enc endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+
+    // --- 4. Download photons and build CPU hash grid ---
+    const GpuPhoton* gpuPhotons = (const GpuPhoton*)[photonBuf contents];
+
+    // Compute AABB of valid photons
+    float minX =  1e30f, minY =  1e30f, minZ =  1e30f;
+    float maxX = -1e30f, maxY = -1e30f, maxZ = -1e30f;
+    uint32_t validCount = 0;
+    for (uint32_t i = 0; i < numPhotons; ++i) {
+        const GpuPhoton& ph = gpuPhotons[i];
+        if (ph.power.x == 0.f && ph.power.y == 0.f && ph.power.z == 0.f) continue;
+        ++validCount;
+        minX = std::min(minX, ph.position.x); minY = std::min(minY, ph.position.y); minZ = std::min(minZ, ph.position.z);
+        maxX = std::max(maxX, ph.position.x); maxY = std::max(maxY, ph.position.y); maxZ = std::max(maxZ, ph.position.z);
+    }
+
+    validPhotons = validCount;
+    spdlog::info("MetalPathIntegrator: {} valid caustic photons (of {} traced)", validCount, numPhotons);
+
+    if (validCount == 0) {
+        hashCellStartBuf   = nil;
+        sortedPhotonIdxBuf = nil;
+        return;
+    }
+
+    // Expand AABB by one cell on each side
+    float cs  = photonSearchRadius;
+    hashCellSize   = cs;
+    minX -= cs; minY -= cs; minZ -= cs;
+    maxX += cs; maxY += cs; maxZ += cs;
+    hashGridOrigin = {minX, minY, minZ};
+    hashGridDimX   = static_cast<uint32_t>(std::ceil((maxX - minX) / cs)) + 1;
+    hashGridDimY   = static_cast<uint32_t>(std::ceil((maxY - minY) / cs)) + 1;
+    hashGridDimZ   = static_cast<uint32_t>(std::ceil((maxZ - minZ) / cs)) + 1;
+    uint32_t numCells = hashGridDimX * hashGridDimY * hashGridDimZ;
+
+    // Assign each valid photon to a cell
+    struct PhotonCell { uint32_t photonIdx; uint32_t cellIdx; };
+    std::vector<PhotonCell> assignments;
+    assignments.reserve(validCount);
+    for (uint32_t i = 0; i < numPhotons; ++i) {
+        const GpuPhoton& ph = gpuPhotons[i];
+        if (ph.power.x == 0.f && ph.power.y == 0.f && ph.power.z == 0.f) continue;
+        uint32_t ix = static_cast<uint32_t>((ph.position.x - minX) / cs);
+        uint32_t iy = static_cast<uint32_t>((ph.position.y - minY) / cs);
+        uint32_t iz = static_cast<uint32_t>((ph.position.z - minZ) / cs);
+        ix = std::min(ix, hashGridDimX - 1);
+        iy = std::min(iy, hashGridDimY - 1);
+        iz = std::min(iz, hashGridDimZ - 1);
+        uint32_t cellIdx = iz * hashGridDimX * hashGridDimY + iy * hashGridDimX + ix;
+        assignments.push_back({i, cellIdx});
+    }
+
+    // Sort by cell index
+    std::sort(assignments.begin(), assignments.end(),
+              [](const PhotonCell& a, const PhotonCell& b){ return a.cellIdx < b.cellIdx; });
+
+    // Build prefix sum (cellStart[c] = first assignment index for cell c)
+    std::vector<uint32_t> cellStart(numCells + 1, 0);
+    for (const auto& pc : assignments)
+        cellStart[pc.cellIdx + 1]++;
+    for (uint32_t c = 0; c < numCells; ++c)
+        cellStart[c + 1] += cellStart[c];
+
+    // Extract sorted photon indices
+    std::vector<uint32_t> sortedIdx(validCount);
+    for (uint32_t i = 0; i < validCount; ++i)
+        sortedIdx[i] = assignments[i].photonIdx;
+
+    // Upload
+    hashCellStartBuf = [dev newBufferWithBytes:cellStart.data()
+                                        length:cellStart.size() * sizeof(uint32_t)
+                                       options:MTLResourceStorageModeShared];
+    sortedPhotonIdxBuf = [dev newBufferWithBytes:sortedIdx.data()
+                                          length:sortedIdx.size() * sizeof(uint32_t)
+                                         options:MTLResourceStorageModeShared];
+    spdlog::info("MetalPathIntegrator: photon hash grid {}x{}x{} ({} cells)",
+                 hashGridDimX, hashGridDimY, hashGridDimZ, numCells);
 }
 
 // ---------------------------------------------------------------------------
@@ -549,6 +719,18 @@ void MetalPathIntegrator::prepare(const SceneView& scene) {
                  m_impl->accel->totalVertices(),
                  m_impl->accel->totalTriangles());
 
+    // Build GPU caustic photon map if enabled (requires accel structure to be ready)
+    if (m_impl->photonMapEnabled && m_impl->psoPhotonTrace) {
+        id<MTLAccelerationStructure> tlas = (__bridge id<MTLAccelerationStructure>)m_impl->accel->tlas();
+        m_impl->buildPhotonMap(
+            dev, cq, tlas,
+            (__bridge id<MTLBuffer>)m_impl->lightBuf->handle(), m_impl->numLights,
+            (__bridge id<MTLBuffer>)m_impl->matBuf->handle(),   m_impl->numMaterials,
+            (__bridge id<MTLBuffer>)m_impl->accel->normalBuffer(),
+            (__bridge id<MTLBuffer>)m_impl->accel->indexBuffer(),
+            (__bridge id<MTLBuffer>)m_impl->accel->meshIndexOffsetBuffer());
+    }
+
     m_impl->preparedOnce = true;
 }
 
@@ -624,6 +806,13 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     camParams.pixelFilterBins   = m_impl->pixelFilterBins;
     camParams.pixelFilterRadius = m_impl->pixelFilterRadius;
     camParams.hairMeshBaseID    = m_impl->hairMeshBaseID;
+    camParams.photonMapEnabled  = m_impl->photonMapEnabled && (m_impl->validPhotons > 0) ? 1u : 0u;
+    camParams.photonSearchRadius = m_impl->photonSearchRadius;
+    camParams.hashGridOrigin    = m_impl->hashGridOrigin;
+    camParams.hashCellSize      = m_impl->hashCellSize;
+    camParams.hashGridDimX      = m_impl->hashGridDimX;
+    camParams.hashGridDimY      = m_impl->hashGridDimY;
+    camParams.hashGridDimZ      = m_impl->hashGridDimZ;
 
     // Use the persistent accum buffer — allocates only on first call or size change.
     // clearAccum() should be called when starting a fresh render (new scene/camera).
@@ -706,6 +895,13 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
             [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->hairTriBuffer() offset:0 atIndex:19];
         if (m_impl->hairMatBuf)
             [enc setBuffer:m_impl->hairMatBuf offset:0 atIndex:20];
+        // Photon map hash grid (nil-safe when photon map is off)
+        if (m_impl->hashCellStartBuf)
+            [enc setBuffer:m_impl->hashCellStartBuf   offset:0 atIndex:21];
+        if (m_impl->sortedPhotonIdxBuf)
+            [enc setBuffer:m_impl->sortedPhotonIdxBuf offset:0 atIndex:22];
+        if (m_impl->photonBuf)
+            [enc setBuffer:m_impl->photonBuf          offset:0 atIndex:23];
         [enc setTexture:envTex atIndex:0];
         [enc useResource:tlas usage:MTLResourceUsageRead];
         for (void* blasVoid : m_impl->accel->blasHandles())
@@ -803,6 +999,13 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
     camParams.pixelFilterBins   = m_impl->pixelFilterBins;
     camParams.pixelFilterRadius = m_impl->pixelFilterRadius;
     camParams.hairMeshBaseID    = m_impl->hairMeshBaseID;
+    camParams.photonMapEnabled  = m_impl->photonMapEnabled && (m_impl->validPhotons > 0) ? 1u : 0u;
+    camParams.photonSearchRadius = m_impl->photonSearchRadius;
+    camParams.hashGridOrigin    = m_impl->hashGridOrigin;
+    camParams.hashCellSize      = m_impl->hashCellSize;
+    camParams.hashGridDimX      = m_impl->hashGridDimX;
+    camParams.hashGridDimY      = m_impl->hashGridDimY;
+    camParams.hashGridDimZ      = m_impl->hashGridDimZ;
 
     // Tile-sized accum buffer (gid is local; shader writes gid.y*tileW+gid.x)
     size_t accumBytes   = tileW * tileH * sizeof(GpuAccumPixel);
@@ -878,6 +1081,13 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
             [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->hairTriBuffer() offset:0 atIndex:19];
         if (m_impl->hairMatBuf)
             [enc setBuffer:m_impl->hairMatBuf offset:0 atIndex:20];
+        // Photon map hash grid (nil-safe)
+        if (m_impl->hashCellStartBuf)
+            [enc setBuffer:m_impl->hashCellStartBuf   offset:0 atIndex:21];
+        if (m_impl->sortedPhotonIdxBuf)
+            [enc setBuffer:m_impl->sortedPhotonIdxBuf offset:0 atIndex:22];
+        if (m_impl->photonBuf)
+            [enc setBuffer:m_impl->photonBuf          offset:0 atIndex:23];
 
         // Environment texture (index 0); fallback 1×1 white if no HDRI loaded
         id<MTLTexture> envTex = m_impl->envTexture

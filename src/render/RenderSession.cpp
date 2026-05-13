@@ -522,6 +522,8 @@ void RenderSession::render() {
         if (metalIntegrator->isValid()) {
             spdlog::info("Interactive mode: using Metal GPU backend");
             metalIntegrator->setFireflyClamp(m_settings.fireflyClamp);
+            if (m_settings.integrator == IntegratorType::PhotonMap)
+                metalIntegrator->setPhotonMap(m_settings.numPhotons, m_settings.photonRadius);
             m_integrator = std::move(metalIntegrator);
         } else {
             spdlog::warn("--interactive: Metal backend unavailable, "
