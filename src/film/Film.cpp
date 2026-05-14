@@ -77,6 +77,22 @@ Spectrum Film::getPixel(uint32_t x, uint32_t y) const {
     return m_pixels[y * m_width + x].resolve();
 }
 
+void Film::readTile(uint32_t x0, uint32_t y0,
+                    uint32_t w,  uint32_t h,
+                    float* out) const {
+    for (uint32_t row = 0; row < h; ++row) {
+        uint32_t fy = y0 + row;
+        for (uint32_t col = 0; col < w; ++col) {
+            uint32_t fx = x0 + col;
+            Spectrum s = inBounds(static_cast<int>(fx), static_cast<int>(fy))
+                       ? m_pixels[fy * m_width + fx].resolve()
+                       : Spectrum{};
+            float* p = out + (row * w + col) * 3;
+            p[0] = s.x; p[1] = s.y; p[2] = s.z;
+        }
+    }
+}
+
 float Film::varianceAt(uint32_t x, uint32_t y) const {
     const auto& p = m_pixels[y * m_width + x];
     float w = p.weight.load(std::memory_order_relaxed);

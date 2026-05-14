@@ -1,4 +1,6 @@
 #include "render/RenderSession.h"
+#include <anacapa/render/SocketDisplayDriver.h>
+#include <anacapa/render/DisplayProtocol.h>
 #include <CLI/CLI.hpp>
 #include <spdlog/spdlog.h>
 
@@ -137,6 +139,14 @@ int main(int argc, char** argv) {
                    "(CPU and GPU). Higher = smoother curves. Default 4.")
        ->default_val(4)
        ->check(CLI::Range(1, 32));
+    std::string displaySock;
+    app.add_option("--display", displaySock,
+                   "Push tiles to viewer at this Unix socket path. "
+                   "Defaults to " + std::string(anacapa::proto::kDefaultSockPath) +
+                   " when flag is given without a value.")
+       ->expected(0, 1)
+       ->default_val("");
+
     CLI11_PARSE(app, argc, argv);
 
     settings.frameSet = (frameOpt->count() > 0);
@@ -157,6 +167,30 @@ int main(int argc, char** argv) {
 
     anacapa::RenderSession session(settings);
     session.loadScene();
+
+    // If --display was given (with or without an explicit path), connect to the
+    // viewer socket and use SocketDisplayDriver.  Fall back silently if the
+    // viewer is not running — the FileDisplayDriver default takes over.
+    std::unique_ptr<anacapa::SocketDisplayDriver> sockDriver;
+    if (!displaySock.empty() || app.count("--display")) {
+        const std::string path = displaySock.empty()
+                               ? anacapa::proto::kDefaultSockPath
+                               : displaySock;
+        sockDriver = std::make_unique<anacapa::SocketDisplayDriver>(path);
+        if (sockDriver->isConnected()) {
+            session.setDisplayDriver(sockDriver.get());
+            sockDriver->onCancelFn = [&session]{ session.requestCancel(); };
+            sockDriver->onPauseFn  = [&session]{ session.requestPause();  };
+            sockDriver->onResumeFn = [&session]{ session.requestResume(); };
+            sockDriver->onCropFn   = [&session](uint32_t cx, uint32_t cy,
+                                                uint32_t cw, uint32_t ch) {
+                session.requestCrop(cx, cy, cw, ch);
+            };
+        } else {
+            sockDriver.reset();
+        }
+    }
+
     session.render();
 
     return 0;

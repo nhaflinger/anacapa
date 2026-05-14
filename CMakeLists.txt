@@ -199,6 +199,7 @@ if(ANACAPA_ENABLE_VIEWER)
         ${IMGUI_SOURCE_DIR}/backends
         ${STB_SOURCE_DIR}
         ${IMGUI_FILEBROWSER_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
     target_link_libraries(viewer PRIVATE
         SDL2::SDL2-static
@@ -253,7 +254,7 @@ add_custom_command(
     DEPENDS ${_addon_py_files}
     COMMENT "Packaging Blender addon → bin/anacapa_renderer.zip"
 )
-add_custom_target(anacapa_blender ALL DEPENDS "${_addon_zip}")
+add_custom_target(anacapa_blender DEPENDS "${_addon_zip}")
 
 # ---------------------------------------------------------------------------
 # Tests

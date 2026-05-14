@@ -3,6 +3,7 @@
 #include <anacapa/film/Film.h>          // Film, DenoiseOptions
 #include <anacapa/film/PixelFilter.h>   // PixelFilterType
 #include <anacapa/integrator/IIntegrator.h>
+#include <anacapa/render/IDisplayDriver.h>
 #include <anacapa/accel/GeometryPool.h>
 #include <anacapa/accel/CurvePool.h>
 #include <anacapa/accel/IAccelerationStructure.h>
@@ -10,7 +11,10 @@
 #include <anacapa/shading/IMaterial.h>
 #include <anacapa/shading/ILight.h>
 #include "ThreadPool.h"
+#include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -104,6 +108,19 @@ public:
     // Run the render, write output EXR
     void render();
 
+    // Optional display driver — must be set before render() is called.
+    // Non-owning; caller is responsible for lifetime.
+    void setDisplayDriver(IDisplayDriver* driver) { m_displayDriver = driver; }
+
+    // Render control — safe to call from any thread (e.g. display driver callbacks).
+    void requestCancel() { m_cancelRequested.store(true); }
+    void requestPause()  { m_pauseRequested.store(true);  }
+    void requestResume() {
+        m_pauseRequested.store(false);
+        m_pauseCV.notify_all();
+    }
+    void requestCrop(uint32_t cx, uint32_t cy, uint32_t cw, uint32_t ch);
+
 private:
     void buildCornellBox();
     void buildAccelStructure();
@@ -112,6 +129,11 @@ private:
     // ANACAPA_ENABLE_ALEMBIC is not set)
     void appendAlembicCurves_();
 
+    IDisplayDriver*                        m_displayDriver = nullptr;
+    std::atomic<bool>                      m_cancelRequested{false};
+    std::atomic<bool>                      m_pauseRequested{false};
+    std::mutex                             m_pauseMtx;
+    std::condition_variable                m_pauseCV;
     RenderSettings                        m_settings;
     GeometryPool                          m_geomPool;
     CurvePool                             m_curvePool;
@@ -135,6 +157,12 @@ private:
     // USD prim path → m_materials index (populated from LoadedScene after USD load).
     // Used to assign USD materials to Alembic hair strands by material path.
     std::unordered_map<std::string, uint32_t> m_materialPathIndex;
+
+    // Active tile queue — non-null only while runTiles is executing.
+    // requestCrop() grabs this mutex and calls reprioritize() on the queue.
+    struct TileQueue;
+    std::mutex    m_queueMtx;
+    TileQueue*    m_activeTileQueue = nullptr;
 };
 
 } // namespace anacapa

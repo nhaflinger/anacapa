@@ -1,4 +1,5 @@
 #include "RenderSession.h"
+#include <anacapa/render/FileDisplayDriver.h>
 #include "../accel/BVHBackend.h"
 #include "../accel/CurveBrute.h"
 #include "../integrator/PathIntegrator.h"
@@ -40,6 +41,41 @@
 #include <thread>
 
 namespace anacapa {
+
+// ---------------------------------------------------------------------------
+// TileQueue — mutex-protected deque that supports mid-render reprioritization.
+// Worker threads pop() from the front; requestCrop() moves intersecting tiles
+// to the front via stable_partition so they're rendered next.
+// ---------------------------------------------------------------------------
+struct RenderSession::TileQueue {
+    std::deque<TileRequest> pending;
+    std::mutex              mtx;
+
+    void push(const TileRequest& t) { pending.push_back(t); }
+
+    std::optional<TileRequest> pop() {
+        std::lock_guard<std::mutex> lk(mtx);
+        if (pending.empty()) return std::nullopt;
+        TileRequest t = pending.front();
+        pending.pop_front();
+        return t;
+    }
+
+    void reprioritize(uint32_t cx, uint32_t cy, uint32_t cw, uint32_t ch) {
+        std::lock_guard<std::mutex> lk(mtx);
+        std::stable_partition(pending.begin(), pending.end(),
+            [=](const TileRequest& t) {
+                return t.x0 < cx + cw && t.x0 + t.width  > cx &&
+                       t.y0 < cy + ch && t.y0 + t.height > cy;
+            });
+    }
+};
+
+void RenderSession::requestCrop(uint32_t cx, uint32_t cy, uint32_t cw, uint32_t ch) {
+    std::lock_guard<std::mutex> lk(m_queueMtx);
+    if (m_activeTileQueue)
+        m_activeTileQueue->reprioritize(cx, cy, cw, ch);
+}
 
 // Rotate a point around the Y axis by `degrees`, about the given pivot.
 static Vec3f rotateY(Vec3f p, Vec3f pivot, float degrees) {
@@ -592,17 +628,8 @@ void RenderSession::render() {
 
     auto t0 = std::chrono::steady_clock::now();
 
-    // Progressive preview watcher — writes a tone-mapped PNG every 500 ms
-    // whenever new tiles have been merged.  Runs on a dedicated thread so
-    // render workers are never stalled by disk I/O.
-    std::atomic<bool>    previewStop{false};
-    std::mutex           previewMtx;
-    std::condition_variable previewCV;
-    std::thread          previewThread;
-
-    // Determine the progressive preview target:
-    //   --png path  → sRGB-encoded PNG (display-ready, legacy)
-    //   --output *.exr (no --png) → linear EXR written to the output path
+    // Display driver — use the caller-supplied driver if set, otherwise create
+    // the default FileDisplayDriver (same preview-thread behaviour as before).
     const bool hasPng = !m_settings.pngPath.empty();
     const bool hasExrOut = [&] {
         const auto& p = m_settings.outputPath;
@@ -611,52 +638,90 @@ void RenderSession::render() {
         for (auto& c : ext) c = static_cast<char>(std::tolower((unsigned char)c));
         return ext == ".exr";
     }();
-    const bool doPreview = hasPng || hasExrOut;
-
-    if (doPreview) {
-        previewThread = std::thread([&] {
-            constexpr int kIntervalMs = 500;
-            while (true) {
-                std::unique_lock<std::mutex> lk(previewMtx);
-                previewCV.wait_for(lk, std::chrono::milliseconds(kIntervalMs),
-                                   [&] { return previewStop.load(); });
-                if (m_film->isDirty()) {
-                    m_film->clearDirty();
-                    if (hasPng)
-                        m_film->writePNG(m_settings.pngPath, m_settings.exposure);
-                    else
-                        m_film->writeEXRPreview(m_settings.outputPath);
-                }
-                if (previewStop.load()) break;
-            }
-        });
-        if (hasPng)
-            spdlog::info("Progressive preview: writing PNG every 500 ms to '{}'",
-                         m_settings.pngPath);
-        else
-            spdlog::info("Progressive preview: writing EXR every 500 ms to '{}'",
-                         m_settings.outputPath);
+    std::unique_ptr<FileDisplayDriver> ownedDriver;
+    IDisplayDriver* displayDriver = m_displayDriver;
+    if (!displayDriver) {
+        ownedDriver = std::make_unique<FileDisplayDriver>(
+            *m_film,
+            hasPng    ? m_settings.pngPath    : std::string{},
+            hasExrOut ? m_settings.outputPath : std::string{},
+            m_settings.exposure);
+        displayDriver = ownedDriver.get();
     }
+    displayDriver->imageOpen(m_settings.imageWidth, m_settings.imageHeight);
+
+    // Dedicated command-poll thread — runs at 100 ms intervals throughout the
+    // entire render so viewer pause/cancel commands are always responsive,
+    // even when the GPU renderFrame() blocks for many seconds at a time.
+    std::atomic<bool> pollStop{false};
+    std::thread pollThread([&] {
+        while (!pollStop.load(std::memory_order_relaxed)) {
+            displayDriver->pollCommands();
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    });
 
     // Helper: render a list of tiles and merge into Film.
+    // Block until resumed or cancelled.
+    auto waitIfPaused = [&]() {
+        while (m_pauseRequested.load() && !m_cancelRequested.load()) {
+            std::unique_lock<std::mutex> lk(m_pauseMtx);
+            m_pauseCV.wait_for(lk, std::chrono::milliseconds(100));
+        }
+    };
+
     // tilesOffset shifts the progress counter so adaptive pass numbers continue
     // from where the base pass left off.
     auto runTiles = [&](const std::vector<TileRequest>& tileList,
                         uint32_t totalExpected,
                         std::atomic<uint32_t>& completed) {
+        TileQueue queue;
+        for (const auto& t : tileList) queue.push(t);
+
+        { std::lock_guard<std::mutex> lk(m_queueMtx); m_activeTileQueue = &queue; }
+
         uint32_t n = static_cast<uint32_t>(tileList.size());
-        m_threadPool->parallelFor(n, [&](uint32_t tileIdx) {
-            const TileRequest& tile = tileList[tileIdx];
+        m_threadPool->parallelFor(n, [&](uint32_t) {
+            if (m_cancelRequested.load(std::memory_order_relaxed)) return;
+            waitIfPaused();
+            if (m_cancelRequested.load(std::memory_order_relaxed)) return;
+
+            auto maybeT = queue.pop();
+            if (!maybeT) return;
+            const TileRequest& tile = *maybeT;
+
             auto sampler = m_baseSampler->clone();
             TileBuffer localTile(tile.x0, tile.y0, tile.width, tile.height);
             m_integrator->renderTile(m_scene, tile,
                                       m_settings.imageWidth, m_settings.imageHeight,
                                       *sampler, localTile);
             m_film->mergeTile(localTile);
+
+            if (displayDriver) {
+                std::vector<float> rgb(tile.width * tile.height * 3);
+                m_film->readTile(tile.x0, tile.y0, tile.width, tile.height, rgb.data());
+                displayDriver->writeTile(tile.x0, tile.y0, tile.width, tile.height, rgb.data());
+            }
+
             uint32_t done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
             if (done % 16 == 0 || done == totalExpected)
                 spdlog::info("  {}/{} tiles", done, totalExpected);
         });
+
+        { std::lock_guard<std::mutex> lk(m_queueMtx); m_activeTileQueue = nullptr; }
+    };
+
+    // Push the entire film to the display driver as a single full-image tile.
+    // Used after GPU renderFrame() calls which bypass the per-tile loop.
+    // Returns false if the render should be aborted (cancelled).
+    auto pushFrame = [&]() -> bool {
+        if (!displayDriver) return !m_cancelRequested.load();
+        uint32_t W = m_settings.imageWidth, H = m_settings.imageHeight;
+        std::vector<float> rgb(W * H * 3);
+        m_film->readTile(0, 0, W, H, rgb.data());
+        displayDriver->writeTile(0, 0, W, H, rgb.data());
+        waitIfPaused();
+        return !m_cancelRequested.load();
     };
 
     std::atomic<uint32_t> tilesCompleted{0};
@@ -678,6 +743,8 @@ void RenderSession::render() {
             *m_film);
         if (!gpuDone)
             runTiles(tiles, totalTiles, tilesCompleted);
+        else if (!pushFrame())
+            goto renderDone;
     } else {
         // --- Adaptive two-pass ---
         uint32_t totalSPP = m_settings.samplesPerPixel;
@@ -708,6 +775,7 @@ void RenderSession::render() {
             runTiles(tiles, totalTiles, tilesCompleted);
         } else {
             tilesCompleted.store(totalTiles);
+            if (!pushFrame()) goto renderDone;
         }
 
         if (extraSPP > 0 && baseGpuDone) {
@@ -719,6 +787,7 @@ void RenderSession::render() {
                 m_settings.imageWidth, m_settings.imageHeight,
                 baseSPP, extraSPP,
                 *m_film);
+            if (!pushFrame()) goto renderDone;
         } else if (extraSPP > 0) {
             // Compute per-tile variance score = average pixel variance in tile
             uint32_t W  = m_settings.imageWidth;
@@ -785,15 +854,12 @@ void RenderSession::render() {
         }
     }
 
-    // Stop the preview watcher and wait for it to exit
-    if (doPreview) {
-        {
-            std::lock_guard<std::mutex> lk(previewMtx);
-            previewStop.store(true);
-        }
-        previewCV.notify_all();
-        previewThread.join();
-    }
+    renderDone:
+    pollStop.store(true);
+    pollThread.join();
+
+    // Signal render complete — driver flushes its final preview write
+    displayDriver->imageClose();
 
     auto t1  = std::chrono::steady_clock::now();
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();

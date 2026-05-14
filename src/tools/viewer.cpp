@@ -13,6 +13,12 @@
 // glad must be included before any other GL headers
 #include <glad/glad.h>
 
+// Socket / networking
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <fcntl.h>
+
 #include <SDL.h>
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -26,13 +32,20 @@ namespace OCIO = OCIO_NAMESPACE;
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <mutex>
+#include <queue>
 #include <string>
+#include <thread>
 #include <vector>
 #include <sys/stat.h>
+
+#include <anacapa/render/DisplayProtocol.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -60,6 +73,57 @@ static GLuint g_quadVBO = 0;
 
 // Active shader program (rebuilt when OCIO view changes)
 static GLuint g_shader = 0;
+
+// ---------------------------------------------------------------------------
+// Live socket render state
+// ---------------------------------------------------------------------------
+struct TileUpdate {
+    uint32_t x0, y0, w, h;
+    std::vector<float> rgba;  // w*h*4 floats, RGBA, top-left origin
+};
+
+struct LiveState {
+    // Socket server
+    int         serverFd  = -1;
+    int         clientFd  = -1;
+    std::thread readerThread;
+    std::atomic<bool> readerStop{false};
+
+    // Live texture (RGBA32F, updated tile-by-tile via glTexSubImage2D)
+    GLuint      liveTex = 0;
+    uint32_t    liveW   = 0;
+    uint32_t    liveH   = 0;
+    bool        active  = false;  // true while a render is connected
+    bool        done    = false;  // true after IMAGE_CLOSE received
+
+    // Tile queue (reader thread → main thread)
+    std::mutex              queueMtx;
+    std::queue<TileUpdate>  queue;
+    std::atomic<bool>       dirty{false};
+
+    // Outbound command socket fd (same as clientFd — protected by sendMtx)
+    std::mutex sendMtx;
+
+    // Crop rect (in image pixels; w==0 means no crop)
+    uint32_t cropX = 0, cropY = 0, cropW = 0, cropH = 0;
+    bool cropActive = false;
+
+    // Render controls
+    bool paused = false;
+} g_live;
+
+// Send a command message to the connected renderer (viewer→renderer direction)
+static void sendCommand(const std::vector<uint8_t>& msg) {
+    if (g_live.clientFd < 0) return;
+    std::lock_guard<std::mutex> lk(g_live.sendMtx);
+    size_t sent = 0;
+    while (sent < msg.size()) {
+        ssize_t n = ::send(g_live.clientFd, msg.data() + sent,
+                           msg.size() - sent, MSG_NOSIGNAL);
+        if (n <= 0) break;
+        sent += static_cast<size_t>(n);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // OCIO state
@@ -670,6 +734,141 @@ static bool saveFboPng(const char* path)
 }
 
 // ---------------------------------------------------------------------------
+// Socket reader thread — runs while a renderer is connected.
+// Reads IMAGE_OPEN / TILE / IMAGE_CLOSE messages and enqueues tile updates.
+// ---------------------------------------------------------------------------
+static bool recvAll(int fd, uint8_t* buf, size_t len) {
+    while (len > 0) {
+        ssize_t n = ::recv(fd, buf, len, MSG_WAITALL);
+        if (n <= 0) return false;
+        buf += n;
+        len -= static_cast<size_t>(n);
+    }
+    return true;
+}
+
+static void socketReaderThread(int clientFd) {
+    using namespace anacapa::proto;
+
+    while (!g_live.readerStop.load()) {
+        MsgHeader hdr{};
+        if (!recvAll(clientFd, reinterpret_cast<uint8_t*>(&hdr), sizeof(hdr)))
+            break;
+
+        std::vector<uint8_t> payload(hdr.payloadLen);
+        if (hdr.payloadLen > 0 &&
+            !recvAll(clientFd, payload.data(), hdr.payloadLen))
+            break;
+
+        switch (static_cast<MsgType>(hdr.type)) {
+        case IMAGE_OPEN: {
+            if (hdr.payloadLen < 12) break;
+            uint32_t w, h;
+            std::memcpy(&w, payload.data() + 0, 4);
+            std::memcpy(&h, payload.data() + 4, 4);
+            // Signal main thread to allocate live texture
+            TileUpdate init;
+            init.x0 = 0; init.y0 = 0; init.w = w; init.h = h;
+            init.rgba.clear();  // empty rgba = IMAGE_OPEN signal
+            {
+                std::lock_guard<std::mutex> lk(g_live.queueMtx);
+                g_live.queue.push(std::move(init));
+            }
+            g_live.dirty.store(true);
+            break;
+        }
+        case TILE: {
+            if (hdr.payloadLen < 16) break;
+            TileUpdate tu;
+            std::memcpy(&tu.x0, payload.data() + 0,  4);
+            std::memcpy(&tu.y0, payload.data() + 4,  4);
+            std::memcpy(&tu.w,  payload.data() + 8,  4);
+            std::memcpy(&tu.h,  payload.data() + 12, 4);
+            uint32_t nFloats = tu.w * tu.h * 3;
+            if (hdr.payloadLen < 16 + nFloats * 4) break;
+            // Convert RGB float → RGBA float (alpha=1, flip row to GL convention)
+            const float* src = reinterpret_cast<const float*>(payload.data() + 16);
+            tu.rgba.resize(tu.w * tu.h * 4);
+            for (uint32_t row = 0; row < tu.h; ++row) {
+                uint32_t srcRow = row;               // top-left in wire format
+                uint32_t dstRow = tu.h - 1 - row;   // flip for GL bottom-left
+                for (uint32_t col = 0; col < tu.w; ++col) {
+                    const float* s = src + (srcRow * tu.w + col) * 3;
+                    float*       d = tu.rgba.data() + (dstRow * tu.w + col) * 4;
+                    d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 1.f;
+                }
+            }
+            {
+                std::lock_guard<std::mutex> lk(g_live.queueMtx);
+                g_live.queue.push(std::move(tu));
+            }
+            g_live.dirty.store(true);
+            break;
+        }
+        case IMAGE_CLOSE:
+            g_live.done = true;
+            g_live.dirty.store(true);
+            break;
+        default:
+            break;
+        }
+    }
+    // Renderer disconnected
+    ::close(clientFd);
+    g_live.clientFd = -1;
+}
+
+// Start the Unix socket server and accept one connection.
+// Returns true if the server is listening (even before a client connects).
+static bool startSocketServer(const std::string& sockPath) {
+    ::unlink(sockPath.c_str());  // remove stale socket
+
+    int sfd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sfd < 0) {
+        std::fprintf(stderr, "viewer: socket() failed: %s\n", std::strerror(errno));
+        return false;
+    }
+
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, sockPath.c_str(), sizeof(addr.sun_path) - 1);
+
+    if (::bind(sfd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        std::fprintf(stderr, "viewer: bind('%s') failed: %s\n",
+                     sockPath.c_str(), std::strerror(errno));
+        ::close(sfd);
+        return false;
+    }
+
+    ::listen(sfd, 1);
+    g_live.serverFd = sfd;
+
+    // Accept connections in a background thread so the main loop isn't blocked
+    std::thread([sockPath]() {
+        while (!g_live.readerStop.load()) {
+            // Non-blocking accept poll
+            fd_set fds; FD_ZERO(&fds); FD_SET(g_live.serverFd, &fds);
+            timeval tv{1, 0};
+            if (::select(g_live.serverFd + 1, &fds, nullptr, nullptr, &tv) <= 0)
+                continue;
+
+            int cfd = ::accept(g_live.serverFd, nullptr, nullptr);
+            if (cfd < 0) continue;
+
+            // Store and launch reader
+            g_live.clientFd = cfd;
+            g_live.done     = false;
+            g_live.paused   = false;
+            g_live.readerThread = std::thread(socketReaderThread, cfd);
+            g_live.readerThread.join();
+        }
+    }).detach();
+
+    std::fprintf(stdout, "viewer: listening on %s\n", sockPath.c_str());
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv)
@@ -678,12 +877,28 @@ int main(int argc, char** argv)
 
     std::string imagePath;
     int         pollMs = 500;
+    std::string sockPath;
 
-    app.add_option("image", imagePath, "PNG/JPEG/HDR file to watch")->required();
-    app.add_option("--interval", pollMs, "Poll interval in milliseconds (default 500)")
+    app.add_option("image", imagePath, "PNG/JPEG/HDR/EXR file to watch (optional in socket mode)");
+    app.add_option("--interval", pollMs, "File poll interval in milliseconds (default 500)")
        ->default_val(500);
+    app.add_option("--listen", sockPath,
+                   "Listen on this Unix socket path for renderer connections "
+                   "(default: " + std::string(anacapa::proto::kDefaultSockPath) + ")")
+       ->expected(0, 1)
+       ->default_val("");
 
     CLI11_PARSE(app, argc, argv);
+
+    // If --listen was given without a path, use the default
+    const bool socketMode = (app.count("--listen") > 0 || !sockPath.empty());
+    if (socketMode && sockPath.empty())
+        sockPath = anacapa::proto::kDefaultSockPath;
+
+    if (imagePath.empty() && !socketMode) {
+        std::fprintf(stderr, "viewer: provide an image path or --listen\n");
+        return 1;
+    }
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         std::fprintf(stderr, "SDL_Init error: %s\n", SDL_GetError());
@@ -697,8 +912,11 @@ int main(int argc, char** argv)
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
 
+    std::string windowTitle = socketMode
+        ? "Anacapa Viewer — waiting for renderer"
+        : "Anacapa Viewer — " + imagePath;
     SDL_Window* window = SDL_CreateWindow(
-        ("Anacapa Viewer — " + imagePath).c_str(),
+        windowTitle.c_str(),
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         1280, 820,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
@@ -742,6 +960,12 @@ int main(int argc, char** argv)
 #endif
 
     // -----------------------------------------------------------------------
+    // Socket server (when --listen)
+    // -----------------------------------------------------------------------
+    if (socketMode)
+        startSocketServer(sockPath);
+
+    // -----------------------------------------------------------------------
     // Slot state
     // -----------------------------------------------------------------------
     SlotState slots[kNumSlots];
@@ -749,7 +973,7 @@ int main(int argc, char** argv)
     int recordSlot = 0;
 
     // Load the watched file into slot 0 on startup if it already exists
-    {
+    if (!imagePath.empty()) {
         uint64_t mod = fileModTime(imagePath);
         if (mod != 0) {
             uploadTextureToSlot(imagePath.c_str(), slots[0]);
@@ -757,7 +981,7 @@ int main(int argc, char** argv)
         }
     }
 
-    uint64_t watchedMod = slots[0].lastMod;
+    uint64_t watchedMod = imagePath.empty() ? 0 : slots[0].lastMod;
 
     // -----------------------------------------------------------------------
     // UI state
@@ -785,9 +1009,13 @@ int main(int argc, char** argv)
     auto lastPoll = std::chrono::steady_clock::now();
     bool running  = true;
 
+    // Crop drag state (image-space pixels)
+    bool  cropDragging = false;
+    float cropDragStartX = 0, cropDragStartY = 0;
+
     while (running) {
-        // ---- File poll -------------------------------------------------------
-        {
+        // ---- File poll (non-socket mode only) --------------------------------
+        if (!socketMode && !imagePath.empty()) {
             auto now = std::chrono::steady_clock::now();
             int elapsed = static_cast<int>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPoll).count());
@@ -801,6 +1029,58 @@ int main(int argc, char** argv)
                     needsRedraw = true;
                 }
             }
+        }
+
+        // ---- Drain socket tile queue (socket mode only) ----------------------
+        if (socketMode && g_live.dirty.exchange(false)) {
+            std::queue<TileUpdate> pending;
+            {
+                std::lock_guard<std::mutex> lk(g_live.queueMtx);
+                std::swap(pending, g_live.queue);
+            }
+            while (!pending.empty()) {
+                TileUpdate& tu = pending.front();
+                if (tu.rgba.empty()) {
+                    // IMAGE_OPEN — allocate live texture
+                    uint32_t w = tu.w, h = tu.h;
+                    if (g_live.liveTex) glDeleteTextures(1, &g_live.liveTex);
+                    glGenTextures(1, &g_live.liveTex);
+                    glBindTexture(GL_TEXTURE_2D, g_live.liveTex);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    std::vector<float> zeros(w * h * 4, 0.f);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0,
+                                 GL_RGBA, GL_FLOAT, zeros.data());
+                    g_live.liveW  = w;
+                    g_live.liveH  = h;
+                    g_live.active = true;
+                    g_live.done   = false;
+                    g_live.cropActive = false;
+                    // Mirror into activeSlot so color-grading pipeline sees it
+                    slots[activeSlot].srcTex = g_live.liveTex;
+                    slots[activeSlot].texW   = static_cast<int>(w);
+                    slots[activeSlot].texH   = static_cast<int>(h);
+                    slots[activeSlot].isHdr  = true;
+                    SDL_SetWindowTitle(window, "Anacapa Viewer — rendering…");
+                } else {
+                    // TILE — subimage update
+                    glBindTexture(GL_TEXTURE_2D, g_live.liveTex);
+                    // y0 in wire format is top-left; GL texture is bottom-left
+                    uint32_t glY = g_live.liveH - tu.y0 - tu.h;
+                    glTexSubImage2D(GL_TEXTURE_2D, 0,
+                                    static_cast<GLint>(tu.x0),
+                                    static_cast<GLint>(glY),
+                                    static_cast<GLsizei>(tu.w),
+                                    static_cast<GLsizei>(tu.h),
+                                    GL_RGBA, GL_FLOAT, tu.rgba.data());
+                }
+                pending.pop();
+            }
+            if (g_live.done)
+                SDL_SetWindowTitle(window, "Anacapa Viewer — done");
+            needsRedraw = true;
         }
 
         // ---- SDL events -----------------------------------------------------
@@ -1129,11 +1409,121 @@ int main(int argc, char** argv)
             float offY = (imgH - dispH) * 0.5f;
             if (offX > 0) ImGui::SetCursorPosX(offX);
             if (offY > 0) ImGui::SetCursorPosY(offY);
+
+            ImVec2 imageScreenPos = ImGui::GetCursorScreenPos();
             ImGui::Image((ImTextureID)(intptr_t)g_dstTexture, {dispW, dispH});
+
+            // ---- Crop drag (socket mode only) --------------------------------
+            if (socketMode && g_live.active) {
+                ImVec2 mp = ImGui::GetIO().MousePos;
+                bool inImage = mp.x >= imageScreenPos.x &&
+                               mp.x <= imageScreenPos.x + dispW &&
+                               mp.y >= imageScreenPos.y &&
+                               mp.y <= imageScreenPos.y + dispH;
+
+                if (inImage && ImGui::IsMouseClicked(0) && !ImGui::GetIO().WantCaptureMouse) {
+                    cropDragging    = true;
+                    cropDragStartX  = mp.x;
+                    cropDragStartY  = mp.y;
+                }
+                if (cropDragging && ImGui::IsMouseReleased(0)) {
+                    cropDragging = false;
+                    float x0s = std::min(cropDragStartX, mp.x);
+                    float y0s = std::min(cropDragStartY, mp.y);
+                    float x1s = std::max(cropDragStartX, mp.x);
+                    float y1s = std::max(cropDragStartY, mp.y);
+                    // Convert screen → image pixels
+                    float scaleX = float(as.texW) / dispW;
+                    float scaleY = float(as.texH) / dispH;
+                    uint32_t cx = static_cast<uint32_t>(std::max(0.f, (x0s - imageScreenPos.x) * scaleX));
+                    uint32_t cy = static_cast<uint32_t>(std::max(0.f, (y0s - imageScreenPos.y) * scaleY));
+                    uint32_t cx1 = static_cast<uint32_t>(std::min(float(as.texW), (x1s - imageScreenPos.x) * scaleX));
+                    uint32_t cy1 = static_cast<uint32_t>(std::min(float(as.texH), (y1s - imageScreenPos.y) * scaleY));
+                    if (cx1 > cx && cy1 > cy) {
+                        g_live.cropX = cx; g_live.cropY = cy;
+                        g_live.cropW = cx1 - cx; g_live.cropH = cy1 - cy;
+                        g_live.cropActive = true;
+                        std::vector<uint8_t> msg;
+                        anacapa::proto::encodeCrop(msg, cx, cy, cx1-cx, cy1-cy);
+                        sendCommand(msg);
+                    }
+                }
+
+                // Draw crop rect overlay
+                if (g_live.cropActive || cropDragging) {
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    float x0s, y0s, x1s, y1s;
+                    if (cropDragging) {
+                        ImVec2 cmp = ImGui::GetIO().MousePos;
+                        x0s = std::min(cropDragStartX, cmp.x);
+                        y0s = std::min(cropDragStartY, cmp.y);
+                        x1s = std::max(cropDragStartX, cmp.x);
+                        y1s = std::max(cropDragStartY, cmp.y);
+                    } else {
+                        float sx = dispW / float(as.texW);
+                        float sy = dispH / float(as.texH);
+                        x0s = imageScreenPos.x + g_live.cropX * sx;
+                        y0s = imageScreenPos.y + g_live.cropY * sy;
+                        x1s = x0s + g_live.cropW * sx;
+                        y1s = y0s + g_live.cropH * sy;
+                    }
+                    dl->AddRect({x0s, y0s}, {x1s, y1s},
+                                IM_COL32(255, 200, 0, 220), 0.f, 0, 1.5f);
+                    dl->AddRectFilled({x0s, y0s}, {x1s, y1s},
+                                      IM_COL32(255, 200, 0, 20));
+                }
+                needsRedraw = true;
+            }
         } else {
             ImGui::SetCursorPos({20, 20});
-            ImGui::TextDisabled("Slot %d is empty", activeSlot + 1);
+            if (socketMode)
+                ImGui::TextDisabled("Waiting for renderer on %s", sockPath.c_str());
+            else
+                ImGui::TextDisabled("Slot %d is empty", activeSlot + 1);
         }
+
+        // ---- Render control toolbar (socket mode only) -----------------------
+        if (socketMode && g_live.active && !g_live.done) {
+            ImGui::SetNextWindowPos({imgX + 8.f, menubarH + 8.f});
+            ImGui::SetNextWindowSize({0, 0});
+            ImGui::Begin("##controls", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_AlwaysAutoResize |
+                ImGuiWindowFlags_NoFocusOnAppearing);
+
+            if (!g_live.paused) {
+                if (ImGui::Button("Pause")) {
+                    g_live.paused = true;
+                    std::vector<uint8_t> msg;
+                    anacapa::proto::encodeSimple(msg, anacapa::proto::PAUSE);
+                    sendCommand(msg);
+                }
+            } else {
+                if (ImGui::Button("Resume")) {
+                    g_live.paused = false;
+                    std::vector<uint8_t> msg;
+                    anacapa::proto::encodeSimple(msg, anacapa::proto::RESUME);
+                    sendCommand(msg);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                std::vector<uint8_t> msg;
+                anacapa::proto::encodeSimple(msg, anacapa::proto::CANCEL);
+                sendCommand(msg);
+            }
+            if (g_live.cropActive) {
+                ImGui::SameLine();
+                if (ImGui::Button("Clear Crop")) {
+                    g_live.cropActive = false;
+                    std::vector<uint8_t> msg;
+                    anacapa::proto::encodeSimple(msg, anacapa::proto::CLEAR_CROP);
+                    sendCommand(msg);
+                }
+            }
+            ImGui::End();
+        }
+
         ImGui::End();
 
         // ---- Render ---------------------------------------------------------
@@ -1150,6 +1540,18 @@ int main(int argc, char** argv)
     }
 
     // ---- Cleanup ------------------------------------------------------------
+    // Socket server
+    g_live.readerStop.store(true);
+    if (g_live.serverFd >= 0) { ::close(g_live.serverFd); g_live.serverFd = -1; }
+    if (g_live.clientFd >= 0) { ::close(g_live.clientFd); g_live.clientFd = -1; }
+    if (g_live.readerThread.joinable()) g_live.readerThread.join();
+    if (g_live.liveTex) { glDeleteTextures(1, &g_live.liveTex); g_live.liveTex = 0; }
+    if (socketMode && !sockPath.empty()) ::unlink(sockPath.c_str());
+
+    // Nullify live texture from slot before slot cleanup (already deleted above)
+    for (int i = 0; i < kNumSlots; ++i)
+        if (slots[i].srcTex == g_live.liveTex) slots[i].srcTex = 0;
+
     for (int i = 0; i < kNumSlots; ++i)
         if (slots[i].srcTex) glDeleteTextures(1, &slots[i].srcTex);
 #ifdef ANACAPA_HAVE_OCIO

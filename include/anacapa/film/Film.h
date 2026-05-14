@@ -180,6 +180,14 @@ public:
     // Raw resolved pixel access (for preview / post-processing)
     Spectrum getPixel(uint32_t x, uint32_t y) const;
 
+    // Resolve a rectangular region into a caller-supplied RGB float buffer.
+    // out must hold at least w*h*3 floats (row-major, R G B per pixel).
+    // Pixels with no samples yet resolve to (0,0,0).
+    // Thread-safe — uses relaxed atomic loads, same as getPixel().
+    void readTile(uint32_t x0, uint32_t y0,
+                  uint32_t w,  uint32_t h,
+                  float* out) const;
+
     // Per-pixel luminance variance: E[L^2] - E[L]^2.
     // Valid after at least one tile merge with adaptive-weight adds.
     // Returns 0 if the pixel has no samples yet.
