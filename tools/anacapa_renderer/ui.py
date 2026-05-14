@@ -21,6 +21,12 @@ class ANACAPA_PT_sampling(bpy.types.Panel):
         s = context.scene.anacapa
 
         layout.operator("anacapa.render", text="Render", icon='RENDER_STILL')
+
+        row = layout.row(align=True)
+        row.prop(s, "use_viewer", text="Use Viewer",
+                 icon='RESTRICT_VIEW_OFF' if s.use_viewer else 'RESTRICT_VIEW_ON')
+        row.operator("anacapa.launch_viewer", text="", icon='WINDOW')
+
         layout.separator()
         layout.use_property_split = True
 

@@ -120,6 +120,7 @@ public:
         m_pauseCV.notify_all();
     }
     void requestCrop(uint32_t cx, uint32_t cy, uint32_t cw, uint32_t ch);
+    void requestClearCrop();
 
 private:
     void buildCornellBox();
@@ -134,6 +135,10 @@ private:
     std::atomic<bool>                      m_pauseRequested{false};
     std::mutex                             m_pauseMtx;
     std::condition_variable                m_pauseCV;
+    std::atomic<bool>                      m_cropActive{false};
+    std::atomic<bool>                      m_cropCleared{false};
+    std::mutex                             m_cropMtx;
+    uint32_t                               m_cropX{0}, m_cropY{0}, m_cropW{0}, m_cropH{0};
     RenderSettings                        m_settings;
     GeometryPool                          m_geomPool;
     CurvePool                             m_curvePool;

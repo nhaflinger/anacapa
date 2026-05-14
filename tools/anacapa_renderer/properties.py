@@ -192,6 +192,16 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
         subtype='FILE_PATH',
     )
 
+    # Viewer / display driver
+    use_viewer: bpy.props.BoolProperty(
+        name="Use Viewer",
+        description="Send live tile updates to the Anacapa viewer over a socket. "
+                    "When enabled, rendering auto-launches the viewer if it is not "
+                    "already running, then passes --display so tiles stream directly "
+                    "into the viewer as they finish.",
+        default=False,
+    )
+
     # Camera
     camera_path: bpy.props.StringProperty(
         name="Camera USD Path",

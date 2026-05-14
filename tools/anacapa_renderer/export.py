@@ -137,6 +137,13 @@ def get_executable(context):
     return prefs.executable_path
 
 
+def get_viewer_executable(context):
+    """Viewer binary lives next to the anacapa binary."""
+    import os
+    anacapa = get_executable(context)
+    return os.path.join(os.path.dirname(os.path.abspath(anacapa)), "viewer")
+
+
 def get_scenes_dir(blend_path):
     """The scenes directory — the directory that contains the blend file.
 

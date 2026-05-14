@@ -186,6 +186,7 @@ int main(int argc, char** argv) {
                                                 uint32_t cw, uint32_t ch) {
                 session.requestCrop(cx, cy, cw, ch);
             };
+            sockDriver->onClearCropFn = [&session]{ session.requestClearCrop(); };
         } else {
             sockDriver.reset();
         }

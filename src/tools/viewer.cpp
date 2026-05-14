@@ -104,9 +104,22 @@ struct LiveState {
     // Outbound command socket fd (same as clientFd — protected by sendMtx)
     std::mutex sendMtx;
 
-    // Crop rect (in image pixels; w==0 means no crop)
+    // Crop rect (in image pixels; set once image dimensions are known)
     uint32_t cropX = 0, cropY = 0, cropW = 0, cropH = 0;
     bool cropActive = false;
+
+    // Pre-launch crop (normalized [0,1]; stored before image dimensions are known).
+    // Converted to pixels and sent as SET_CROP when IMAGE_OPEN arrives.
+    float cropNormX0 = 0, cropNormY0 = 0, cropNormX1 = 0, cropNormY1 = 0;
+    bool  cropNormActive = false;
+    // True when cropNorm was stored relative to the viewer panel (pre-launch),
+    // false when stored relative to the image display area (post-render).
+    // On IMAGE_OPEN the main thread converts panel-relative to image-relative so
+    // the overlay stays in the same screen position it was drawn.
+    bool  cropNormIsPanel = false;
+    // Panel dimensions at the time the pre-launch crop was drawn; used for
+    // the panel→image-display conversion on IMAGE_OPEN.
+    float cropPanelW = 0, cropPanelH = 0;
 
     // Render controls
     bool paused = false;
@@ -766,6 +779,61 @@ static void socketReaderThread(int clientFd) {
             uint32_t w, h;
             std::memcpy(&w, payload.data() + 0, 4);
             std::memcpy(&h, payload.data() + 4, 4);
+            // If a pre-launch normalized crop was drawn, convert to pixels
+            // and send SET_CROP to the renderer before it starts rendering tiles.
+            // Send crop to renderer if one is active.  cropNormActive persists
+            // across renders — don't clear it here so subsequent renders also
+            // honour the crop window without the user having to redraw it.
+            if (g_live.cropNormActive && w > 0 && h > 0) {
+                // Convert stored norm to image pixels.  When the crop was drawn
+                // pre-launch (cropNormIsPanel=true), the norm is panel-relative
+                // and must be remapped through the letterbox transform to get
+                // correct image-space pixels.  Image-relative norms (drawn during
+                // a live render) convert directly with norm * image_size.
+                float nx0 = g_live.cropNormX0, ny0 = g_live.cropNormY0;
+                float nx1 = g_live.cropNormX1, ny1 = g_live.cropNormY1;
+                if (g_live.cropNormIsPanel &&
+                    g_live.cropPanelW > 0 && g_live.cropPanelH > 0) {
+                    float s  = std::min(g_live.cropPanelW / float(w),
+                                        g_live.cropPanelH / float(h));
+                    float dW = w * s, dH = h * s;
+                    float oX = (g_live.cropPanelW - dW) * 0.5f;
+                    float oY = (g_live.cropPanelH - dH) * 0.5f;
+                    auto cvt = [](float n, float pSz, float off, float disp) {
+                        return std::max(0.f, std::min(1.f, (n * pSz - off) / disp));
+                    };
+                    nx0 = cvt(nx0, g_live.cropPanelW, oX, dW);
+                    ny0 = cvt(ny0, g_live.cropPanelH, oY, dH);
+                    nx1 = cvt(nx1, g_live.cropPanelW, oX, dW);
+                    ny1 = cvt(ny1, g_live.cropPanelH, oY, dH);
+                }
+                uint32_t cx  = static_cast<uint32_t>(nx0 * w);
+                uint32_t cy  = static_cast<uint32_t>(ny0 * h);
+                uint32_t cx1 = static_cast<uint32_t>(nx1 * w);
+                uint32_t cy1 = static_cast<uint32_t>(ny1 * h);
+                if (cx1 > cx && cy1 > cy) {
+                    g_live.cropX = cx; g_live.cropY = cy;
+                    g_live.cropW = cx1 - cx; g_live.cropH = cy1 - cy;
+                    g_live.cropActive = true;
+                    // leave cropNormActive = true so the next render sees it too
+                    std::vector<uint8_t> msg;
+                    anacapa::proto::encodeCrop(msg, cx, cy, cx1-cx, cy1-cy);
+                    sendCommand(msg);
+                }
+            } else if (g_live.cropActive && g_live.liveW > 0 && h > 0) {
+                // cropActive set mid-render (norm not stored), carry it forward
+                uint32_t cx  = static_cast<uint32_t>(float(g_live.cropX) / float(g_live.liveW) * w);
+                uint32_t cy  = static_cast<uint32_t>(float(g_live.cropY) / float(g_live.liveH) * h);
+                uint32_t cx1 = static_cast<uint32_t>(float(g_live.cropX + g_live.cropW) / float(g_live.liveW) * w);
+                uint32_t cy1 = static_cast<uint32_t>(float(g_live.cropY + g_live.cropH) / float(g_live.liveH) * h);
+                if (cx1 > cx && cy1 > cy) {
+                    g_live.cropX = cx; g_live.cropY = cy;
+                    g_live.cropW = cx1 - cx; g_live.cropH = cy1 - cy;
+                    std::vector<uint8_t> msg;
+                    anacapa::proto::encodeCrop(msg, cx, cy, cx1-cx, cy1-cy);
+                    sendCommand(msg);
+                }
+            }
             // Signal main thread to allocate live texture
             TileUpdate init;
             init.x0 = 0; init.y0 = 0; init.w = w; init.h = h;
@@ -1057,7 +1125,24 @@ int main(int argc, char** argv)
                     g_live.liveH  = h;
                     g_live.active = true;
                     g_live.done   = false;
-                    g_live.cropActive = false;
+                    // Convert pre-launch panel-relative norm to image-display-relative
+                    // so the overlay stays at the same screen position it was drawn.
+                    if (g_live.cropNormIsPanel &&
+                        g_live.cropPanelW > 0 && g_live.cropPanelH > 0) {
+                        float s  = std::min(g_live.cropPanelW / float(w),
+                                            g_live.cropPanelH / float(h));
+                        float dW = w * s, dH = h * s;
+                        float oX = (g_live.cropPanelW - dW) * 0.5f;
+                        float oY = (g_live.cropPanelH - dH) * 0.5f;
+                        auto cvt = [](float n, float pSz, float off, float disp) {
+                            return std::max(0.f, std::min(1.f, (n * pSz - off) / disp));
+                        };
+                        g_live.cropNormX0 = cvt(g_live.cropNormX0, g_live.cropPanelW, oX, dW);
+                        g_live.cropNormY0 = cvt(g_live.cropNormY0, g_live.cropPanelH, oY, dH);
+                        g_live.cropNormX1 = cvt(g_live.cropNormX1, g_live.cropPanelW, oX, dW);
+                        g_live.cropNormY1 = cvt(g_live.cropNormY1, g_live.cropPanelH, oY, dH);
+                        g_live.cropNormIsPanel = false;
+                    }
                     // Mirror into activeSlot so color-grading pipeline sees it
                     slots[activeSlot].srcTex = g_live.liveTex;
                     slots[activeSlot].texW   = static_cast<int>(w);
@@ -1413,44 +1498,68 @@ int main(int argc, char** argv)
             ImVec2 imageScreenPos = ImGui::GetCursorScreenPos();
             ImGui::Image((ImTextureID)(intptr_t)g_dstTexture, {dispW, dispH});
 
-            // ---- Crop drag (socket mode only) --------------------------------
-            if (socketMode && g_live.active) {
+            // ---- Crop drag over loaded image (pixel-precise) -----------------
+            if (socketMode) {
                 ImVec2 mp = ImGui::GetIO().MousePos;
                 bool inImage = mp.x >= imageScreenPos.x &&
                                mp.x <= imageScreenPos.x + dispW &&
                                mp.y >= imageScreenPos.y &&
                                mp.y <= imageScreenPos.y + dispH;
 
-                if (inImage && ImGui::IsMouseClicked(0) && !ImGui::GetIO().WantCaptureMouse) {
-                    cropDragging    = true;
-                    cropDragStartX  = mp.x;
-                    cropDragStartY  = mp.y;
+                // Use IsAnyItemActive() so a drag that started on a UI widget
+                // (slider, button) doesn't bleed into crop-drag.
+                if (inImage && ImGui::IsMouseClicked(ImGuiMouseButton_Left)
+                            && !ImGui::IsAnyItemActive()) {
+                    cropDragging   = true;
+                    cropDragStartX = mp.x;
+                    cropDragStartY = mp.y;
                 }
-                if (cropDragging && ImGui::IsMouseReleased(0)) {
+                if (cropDragging && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
                     cropDragging = false;
                     float x0s = std::min(cropDragStartX, mp.x);
                     float y0s = std::min(cropDragStartY, mp.y);
                     float x1s = std::max(cropDragStartX, mp.x);
                     float y1s = std::max(cropDragStartY, mp.y);
-                    // Convert screen → image pixels
                     float scaleX = float(as.texW) / dispW;
                     float scaleY = float(as.texH) / dispH;
-                    uint32_t cx = static_cast<uint32_t>(std::max(0.f, (x0s - imageScreenPos.x) * scaleX));
-                    uint32_t cy = static_cast<uint32_t>(std::max(0.f, (y0s - imageScreenPos.y) * scaleY));
+                    uint32_t cx  = static_cast<uint32_t>(std::max(0.f, (x0s - imageScreenPos.x) * scaleX));
+                    uint32_t cy  = static_cast<uint32_t>(std::max(0.f, (y0s - imageScreenPos.y) * scaleY));
                     uint32_t cx1 = static_cast<uint32_t>(std::min(float(as.texW), (x1s - imageScreenPos.x) * scaleX));
                     uint32_t cy1 = static_cast<uint32_t>(std::min(float(as.texH), (y1s - imageScreenPos.y) * scaleY));
                     if (cx1 > cx && cy1 > cy) {
                         g_live.cropX = cx; g_live.cropY = cy;
                         g_live.cropW = cx1 - cx; g_live.cropH = cy1 - cy;
-                        g_live.cropActive = true;
-                        std::vector<uint8_t> msg;
-                        anacapa::proto::encodeCrop(msg, cx, cy, cx1-cx, cy1-cy);
-                        sendCommand(msg);
+                        // Always store norm so the crop persists to the next render.
+                        g_live.cropNormX0 = float(cx)  / float(as.texW);
+                        g_live.cropNormY0 = float(cy)  / float(as.texH);
+                        g_live.cropNormX1 = float(cx1) / float(as.texW);
+                        g_live.cropNormY1 = float(cy1) / float(as.texH);
+                        g_live.cropNormActive  = true;
+                        g_live.cropNormIsPanel = false;  // image-display-relative
+                        if (!g_live.done) {
+                            // Renderer is running — also send pixel-precise SET_CROP now
+                            g_live.cropActive = true;
+                            std::vector<uint8_t> msg;
+                            anacapa::proto::encodeCrop(msg, cx, cy, cx1-cx, cy1-cy);
+                            sendCommand(msg);
+                        } else {
+                            g_live.cropActive = false;
+                        }
+                    } else if (g_live.cropActive || g_live.cropNormActive) {
+                        // Click without a real drag — clear the crop
+                        g_live.cropActive     = false;
+                        g_live.cropNormActive = false;
+                        if (!g_live.done) {
+                            std::vector<uint8_t> msg;
+                            anacapa::proto::encodeSimple(msg, anacapa::proto::CLEAR_CROP);
+                            sendCommand(msg);
+                        }
                     }
                 }
 
-                // Draw crop rect overlay
-                if (g_live.cropActive || cropDragging) {
+                // Draw crop rect overlay.  Always use norm coords — they are
+                // always set alongside cropActive, so there is no stale-texW risk.
+                if (g_live.cropNormActive || g_live.cropActive || cropDragging) {
                     ImDrawList* dl = ImGui::GetWindowDrawList();
                     float x0s, y0s, x1s, y1s;
                     if (cropDragging) {
@@ -1459,6 +1568,11 @@ int main(int argc, char** argv)
                         y0s = std::min(cropDragStartY, cmp.y);
                         x1s = std::max(cropDragStartX, cmp.x);
                         y1s = std::max(cropDragStartY, cmp.y);
+                    } else if (g_live.cropNormActive) {
+                        x0s = imageScreenPos.x + g_live.cropNormX0 * dispW;
+                        y0s = imageScreenPos.y + g_live.cropNormY0 * dispH;
+                        x1s = imageScreenPos.x + g_live.cropNormX1 * dispW;
+                        y1s = imageScreenPos.y + g_live.cropNormY1 * dispH;
                     } else {
                         float sx = dispW / float(as.texW);
                         float sy = dispH / float(as.texH);
@@ -1480,6 +1594,63 @@ int main(int argc, char** argv)
                 ImGui::TextDisabled("Waiting for renderer on %s", sockPath.c_str());
             else
                 ImGui::TextDisabled("Slot %d is empty", activeSlot + 1);
+
+            // ---- Pre-launch crop drag (no image loaded yet) ------------------
+            // Store as normalized [0,1] coords; converted to pixels on IMAGE_OPEN.
+            if (socketMode) {
+                ImVec2 panelOrigin = ImGui::GetWindowPos();
+                ImVec2 mp = ImGui::GetIO().MousePos;
+                bool inPanel = mp.x >= panelOrigin.x && mp.x <= panelOrigin.x + imgW &&
+                               mp.y >= panelOrigin.y && mp.y <= panelOrigin.y + imgH;
+
+                if (inPanel && ImGui::IsMouseClicked(ImGuiMouseButton_Left)
+                             && !ImGui::IsAnyItemActive()) {
+                    cropDragging   = true;
+                    cropDragStartX = mp.x;
+                    cropDragStartY = mp.y;
+                }
+                if (cropDragging && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                    cropDragging = false;
+                    float x0s = std::min(cropDragStartX, mp.x);
+                    float y0s = std::min(cropDragStartY, mp.y);
+                    float x1s = std::max(cropDragStartX, mp.x);
+                    float y1s = std::max(cropDragStartY, mp.y);
+                    if (x1s > x0s + 4.f && y1s > y0s + 4.f) {
+                        g_live.cropNormX0 = (x0s - panelOrigin.x) / imgW;
+                        g_live.cropNormY0 = (y0s - panelOrigin.y) / imgH;
+                        g_live.cropNormX1 = (x1s - panelOrigin.x) / imgW;
+                        g_live.cropNormY1 = (y1s - panelOrigin.y) / imgH;
+                        g_live.cropNormActive  = true;
+                        g_live.cropNormIsPanel = true;   // panel-relative coords
+                        g_live.cropPanelW      = imgW;
+                        g_live.cropPanelH      = imgH;
+                        g_live.cropActive      = false;
+                    }
+                }
+
+                // Draw pre-launch crop rect
+                if (g_live.cropNormActive || cropDragging) {
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    float x0s, y0s, x1s, y1s;
+                    if (cropDragging) {
+                        ImVec2 cmp = ImGui::GetIO().MousePos;
+                        x0s = std::min(cropDragStartX, cmp.x);
+                        y0s = std::min(cropDragStartY, cmp.y);
+                        x1s = std::max(cropDragStartX, cmp.x);
+                        y1s = std::max(cropDragStartY, cmp.y);
+                    } else {
+                        x0s = panelOrigin.x + g_live.cropNormX0 * imgW;
+                        y0s = panelOrigin.y + g_live.cropNormY0 * imgH;
+                        x1s = panelOrigin.x + g_live.cropNormX1 * imgW;
+                        y1s = panelOrigin.y + g_live.cropNormY1 * imgH;
+                    }
+                    dl->AddRect({x0s, y0s}, {x1s, y1s},
+                                IM_COL32(255, 200, 0, 220), 0.f, 0, 1.5f);
+                    dl->AddRectFilled({x0s, y0s}, {x1s, y1s},
+                                      IM_COL32(255, 200, 0, 20));
+                }
+                needsRedraw = true;
+            }
         }
 
         // ---- Render control toolbar (socket mode only) -----------------------
@@ -1512,14 +1683,35 @@ int main(int argc, char** argv)
                 anacapa::proto::encodeSimple(msg, anacapa::proto::CANCEL);
                 sendCommand(msg);
             }
-            if (g_live.cropActive) {
+            if (g_live.cropActive || g_live.cropNormActive) {
                 ImGui::SameLine();
                 if (ImGui::Button("Clear Crop")) {
-                    g_live.cropActive = false;
-                    std::vector<uint8_t> msg;
-                    anacapa::proto::encodeSimple(msg, anacapa::proto::CLEAR_CROP);
-                    sendCommand(msg);
+                    g_live.cropActive     = false;
+                    g_live.cropNormActive = false;
+                    if (!g_live.done) {
+                        std::vector<uint8_t> msg;
+                        anacapa::proto::encodeSimple(msg, anacapa::proto::CLEAR_CROP);
+                        sendCommand(msg);
+                    }
                 }
+            }
+            ImGui::End();
+        }
+
+        // ---- Clear Crop button when no render is active (pre-launch or post-render)
+        // g_live.active is never cleared, so use !g_live.done && g_live.active to
+        // detect an in-progress render; the button shows at all other times.
+        bool renderInProgress = g_live.active && !g_live.done;
+        if (socketMode && (g_live.cropNormActive || g_live.cropActive) && !renderInProgress) {
+            ImGui::SetNextWindowPos({imgX + 8.f, menubarH + 8.f});
+            ImGui::SetNextWindowSize({0, 0});
+            ImGui::Begin("##precrop", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_AlwaysAutoResize |
+                ImGuiWindowFlags_NoFocusOnAppearing);
+            if (ImGui::Button("Clear Crop")) {
+                g_live.cropNormActive = false;
+                g_live.cropActive     = false;
             }
             ImGui::End();
         }

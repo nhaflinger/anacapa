@@ -43,12 +43,13 @@
 namespace anacapa {
 
 // ---------------------------------------------------------------------------
-// TileQueue — mutex-protected deque that supports mid-render reprioritization.
-// Worker threads pop() from the front; requestCrop() moves intersecting tiles
-// to the front via stable_partition so they're rendered next.
+// TileQueue — mutex-protected deque with crop-window support.
+// Worker threads pop() from pending; setCrop() moves non-intersecting tiles
+// to the deferred deque so they are skipped until CLEAR_CROP is received.
 // ---------------------------------------------------------------------------
 struct RenderSession::TileQueue {
     std::deque<TileRequest> pending;
+    std::deque<TileRequest> deferred;
     std::mutex              mtx;
 
     void push(const TileRequest& t) { pending.push_back(t); }
@@ -61,20 +62,44 @@ struct RenderSession::TileQueue {
         return t;
     }
 
-    void reprioritize(uint32_t cx, uint32_t cy, uint32_t cw, uint32_t ch) {
+    // Partition pending tiles: those that intersect [cx,cy,cw,ch] stay in
+    // pending; all others move to deferred. Call before dispatching workers.
+    void setCrop(uint32_t cx, uint32_t cy, uint32_t cw, uint32_t ch) {
         std::lock_guard<std::mutex> lk(mtx);
-        std::stable_partition(pending.begin(), pending.end(),
-            [=](const TileRequest& t) {
-                return t.x0 < cx + cw && t.x0 + t.width  > cx &&
-                       t.y0 < cy + ch && t.y0 + t.height > cy;
-            });
+        std::deque<TileRequest> cropTiles;
+        for (auto& t : pending) {
+            bool hit = (t.x0 < cx + cw && t.x0 + t.width  > cx &&
+                        t.y0 < cy + ch && t.y0 + t.height > cy);
+            (hit ? cropTiles : deferred).push_back(t);
+        }
+        pending = std::move(cropTiles);
+    }
+
+    std::vector<TileRequest> takeDeferredTiles() {
+        std::lock_guard<std::mutex> lk(mtx);
+        std::vector<TileRequest> out(deferred.begin(), deferred.end());
+        deferred.clear();
+        return out;
     }
 };
 
 void RenderSession::requestCrop(uint32_t cx, uint32_t cy, uint32_t cw, uint32_t ch) {
+    {
+        std::lock_guard<std::mutex> lk(m_cropMtx);
+        m_cropX = cx; m_cropY = cy; m_cropW = cw; m_cropH = ch;
+    }
+    m_cropCleared.store(false);  // reset so the deferred wait detects a fresh CLEAR_CROP
+    m_cropActive.store(true);
+    // If a queue is already running, defer its remaining non-crop tiles now.
     std::lock_guard<std::mutex> lk(m_queueMtx);
     if (m_activeTileQueue)
-        m_activeTileQueue->reprioritize(cx, cy, cw, ch);
+        m_activeTileQueue->setCrop(cx, cy, cw, ch);
+}
+
+void RenderSession::requestClearCrop() {
+    m_cropActive.store(false);
+    m_cropCleared.store(true);
+    m_pauseCV.notify_all();
 }
 
 // Rotate a point around the Y axis by `degrees`, about the given pivot.
@@ -661,6 +686,22 @@ void RenderSession::render() {
         }
     });
 
+    // When connected to a live viewer, poll until SET_CROP arrives or the
+    // deadline passes.  The viewer sends SET_CROP in response to IMAGE_OPEN;
+    // the round-trip is <1 ms on a Unix socket, but the viewer may be briefly
+    // busy cycling through probe connections (_is_viewer_running checks from
+    // the Blender addon), so we poll in a tight loop for up to 200 ms rather
+    // than a single fixed sleep.  Skip when the crop is already established
+    // from a previous render (m_cropActive persists across renders).
+    if (m_displayDriver && !m_cropActive.load(std::memory_order_relaxed)) {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+        while (!m_cropActive.load(std::memory_order_relaxed) &&
+               std::chrono::steady_clock::now() < deadline) {
+            displayDriver->pollCommands();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+
     // Helper: render a list of tiles and merge into Film.
     // Block until resumed or cancelled.
     auto waitIfPaused = [&]() {
@@ -670,17 +711,24 @@ void RenderSession::render() {
         }
     };
 
-    // tilesOffset shifts the progress counter so adaptive pass numbers continue
-    // from where the base pass left off.
+    // Returns any tiles that were deferred due to an active crop window.
+    // When m_cropActive is set, non-intersecting tiles are moved to the queue's
+    // deferred list and returned so the caller can run them after CLEAR_CROP.
     auto runTiles = [&](const std::vector<TileRequest>& tileList,
                         uint32_t totalExpected,
-                        std::atomic<uint32_t>& completed) {
+                        std::atomic<uint32_t>& completed) -> std::vector<TileRequest> {
         TileQueue queue;
         for (const auto& t : tileList) queue.push(t);
 
+        if (m_cropActive.load(std::memory_order_relaxed)) {
+            uint32_t cx, cy, cw, ch;
+            { std::lock_guard<std::mutex> lk(m_cropMtx); cx=m_cropX; cy=m_cropY; cw=m_cropW; ch=m_cropH; }
+            queue.setCrop(cx, cy, cw, ch);
+        }
+
         { std::lock_guard<std::mutex> lk(m_queueMtx); m_activeTileQueue = &queue; }
 
-        uint32_t n = static_cast<uint32_t>(tileList.size());
+        uint32_t n = static_cast<uint32_t>(queue.pending.size());
         m_threadPool->parallelFor(n, [&](uint32_t) {
             if (m_cancelRequested.load(std::memory_order_relaxed)) return;
             waitIfPaused();
@@ -704,12 +752,15 @@ void RenderSession::render() {
             }
 
             uint32_t done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
-            if (done % 16 == 0 || done == totalExpected)
+            if (done % 16 == 0 || done >= totalExpected)
                 spdlog::info("  {}/{} tiles", done, totalExpected);
         });
 
         { std::lock_guard<std::mutex> lk(m_queueMtx); m_activeTileQueue = nullptr; }
+        return queue.takeDeferredTiles();
     };
+
+    std::vector<TileRequest> allDeferred;
 
     // Push the entire film to the display driver as a single full-image tile.
     // Used after GPU renderFrame() calls which bypass the per-tile loop.
@@ -724,10 +775,8 @@ void RenderSession::render() {
         return !m_cancelRequested.load();
     };
 
-    std::atomic<uint32_t> tilesCompleted{0};
-
-    if (!m_settings.adaptive) {
-        // --- Single-pass: try whole-frame GPU path first ---
+    // Reset GPU accumulation buffer before a new frame.
+    auto clearGpuAccum = [&]() {
 #ifdef ANACAPA_ENABLE_METAL
         if (auto* mp = dynamic_cast<MetalPathIntegrator*>(m_integrator.get()))
             mp->clearAccum();
@@ -736,14 +785,22 @@ void RenderSession::render() {
         if (auto* cp = dynamic_cast<CudaPathIntegrator*>(m_integrator.get()))
             cp->clearAccum();
 #endif
+    };
+
+    std::atomic<uint32_t> tilesCompleted{0};
+
+    if (!m_settings.adaptive) {
+        // --- Single-pass: try whole-frame GPU path first ---
+        clearGpuAccum();
         bool gpuDone = m_integrator->renderFrame(
             m_scene,
             m_settings.imageWidth, m_settings.imageHeight,
             0, m_settings.samplesPerPixel,
             *m_film);
-        if (!gpuDone)
-            runTiles(tiles, totalTiles, tilesCompleted);
-        else if (!pushFrame())
+        if (!gpuDone) {
+            auto d = runTiles(tiles, totalTiles, tilesCompleted);
+            allDeferred.insert(allDeferred.end(), d.begin(), d.end());
+        } else if (!pushFrame())
             goto renderDone;
     } else {
         // --- Adaptive two-pass ---
@@ -757,14 +814,7 @@ void RenderSession::render() {
         // Base pass — use whole-frame GPU dispatch if available (same path as
         // non-adaptive), falling back to per-tile dispatch for CPU integrators.
         spdlog::info("  Adaptive base pass: {} spp", baseSPP);
-#ifdef ANACAPA_ENABLE_METAL
-        if (auto* mp = dynamic_cast<MetalPathIntegrator*>(m_integrator.get()))
-            mp->clearAccum();
-#endif
-#ifdef ANACAPA_ENABLE_CUDA
-        if (auto* cp = dynamic_cast<CudaPathIntegrator*>(m_integrator.get()))
-            cp->clearAccum();
-#endif
+        clearGpuAccum();
         bool baseGpuDone = m_integrator->renderFrame(
             m_scene,
             m_settings.imageWidth, m_settings.imageHeight,
@@ -772,7 +822,8 @@ void RenderSession::render() {
             *m_film);
         if (!baseGpuDone) {
             for (auto& t : tiles) { t.sampleStart = 0; t.sampleCount = baseSPP; }
-            runTiles(tiles, totalTiles, tilesCompleted);
+            auto d = runTiles(tiles, totalTiles, tilesCompleted);
+            allDeferred.insert(allDeferred.end(), d.begin(), d.end());
         } else {
             tilesCompleted.store(totalTiles);
             if (!pushFrame()) goto renderDone;
@@ -850,7 +901,30 @@ void RenderSession::render() {
             uint32_t grandTotal = totalTiles + nAdaptive;
             // shift progress so adaptive logs continue from base-pass count
             adaptiveCompleted.store(totalTiles);
-            runTiles(adaptiveTiles, grandTotal, adaptiveCompleted);
+            auto d = runTiles(adaptiveTiles, grandTotal, adaptiveCompleted);
+            allDeferred.insert(allDeferred.end(), d.begin(), d.end());
+        }
+    }
+
+    // --- Deferred tile phase ---
+    // If a crop window was active, non-crop tiles were skipped. Wait for the
+    // viewer to send CLEAR_CROP (user clicks outside the crop), then render
+    // the deferred tiles at their configured sample ranges.
+    if (!allDeferred.empty() && !m_cancelRequested.load()) {
+        spdlog::info("Crop window active — {} tile(s) deferred. "
+                     "Click 'Clear Crop' in viewer to render full image.",
+                     allDeferred.size());
+        while (!m_cropCleared.load(std::memory_order_relaxed) &&
+               !m_cancelRequested.load(std::memory_order_relaxed)) {
+            std::unique_lock<std::mutex> lk(m_pauseMtx);
+            m_pauseCV.wait_for(lk, std::chrono::milliseconds(200));
+        }
+        if (!m_cancelRequested.load()) {
+            spdlog::info("CLEAR_CROP received — rendering {} deferred tile(s)",
+                         allDeferred.size());
+            std::atomic<uint32_t> deferredCompleted{0};
+            uint32_t deferredTotal = static_cast<uint32_t>(allDeferred.size());
+            runTiles(allDeferred, deferredTotal, deferredCompleted);
         }
     }
 

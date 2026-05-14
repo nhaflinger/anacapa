@@ -7,8 +7,69 @@ import shutil
 import threading
 import queue
 
-from .export import (get_executable, export_usd, build_command,
-                      get_scenes_dir, get_cache_dir, substitute_frame_tokens)
+from .export import (get_executable, get_viewer_executable, export_usd,
+                      build_command, get_scenes_dir, get_cache_dir,
+                      substitute_frame_tokens)
+
+VIEWER_SOCK = "/tmp/anacapa_viewer.sock"
+
+
+def _is_viewer_running():
+    """Try connecting to the viewer socket; return True if it answers."""
+    import socket as _sock
+    try:
+        s = _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM)
+        s.settimeout(0.3)
+        s.connect(VIEWER_SOCK)
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
+def _launch_viewer(viewer_path):
+    """Start the viewer process and wait up to 3 s for its socket to appear."""
+    import time
+    proc = subprocess.Popen([viewer_path, "--listen"])
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        if _is_viewer_running():
+            return proc
+        time.sleep(0.1)
+    return proc  # return even if we timed out — render will still try --display
+
+
+_viewer_proc = None  # module-level handle so it outlives operator instances
+
+
+class ANACAPA_OT_launch_viewer(bpy.types.Operator):
+    """Launch the Anacapa viewer and start listening for a renderer connection"""
+    bl_idname = "anacapa.launch_viewer"
+    bl_label  = "Launch Viewer"
+
+    def execute(self, context):
+        global _viewer_proc
+        viewer_path = get_viewer_executable(context)
+        import os
+        if not os.path.exists(viewer_path):
+            self.report({'ERROR'}, f"Viewer not found: {viewer_path}")
+            return {'CANCELLED'}
+
+        # If viewer is already running, just report and return
+        if _is_viewer_running():
+            self.report({'INFO'}, "Viewer is already running")
+            return {'FINISHED'}
+
+        # Kill stale process if any
+        if _viewer_proc and _viewer_proc.poll() is None:
+            _viewer_proc.terminate()
+
+        _viewer_proc = _launch_viewer(viewer_path)
+        if _is_viewer_running():
+            self.report({'INFO'}, "Viewer launched")
+        else:
+            self.report({'WARNING'}, "Viewer launched but socket not ready yet")
+        return {'FINISHED'}
 
 
 class ANACAPA_OT_render(bpy.types.Operator):
@@ -141,10 +202,32 @@ class ANACAPA_OT_render(bpy.types.Operator):
                                      matassign_paths=matassign_paths,
                                      frame=context.scene.frame_current)
 
-        # Progressive preview PNG goes to a temp path so the Image Editor
-        # can hot-reload it as samples accumulate.  The persisted EXR is
-        # copied to settings.output_path (with $F substituted) at the end.
-        cmd += ["--png", preview_path]
+        # --- Viewer / display driver ---
+        use_viewer = settings.use_viewer
+        if use_viewer:
+            global _viewer_proc
+            viewer_path = get_viewer_executable(context)
+            if not os.path.exists(viewer_path):
+                self.report({'WARNING'},
+                            f"Viewer binary not found at {viewer_path} — rendering without viewer")
+                use_viewer = False
+            elif not _is_viewer_running():
+                if _viewer_proc and _viewer_proc.poll() is None:
+                    _viewer_proc.terminate()
+                _viewer_proc = _launch_viewer(viewer_path)
+
+            if use_viewer:
+                if _is_viewer_running():
+                    cmd += ["--display"]
+                else:
+                    self.report({'WARNING'},
+                                "Viewer not reachable — rendering without live display")
+                    use_viewer = False
+
+        # Progressive PNG preview — only when not using the viewer
+        # (the viewer shows live tiles; Blender just loads the EXR at the end)
+        if not use_viewer:
+            cmd += ["--png", preview_path]
 
         # --- Launch Anacapa ---
         import shlex
@@ -175,7 +258,7 @@ class ANACAPA_OT_render(bpy.types.Operator):
         ANACAPA_OT_render._proc         = proc
         ANACAPA_OT_render._tmp_dir      = tmp_dir
         ANACAPA_OT_render._output_path  = output_path
-        ANACAPA_OT_render._preview_path = preview_path
+        ANACAPA_OT_render._preview_path = None if use_viewer else preview_path
         ANACAPA_OT_render._preview_img  = None
         ANACAPA_OT_render._log_queue    = log_queue
         ANACAPA_OT_render._reader       = reader
@@ -214,8 +297,9 @@ class ANACAPA_OT_render(bpy.types.Operator):
         if last_line:
             context.workspace.status_text_set(f"Anacapa: {last_line}")
 
-        # Update progressive preview if PNG has been written
-        self._refresh_preview(context)
+        # Update progressive preview if PNG has been written (not in viewer mode)
+        if ANACAPA_OT_render._preview_path:
+            self._refresh_preview(context)
 
         # Check if process finished
         ret = ANACAPA_OT_render._proc.poll()
@@ -417,7 +501,7 @@ class ANACAPA_OT_export_scene(bpy.types.Operator):
         return {'FINISHED'}
 
 
-_classes = [ANACAPA_OT_render, ANACAPA_OT_export_scene]
+_classes = [ANACAPA_OT_launch_viewer, ANACAPA_OT_render, ANACAPA_OT_export_scene]
 
 
 def register():
