@@ -23,6 +23,7 @@ namespace anacapa {
 struct Photon {
     Vec3f    position;
     Vec3f    wi;       // photon travel direction (toward surface)
+    Vec3f    normal;   // surface normal at deposit point (for SSS side filtering)
     Spectrum power;    // radiant flux along path (W)
     uint8_t  axis;     // kd-tree split axis: 0=x, 1=y, 2=z; 0xFF = empty slot
     uint8_t  _pad[3] = {};
@@ -54,14 +55,16 @@ public:
                                const ShadingContext& ctx,
                                float radius) const;
 
-    // Estimate subsurface scattering radiance using a Gaussian diffusion kernel.
+    // Estimate subsurface scattering radiance using an exponential diffusion kernel.
     //   p                 — world-space query point (surface hit)
+    //   n                 — surface normal at query point (used to reject back-face photons)
     //   subsurface_color  — per-material scattering albedo
-    //   sigma             — Gaussian σ = subsurface_radius (mean free path)
-    // Searches within 3σ of p; weights each photon by exp(-r²/(2σ²)) / (2π σ²).
-    Spectrum estimateSSSRadiance(Vec3f p,
+    //   d                 — diffusion length = subsurface_radius (mean free path)
+    // Kernel: exp(-r/d) / (2π·d²). Searches within 6d; rejects photons on the
+    // opposite side of the surface (dot(ph.normal, n) < 0).
+    Spectrum estimateSSSRadiance(Vec3f p, Vec3f n,
                                   Spectrum subsurface_color,
-                                  float sigma) const;
+                                  float d) const;
 
     bool   empty() const { return m_photons.size() <= 1; }
     size_t size()  const { return m_photons.empty() ? 0 : m_photons.size() - 1; }

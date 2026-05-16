@@ -141,6 +141,7 @@ void PhotonMapIntegrator::tracePhotons(const SceneView& scene) {
                 // faces and continuing would double-count each photon's energy.
                 Photon ph;
                 ph.position = si.p;
+                ph.normal   = si.n;
                 ph.wi       = photonRay.direction;
                 ph.power    = power;
                 ph.axis     = 0;
@@ -366,7 +367,7 @@ Spectrum PhotonMapIntegrator::Li(const Ray& ray, const SceneView& scene,
                 auto sss = mat->subsurfaceParams();
                 if (sss.weight > 0.f) {
                     Spectrum Lsss = m_sssMap.estimateSSSRadiance(
-                        si.p, sss.color, sss.radius);
+                        si.p, si.n, sss.color, sss.radius);
                     if (!isBlack(Lsss))
                         L += beta * Lsss * sss.weight;
                 }
