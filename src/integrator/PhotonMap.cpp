@@ -82,6 +82,48 @@ void PhotonMap::search(int node, Vec3f p, float radius2,
 }
 
 // ---------------------------------------------------------------------------
+// searchKNN — K-nearest-neighbour search.
+//
+// radius2 is an in-out parameter: it starts as the initial search bound
+// (e.g. (3σ)²) and is progressively shrunk to the distance of the Kth
+// closest photon as the heap fills.  This pruning eliminates kd-subtrees
+// that cannot contain a closer photon, giving O((K + log N)²)-ish cost.
+//
+// The heap is a max-heap keyed on dist² so the Kth-closest photon is always
+// at the top and can be evicted in O(log K) when a closer one is found.
+// ---------------------------------------------------------------------------
+void PhotonMap::searchKNN(int node, Vec3f p, float& radius2,
+                           std::vector<PhotonHit>& heap, size_t maxK) const {
+    if (node >= static_cast<int>(m_photons.size())) return;
+    const Photon& ph = m_photons[node];
+    if (ph.axis == 0xFF) return;
+
+    Vec3f d = p - ph.position;
+    float r2 = d.x*d.x + d.y*d.y + d.z*d.z;
+
+    if (r2 < radius2) {
+        heap.push_back({r2, &ph});
+        std::push_heap(heap.begin(), heap.end()); // max-heap: largest dist² at front
+        if (heap.size() > maxK) {
+            std::pop_heap(heap.begin(), heap.end());
+            heap.pop_back();
+        }
+        // Once the heap is full, shrink the search radius to the farthest kept photon.
+        if (heap.size() == maxK)
+            radius2 = heap.front().dist2;
+    }
+
+    uint8_t axis  = ph.axis;
+    float   axisD = p[axis] - ph.position[axis];
+    int nearChild = (axisD <= 0.f) ? 2*node   : 2*node+1;
+    int farChild  = (axisD <= 0.f) ? 2*node+1 : 2*node;
+
+    searchKNN(nearChild, p, radius2, heap, maxK);
+    if (axisD * axisD < radius2)
+        searchKNN(farChild, p, radius2, heap, maxK);
+}
+
+// ---------------------------------------------------------------------------
 // estimateRadiance — flat-kernel density estimate.
 //
 // Formula: L(p, wo) ≈ (1 / π r²) Σ_j f(p, -ph.wi, wo) * ph.power
@@ -112,6 +154,47 @@ Spectrum PhotonMap::estimateRadiance(Vec3f p, Vec3f n,
     }
 
     return L * (1.f / (kPi * radius * radius));
+}
+
+// ---------------------------------------------------------------------------
+// estimateSSSRadiance — Gaussian-kernel density estimate for subsurface
+// scattering photons.
+//
+// The Gaussian profile exp(-r²/(2σ²)) / (2π σ²) approximates the
+// single-order diffusion profile for the material's mean free path σ.
+// We search within 3σ so we capture 99.7% of the kernel weight.
+// ---------------------------------------------------------------------------
+Spectrum PhotonMap::estimateSSSRadiance(Vec3f p,
+                                         Spectrum subsurface_color,
+                                         float sigma) const {
+    if (m_photons.size() <= 1 || sigma <= 0.f) return {};
+
+    // Fixed-σ Gaussian density estimate — the physically correct approach.
+    //
+    // Search within 2σ (captures 95% of the Gaussian kernel weight) and apply
+    // a Gaussian weight exp(-r²/(2σ²)).  Normalise by 2πσ² (the 2-D Gaussian
+    // integral).  No photon count cap: returning all photons in the radius is
+    // essential — any hard cap in kd-tree traversal order creates visible
+    // straight-line and circular artifacts at kd-node split boundaries.
+    //
+    // For performance: keep σ ≤ 0.1 world-units (10 cm) in typical scenes.
+    // Large σ causes many photons per query and slow renders.
+    float searchR = 2.f * sigma;
+
+    std::vector<const Photon*> nearby;
+    nearby.reserve(256);
+    search(1, p, searchR * searchR, nearby);
+    if (nearby.empty()) return {};
+
+    float sigma2 = sigma * sigma;
+    Spectrum L = {};
+    for (const Photon* ph : nearby) {
+        Vec3f d = p - ph->position;
+        float r2 = d.x*d.x + d.y*d.y + d.z*d.z;
+        float w  = std::exp(-r2 / (2.f * sigma2));
+        L += ph->power * w;
+    }
+    return subsurface_color * L * (1.f / (2.f * kPi * sigma2));
 }
 
 } // namespace anacapa

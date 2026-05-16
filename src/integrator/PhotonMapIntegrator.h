@@ -80,6 +80,7 @@ private:
     const PixelFilter* m_pixelFilter  = nullptr;
 
     PhotonMap    m_causticMap;
+    PhotonMap    m_sssMap;
     LightSampler m_lightSampler;
 };
 

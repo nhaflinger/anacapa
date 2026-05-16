@@ -124,6 +124,7 @@ public:
 
 private:
     void buildCornellBox();
+    void buildCornellBoxSSS();
     void buildAccelStructure();
     void scheduleTiles(std::vector<TileRequest>& tiles) const;
     // Load Alembic curves into m_curvePool (no-op if curvesPath is empty or

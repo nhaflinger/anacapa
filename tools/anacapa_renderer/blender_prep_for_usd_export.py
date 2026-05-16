@@ -4435,8 +4435,15 @@ def _inject_caustic_flags(usd_path):
     except ImportError:
         return
 
-    flagged = {m.name for m in bpy.data.materials if getattr(m, "anacapa_caustic", False)}
-    if not flagged:
+    # Build maps: mat name → (caustic_flag, caustic_radius)
+    mat_caustic = {
+        m.name: (getattr(m, "anacapa_caustic", False),
+                 getattr(m, "anacapa_caustic_radius", 0.0))
+        for m in bpy.data.materials
+        if getattr(m, "anacapa_caustic", False)
+           or getattr(m, "anacapa_caustic_radius", 0.0) > 0.0
+    }
+    if not mat_caustic:
         return
 
     stage = Usd.Stage.Open(usd_path)
@@ -4454,8 +4461,10 @@ def _inject_caustic_flags(usd_path):
         # both the leaf name and the sanitised variant.
         leaf = prim.GetName()
         leaf_clean = leaf.replace("_", " ")
-        if leaf not in flagged and leaf_clean not in flagged:
+        params = mat_caustic.get(leaf) or mat_caustic.get(leaf_clean)
+        if params is None:
             continue
+        flag, radius = params
 
         for desc in Usd.PrimRange(prim):
             if not desc.IsA(UsdShade.Shader):
@@ -4468,12 +4477,83 @@ def _inject_caustic_flags(usd_path):
             if sid != PREVIEW_ID:
                 continue
             shader = UsdShade.Shader(desc)
-            shader.CreateInput("anacapa_caustic", Sdf.ValueTypeNames.Bool).Set(True)
+            if flag:
+                shader.CreateInput("anacapa_caustic", Sdf.ValueTypeNames.Bool).Set(True)
+            if radius > 0.0:
+                shader.CreateInput("anacapa_caustic_radius",
+                                   Sdf.ValueTypeNames.Float).Set(radius)
             touched += 1
 
     if touched:
         stage.Save()
-        print(f"  [caustic] anacapa_caustic=true on {touched} UsdPreviewSurface shader(s)")
+        print(f"  [caustic] wrote caustic params on {touched} UsdPreviewSurface shader(s)")
+
+
+def _inject_sss_params(usd_path):
+    """
+    Walk the exported stage and write subsurface scattering inputs on every
+    UsdPreviewSurface shader whose Blender material has anacapa_subsurface > 0.
+    Writes:
+        float  inputs:subsurface_weight
+        color3 inputs:subsurface_color
+        float  inputs:subsurface_radius
+    """
+    try:
+        import bpy
+    except ImportError:
+        return
+    try:
+        from pxr import Usd, UsdShade, Sdf, Gf
+    except ImportError:
+        return
+
+    sss_mats = {
+        m.name: m for m in bpy.data.materials
+        if getattr(m, "anacapa_subsurface", 0.0) > 0.0
+    }
+    if not sss_mats:
+        return
+
+    stage = Usd.Stage.Open(usd_path)
+    if not stage:
+        return
+
+    PREVIEW_ID = "UsdPreviewSurface"
+    touched = 0
+
+    for prim in stage.Traverse():
+        if not prim.IsA(UsdShade.Material):
+            continue
+        leaf = prim.GetName()
+        leaf_clean = leaf.replace("_", " ")
+        mat = sss_mats.get(leaf) or sss_mats.get(leaf_clean)
+        if mat is None:
+            continue
+
+        weight  = mat.anacapa_subsurface
+        color   = mat.anacapa_subsurface_color       # FloatVectorProperty → tuple
+        radius  = mat.anacapa_subsurface_radius
+
+        for desc in Usd.PrimRange(prim):
+            if not desc.IsA(UsdShade.Shader):
+                continue
+            id_attr = desc.GetAttribute("info:id")
+            if not (id_attr and id_attr.IsValid()):
+                continue
+            tok = id_attr.Get()
+            sid = tok.GetString() if hasattr(tok, "GetString") else str(tok)
+            if sid != PREVIEW_ID:
+                continue
+            shader = UsdShade.Shader(desc)
+            shader.CreateInput("subsurface_weight", Sdf.ValueTypeNames.Float).Set(weight)
+            shader.CreateInput("subsurface_color",  Sdf.ValueTypeNames.Color3f).Set(
+                Gf.Vec3f(color[0], color[1], color[2]))
+            shader.CreateInput("subsurface_radius", Sdf.ValueTypeNames.Float).Set(radius)
+            touched += 1
+
+    if touched:
+        stage.Save()
+        print(f"  [sss] subsurface params injected on {touched} UsdPreviewSurface shader(s)")
 
 
 def post_process_usd(usd_path, sky_texture=""):
@@ -4493,6 +4573,7 @@ def post_process_usd(usd_path, sky_texture=""):
     _patch_dome_light_texture(usd_path, out_dir, explicit_sky=sky_texture)
     _inject_materialx_textures(usd_path)
     _inject_caustic_flags(usd_path)
+    _inject_sss_params(usd_path)
     mtlx_dir = os.path.join(out_dir, "materials")
     _export_materialx_graphs(mtlx_dir)
     _extract_materialx_sidecar(usd_path)

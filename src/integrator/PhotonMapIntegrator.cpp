@@ -32,24 +32,40 @@ void PhotonMapIntegrator::prepare(const SceneView& scene) {
     // skip every specular bounce as non-caustic, and store zero — wasting
     // time and giving the user no visible benefit over --integrator path.
     bool anyCaustic = false;
-    for (const IMaterial* mat : scene.materials) {
-        if (mat && mat->isCausticGenerator()) { anyCaustic = true; break; }
+    bool anySSS     = false;
+    for (size_t i = 0; i < scene.materials.size(); ++i) {
+        const IMaterial* mat = scene.materials[i];
+        if (!mat) continue;
+        if (mat->isCausticGenerator()) anyCaustic = true;
+        auto sss = mat->subsurfaceParams();
+        if (sss.weight > 0.f) {
+            anySSS = true;
+            spdlog::info("  mat[{}]: subsurface weight={:.3f} radius={:.4f}",
+                         i, sss.weight, sss.radius);
+        }
     }
-    if (!anyCaustic) {
-        spdlog::warn("Photon map: no materials are flagged as caustic generators "
-                     "(inputs:anacapa_caustic). The photon pass will produce no "
-                     "caustic photons; consider --integrator path, or flag the "
-                     "focusing surfaces.");
-    }
+    if (anyCaustic)
+        spdlog::info("Photon map: caustic generators present — caustic photons will be traced.");
+    if (anySSS)
+        spdlog::info("Photon map: subsurface scattering enabled — SSS photons will be traced.");
+    if (!anyCaustic && !anySSS)
+        spdlog::info("Photon map: no caustic generators or SSS materials — "
+                     "photon pass will build empty maps (consider --integrator path).");
 
     if (!scene.lights.empty())
         tracePhotons(scene);
 }
 
 // ---------------------------------------------------------------------------
-// tracePhotons — emit photons from lights, trace through specular surfaces,
-// and store caustic photons (those that have made ≥1 specular bounce before
-// their first diffuse hit) in the caustic kd-tree.
+// tracePhotons — emit photons from lights, trace through the scene and
+// populate both the caustic map and the SSS map.
+//
+// Caustic photons: stored at the first diffuse hit after ≥1 specular bounce
+// through a caustic-flagged surface (unchanged from the original behaviour).
+//
+// SSS photons: stored at every hit on a subsurface-enabled surface regardless
+// of bounce history.  After depositing, the photon continues with a Lambertian
+// bounce so that multi-bounce illumination still reaches SSS surfaces.
 // ---------------------------------------------------------------------------
 void PhotonMapIntegrator::tracePhotons(const SceneView& scene) {
     std::mt19937 rng(42);
@@ -58,21 +74,19 @@ void PhotonMapIntegrator::tracePhotons(const SceneView& scene) {
     auto rand1 = [&]() -> float { return u01(rng); };
     auto rand2 = [&]() -> Vec2f { return {u01(rng), u01(rng)}; };
 
-    std::vector<Photon> photons;
-    photons.reserve(static_cast<size_t>(m_numPhotons) / 4); // caustic photons are a subset
+    std::vector<Photon> causticPhotons;
+    std::vector<Photon> sssPhotons;
+    causticPhotons.reserve(static_cast<size_t>(m_numPhotons) / 4);
+    sssPhotons.reserve(static_cast<size_t>(m_numPhotons) / 2);
 
     for (int emitted = 0; emitted < m_numPhotons; ++emitted) {
-        // Select a light proportional to power
         if (m_lightSampler.empty()) break;
         auto sel = m_lightSampler.sample(rand1());
         if (!sel.light || sel.pdf <= 0.f) continue;
 
-        // Sample an emission ray from the light
         LightLeSample les = sel.light->sampleLe(rand2(), rand2());
         if (les.pdfPos <= 0.f || les.pdfDir <= 0.f || isBlack(les.Le)) continue;
 
-        // Initial photon power: Le * |cos θ| / (lightSelectPdf * pdfPos * pdfDir * N)
-        // This normalization ensures the density estimate produces radiance in W/(m²·sr).
         float cosTheta = std::abs(dot(les.dir, les.normal));
         if (cosTheta <= 0.f) continue;
 
@@ -98,7 +112,6 @@ void PhotonMapIntegrator::tracePhotons(const SceneView& scene) {
 
             ShadingContext ctx(si, photonRay.direction);
 
-            // Opacity / alpha cutout: pass through without counting as a bounce
             float opacity = mat->evalOpacity(ctx);
             if (opacity <= 0.f) {
                 photonRay = spawnRay(si.p, si.ng, photonRay.direction);
@@ -109,7 +122,6 @@ void PhotonMapIntegrator::tracePhotons(const SceneView& scene) {
             Vec3f wo = -photonRay.direction;
 
             if (mat->isDelta()) {
-                // Specular surface (mirror / glass): bounce and keep tracing
                 BSDFSample bs = mat->sample(ctx, wo, rand2(), rand1());
                 if (!bs.isValid() || bs.pdf <= 0.f) break;
 
@@ -118,27 +130,35 @@ void PhotonMapIntegrator::tracePhotons(const SceneView& scene) {
 
                 photonRay = spawnRay(si.p, si.n, bs.wi);
                 photonRay.skipStrandID = si.isCurve ? si.strandID : ~0u;
-                // Only specular bounces through caustic-flagged surfaces count
-                // toward "this photon is a caustic photon."  A photon that
-                // refracts through a non-flagged window before hitting the
-                // floor is just direct lighting — let NEE carry that, and
-                // don't store the photon (it'd be wasted storage + bias).
                 if (mat->isCausticGenerator())
                     ++numSpecular;
+            } else if (mat->isSubsurface()) {
+                // SSS surface: deposit once and stop, analogous to caustic
+                // photons.  Bleed-through (light exiting the far face) is
+                // achieved by the Gaussian search radius spanning the geometry
+                // thickness: when σ > half-thickness, the front-face query
+                // finds back-face deposits and vice versa.  Depositing on both
+                // faces and continuing would double-count each photon's energy.
+                Photon ph;
+                ph.position = si.p;
+                ph.wi       = photonRay.direction;
+                ph.power    = power;
+                ph.axis     = 0;
+                sssPhotons.push_back(ph);
+                break; // one deposit per photon path
             } else {
-                // Diffuse surface: store as caustic photon if we bounced through specular
+                // Regular diffuse: store caustic photon if the path came through specular.
                 if (numSpecular > 0) {
                     Photon ph;
                     ph.position = si.p;
-                    ph.wi       = photonRay.direction; // toward surface
+                    ph.wi       = photonRay.direction;
                     ph.power    = power;
-                    ph.axis     = 0; // filled in by build()
-                    photons.push_back(ph);
+                    ph.axis     = 0;
+                    causticPhotons.push_back(ph);
                 }
-                break; // caustic map only: stop at first diffuse hit
+                break;
             }
 
-            // Russian roulette after the first few bounces
             if (bounce >= 2) {
                 float survival = std::min(luminance(power) * 10.f, 0.95f);
                 if (rand1() > survival) break;
@@ -147,9 +167,10 @@ void PhotonMapIntegrator::tracePhotons(const SceneView& scene) {
         }
     }
 
-    spdlog::info("PhotonMap: emitted {} photons, stored {} caustic photons",
-                 m_numPhotons, photons.size());
-    m_causticMap.build(std::move(photons));
+    spdlog::info("PhotonMap: emitted {} photons, stored {} caustic, {} SSS",
+                 m_numPhotons, causticPhotons.size(), sssPhotons.size());
+    m_causticMap.build(std::move(causticPhotons));
+    m_sssMap.build(std::move(sssPhotons));
 }
 
 // ---------------------------------------------------------------------------
@@ -331,10 +352,24 @@ Spectrum PhotonMapIntegrator::Li(const Ray& ray, const SceneView& scene,
 
             // Caustic photon map contribution
             if (!m_causticMap.empty()) {
+                float cr = mat->causticRadius() > 0.f ? mat->causticRadius() : m_searchRadius;
                 Spectrum Lcaustic = m_causticMap.estimateRadiance(
-                    si.p, si.n, wo, *mat, ctx, m_searchRadius);
+                    si.p, si.n, wo, *mat, ctx, cr);
                 if (!isBlack(Lcaustic))
                     L += beta * Lcaustic;
+            }
+
+            // SSS photon map contribution — replaces the diffuse component
+            // in proportion to the subsurface weight (which already reduced
+            // wDiff in the BSDF so the two don't double-count).
+            if (!m_sssMap.empty()) {
+                auto sss = mat->subsurfaceParams();
+                if (sss.weight > 0.f) {
+                    Spectrum Lsss = m_sssMap.estimateSSSRadiance(
+                        si.p, sss.color, sss.radius);
+                    if (!isBlack(Lsss))
+                        L += beta * Lsss * sss.weight;
+                }
             }
         }
 

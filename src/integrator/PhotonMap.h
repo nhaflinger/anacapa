@@ -54,6 +54,15 @@ public:
                                const ShadingContext& ctx,
                                float radius) const;
 
+    // Estimate subsurface scattering radiance using a Gaussian diffusion kernel.
+    //   p                 — world-space query point (surface hit)
+    //   subsurface_color  — per-material scattering albedo
+    //   sigma             — Gaussian σ = subsurface_radius (mean free path)
+    // Searches within 3σ of p; weights each photon by exp(-r²/(2σ²)) / (2π σ²).
+    Spectrum estimateSSSRadiance(Vec3f p,
+                                  Spectrum subsurface_color,
+                                  float sigma) const;
+
     bool   empty() const { return m_photons.size() <= 1; }
     size_t size()  const { return m_photons.empty() ? 0 : m_photons.size() - 1; }
 
@@ -61,6 +70,17 @@ private:
     void buildRecursive(std::vector<Photon>& src, int lo, int hi, int node);
     void search(int node, Vec3f p, float radius2,
                 std::vector<const Photon*>& result) const;
+
+    // KNN search: fills heap with the K nearest photons within the initial
+    // radius2.  radius2 is shrunk progressively as the heap fills, guaranteeing
+    // the K spatially closest photons with no kd-tree-order bias.
+    struct PhotonHit {
+        float        dist2;
+        const Photon* ph;
+        bool operator<(const PhotonHit& o) const { return dist2 < o.dist2; }
+    };
+    void searchKNN(int node, Vec3f p, float& radius2,
+                   std::vector<PhotonHit>& heap, size_t maxK) const;
 
     std::vector<Photon> m_photons; // 1-indexed; slot 0 unused
 };

@@ -497,6 +497,41 @@ static StandardSurfaceMaterial::Params resolveOpenPBRParams(
     else if (p.metalness.value > 0.01f)
         p.specular = FloatTOV(0.0f);
 
+    // Subsurface scattering (OpenPBR / MaterialX standard_surface tokens).
+    // subsurface_radius in MaterialX is a color3 (per-channel radius); we take
+    // the average of R, G, B as our scalar mean free path.  subsurface_scale is
+    // an additional scalar multiplier present in some DCC exports.
+    {
+        float sssWeight = resolveFloatTOV(
+            surface.GetInput(TfToken("subsurface_weight")), 0.0f, stageDir).value;
+        if (sssWeight <= 0.f)   // also try bare "subsurface" used by older exporters
+            sssWeight = resolveFloatTOV(
+                surface.GetInput(TfToken("subsurface")), 0.0f, stageDir).value;
+        p.subsurface = sssWeight;
+
+        if (sssWeight > 0.f) {
+            p.subsurface_color = resolveColorTOV(
+                surface.GetInput(TfToken("subsurface_color")),
+                Spectrum{1.f, 1.f, 1.f}, stageDir);
+
+            // Radius: try subsurface_scale (scalar) first, then average the
+            // color3 subsurface_radius vector if present.
+            float scale = resolveFloatTOV(
+                surface.GetInput(TfToken("subsurface_scale")), 0.f, stageDir).value;
+            if (scale > 0.f) {
+                p.subsurface_radius = scale;
+            } else {
+                SpectrumTOV radVec = resolveColorTOV(
+                    surface.GetInput(TfToken("subsurface_radius")),
+                    Spectrum{0.1f, 0.1f, 0.1f}, stageDir);
+                p.subsurface_radius = (radVec.value.x + radVec.value.y + radVec.value.z) / 3.f;
+            }
+
+            p.subsurface_anisotropy = resolveFloatTOV(
+                surface.GetInput(TfToken("subsurface_anisotropy")), 0.0f, stageDir).value;
+        }
+    }
+
     // Caustic opt-in: a custom bool input `anacapa_caustic` flags this surface
     // as a caustic generator for the photon map integrator.  Off by default so
     // existing scenes with ordinary glass keep using NEE transmittance.
@@ -504,6 +539,11 @@ static StandardSurfaceMaterial::Params resolveOpenPBRParams(
         bool causticVal = false;
         causticIn.Get(&causticVal);
         p.caustic = causticVal;
+    }
+    if (UsdShadeInput crIn = surface.GetInput(TfToken("anacapa_caustic_radius"))) {
+        float crVal = 0.f;
+        crIn.Get(&crVal);
+        p.caustic_radius = crVal;
     }
 
     return p;
@@ -605,7 +645,40 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
         if (!osl && blenderNameSanitized != blenderName)
             osl = tryOsl(blenderNameSanitized);
         if (!osl) osl = tryOsl(mat.GetPrim().GetName().GetString());
-        if (osl) return osl;
+        if (osl) {
+            // Inject SSS params from the UsdPreviewSurface shader (written by
+            // the Blender addon post-processor) into the OslMaterial so the
+            // photon map integrator can query them via subsurfaceParams().
+            UsdShadeShader preview = mat.ComputeSurfaceSource();
+            TfToken previewId;
+            if (preview) preview.GetShaderId(&previewId);
+            if (preview && previewId == TfToken("UsdPreviewSurface")) {
+                float sssWeight = resolveFloatTOV(
+                    preview.GetInput(TfToken("subsurface_weight")), 0.0f, stageDir).value;
+                if (sssWeight <= 0.f)
+                    sssWeight = resolveFloatTOV(
+                        preview.GetInput(TfToken("subsurface")), 0.0f, stageDir).value;
+                if (sssWeight > 0.f) {
+                    SpectrumTOV sssColor = resolveColorTOV(
+                        preview.GetInput(TfToken("subsurface_color")),
+                        Spectrum{1.f, 1.f, 1.f}, stageDir);
+                    float scale = resolveFloatTOV(
+                        preview.GetInput(TfToken("subsurface_scale")), 0.f, stageDir).value;
+                    float radius = scale > 0.f ? scale : [&]{
+                        SpectrumTOV rv = resolveColorTOV(
+                            preview.GetInput(TfToken("subsurface_radius")),
+                            Spectrum{0.1f, 0.1f, 0.1f}, stageDir);
+                        return (rv.value.x + rv.value.y + rv.value.z) / 3.f;
+                    }();
+                    float aniso = resolveFloatTOV(
+                        preview.GetInput(TfToken("subsurface_anisotropy")), 0.0f, stageDir).value;
+                    oslSetSubsurfaceParams(osl.get(), sssWeight, sssColor.value, radius, aniso);
+                    spdlog::info("USDLoader: OSL material '{}' SSS weight={:.3f} radius={:.4f}",
+                                 mat.GetPrim().GetName().GetString(), sssWeight, radius);
+                }
+            }
+            return osl;
+        }
     }
 #endif
 
@@ -639,6 +712,38 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
             p.roughness  = resolveFloatTOVWithFallback(p.roughness,  pvRoughness);
             p.metalness  = resolveFloatTOVWithFallback(p.metalness,  pvMetalness);
             p.opacity    = resolveFloatTOVWithFallback(p.opacity,    pvOpacity);
+
+            // SSS: injected onto the UsdPreviewSurface shader by the Blender
+            // addon post-processor — read it here if OpenPBR didn't have it.
+            if (p.subsurface <= 0.f) {
+                UsdShadeInput sssIn = preview.GetInput(TfToken("subsurface_weight"));
+                spdlog::info("USDLoader SSS debug: preview={} sssIn={}",
+                             preview.GetPath().GetString(),
+                             sssIn ? sssIn.GetAttr().GetPath().GetString() : "<not found>");
+                float sssWeight = resolveFloatTOV(sssIn, 0.0f, stageDir).value;
+                spdlog::info("USDLoader SSS debug: subsurface_weight={:.4f}", sssWeight);
+                if (sssWeight <= 0.f)
+                    sssWeight = resolveFloatTOV(
+                        preview.GetInput(TfToken("subsurface")), 0.0f, stageDir).value;
+                p.subsurface = sssWeight;
+                if (sssWeight > 0.f) {
+                    p.subsurface_color = resolveColorTOV(
+                        preview.GetInput(TfToken("subsurface_color")),
+                        Spectrum{1.f, 1.f, 1.f}, stageDir);
+                    float scale = resolveFloatTOV(
+                        preview.GetInput(TfToken("subsurface_scale")), 0.f, stageDir).value;
+                    if (scale > 0.f) {
+                        p.subsurface_radius = scale;
+                    } else {
+                        SpectrumTOV radVec = resolveColorTOV(
+                            preview.GetInput(TfToken("subsurface_radius")),
+                            Spectrum{0.1f, 0.1f, 0.1f}, stageDir);
+                        p.subsurface_radius = (radVec.value.x + radVec.value.y + radVec.value.z) / 3.f;
+                    }
+                    p.subsurface_anisotropy = resolveFloatTOV(
+                        preview.GetInput(TfToken("subsurface_anisotropy")), 0.0f, stageDir).value;
+                }
+            }
 
             // Normal map: OpenPBR uses geometry_normal; if not resolved,
             // fall back to UsdPreviewSurface normal input.
@@ -745,6 +850,37 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
     p.coat           = resolveFloatTOV(surface.GetInput(TfToken("clearcoat")), 0.f, stageDir).value;
     p.coat_roughness = resolveFloatTOV(surface.GetInput(TfToken("clearcoatRoughness")), 0.1f, stageDir).value;
 
+    // Subsurface scattering — UsdPreviewSurface has no official SSS spec but
+    // Blender and some DCCs write these as extra inputs using MaterialX names.
+    {
+        float sssWeight = resolveFloatTOV(
+            surface.GetInput(TfToken("subsurface_weight")), 0.0f, stageDir).value;
+        if (sssWeight <= 0.f)
+            sssWeight = resolveFloatTOV(
+                surface.GetInput(TfToken("subsurface")), 0.0f, stageDir).value;
+        p.subsurface = sssWeight;
+
+        if (sssWeight > 0.f) {
+            p.subsurface_color = resolveColorTOV(
+                surface.GetInput(TfToken("subsurface_color")),
+                Spectrum{1.f, 1.f, 1.f}, stageDir);
+
+            float scale = resolveFloatTOV(
+                surface.GetInput(TfToken("subsurface_scale")), 0.f, stageDir).value;
+            if (scale > 0.f) {
+                p.subsurface_radius = scale;
+            } else {
+                SpectrumTOV radVec = resolveColorTOV(
+                    surface.GetInput(TfToken("subsurface_radius")),
+                    Spectrum{0.1f, 0.1f, 0.1f}, stageDir);
+                p.subsurface_radius = (radVec.value.x + radVec.value.y + radVec.value.z) / 3.f;
+            }
+
+            p.subsurface_anisotropy = resolveFloatTOV(
+                surface.GetInput(TfToken("subsurface_anisotropy")), 0.0f, stageDir).value;
+        }
+    }
+
     // Emission — emissiveColor may be a constant or a texture.
     // When it is texture-driven the constant fallback is (0,0,0) even though
     // the surface does emit — check the texture path too.
@@ -787,6 +923,11 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
         bool causticVal = false;
         causticIn.Get(&causticVal);
         p.caustic = causticVal;
+    }
+    if (UsdShadeInput crIn = surface.GetInput(TfToken("anacapa_caustic_radius"))) {
+        float crVal = 0.f;
+        crIn.Get(&crVal);
+        p.caustic_radius = crVal;
     }
 
     return std::make_unique<StandardSurfaceMaterial>(p);

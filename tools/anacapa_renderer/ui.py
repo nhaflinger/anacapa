@@ -41,7 +41,6 @@ class ANACAPA_PT_sampling(bpy.types.Panel):
             box.prop(s, "pm_subsurface")
             col = box.column(align=True)
             col.prop(s, "num_photons")
-            col.prop(s, "photon_radius")
         layout.prop(s, "tile_size")
         layout.prop(s, "num_threads")
 
@@ -239,10 +238,28 @@ class ANACAPA_PT_material(bpy.types.Panel):
         layout = self.layout
         layout.use_property_split = True
         mat = context.material
-        layout.prop(mat, "anacapa_caustic")
-        if mat.anacapa_caustic:
-            layout.label(text="Active in --integrator photon mode only.",
-                         icon='INFO')
+
+        # -- Caustics ----------------------------------------------------------
+        box = layout.box()
+        box.label(text="Caustics", icon='LIGHT_SUN')
+        box.prop(mat, "anacapa_caustic", text="Enable Caustic Generator")
+        col = box.column(align=True)
+        col.prop(mat, "anacapa_caustic_radius", text="Caustic Radius")
+        box.label(text="Photon integrator only.  Radius 0 = use scene default.",
+                  icon='INFO')
+
+        layout.separator()
+
+        # -- Subsurface Scattering ---------------------------------------------
+        box = layout.box()
+        box.label(text="Subsurface Scattering", icon='MATFLUID')
+        col = box.column(align=True)
+        col.prop(mat, "anacapa_subsurface",       text="Weight")
+        if mat.anacapa_subsurface > 0.0:
+            col.prop(mat, "anacapa_subsurface_color",  text="Color")
+            col.prop(mat, "anacapa_subsurface_radius", text="Radius")
+            box.label(text="Photon integrator only.  Radius = mean free path (world units).",
+                      icon='INFO')
 
 
 # ---------------------------------------------------------------------------

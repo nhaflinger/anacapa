@@ -1387,6 +1387,16 @@ public:
         return evaluate(ctx, wo, wi).pdf;
     }
 
+    // SSS params injected from USD after construction (via setSubsurfaceParams).
+    void setSubsurfaceParams(float weight, Spectrum color, float radius, float anisotropy) {
+        m_sss.weight     = weight;
+        m_sss.color      = color;
+        m_sss.radius     = radius;
+        m_sss.anisotropy = anisotropy;
+    }
+
+    SubsurfaceParams subsurfaceParams() const override { return m_sss; }
+
 private:
     std::string                 m_shaderName;
     OSL::ShaderGroupRef         m_group;
@@ -1394,6 +1404,7 @@ private:
     Spectrum                    m_baseColor         = {0.5f, 0.5f, 0.5f};
     float                       m_roughness         = 1.0f;  // from dominant GGX lobe, cached at ctor
     Spectrum                    m_probeEmission     = {};    // emission at uv=(0.5,0.5), cached at ctor
+    SubsurfaceParams            m_sss               = {};
 
     // Fallback Marschner material used when ctx.isCurve == true.
     // Constructed at OslMaterial init from the probed OSL closure parameters.
@@ -1679,6 +1690,13 @@ std::unique_ptr<IMaterial> makeOslMaterial(const std::string& shaderName) {
                 shaderName.c_str(), e.what());
         return nullptr;
     }
+}
+
+void oslSetSubsurfaceParams(IMaterial* mat,
+                             float weight, Spectrum color,
+                             float radius, float anisotropy) {
+    if (auto* osl = dynamic_cast<OslMaterial*>(mat))
+        osl->setSubsurfaceParams(weight, color, radius, anisotropy);
 }
 
 } // namespace anacapa

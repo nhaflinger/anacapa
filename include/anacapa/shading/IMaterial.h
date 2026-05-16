@@ -57,6 +57,20 @@ public:
     // Delta materials cannot be connected in BDPT — they must be sampled.
     virtual bool isDelta() const = 0;
 
+    // Parameters for the subsurface scattering layer.  weight == 0 means no SSS.
+    // radius is the mean free path in world units (controls Gaussian blur radius).
+    struct SubsurfaceParams {
+        float    weight     = 0.f;
+        Spectrum color      = {1.f, 1.f, 1.f};
+        float    radius     = 0.1f;
+        float    anisotropy = 0.f;
+    };
+
+    // Returns non-zero weight when this surface has a subsurface scattering layer.
+    // The photon map integrator queries this to deposit and look up SSS photons.
+    virtual SubsurfaceParams subsurfaceParams() const { return {}; }
+    bool isSubsurface() const { return subsurfaceParams().weight > 0.f; }
+
     // True if this material should be treated as a caustic-generating surface.
     // The photon map integrator uses this as an opt-in: photon storage and
     // NEE-through-delta gating only apply to surfaces flagged here.  Non-flagged
@@ -66,6 +80,10 @@ public:
     // Default: false (path/BDPT ignore this; photon mode skips caustic logic
     // on this material).
     virtual bool isCausticGenerator() const { return false; }
+
+    // Per-material caustic search radius override (world units).
+    // 0 means "use the global scene default from --photon-radius".
+    virtual float causticRadius() const { return 0.f; }
 
     // Sample an incident direction given outgoing direction wo (world space).
     // u:         2D stratified sample for direction sampling

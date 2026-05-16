@@ -48,8 +48,8 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
     )
     pm_subsurface: bpy.props.BoolProperty(
         name="Subsurface Map",
-        description="Trace photons into SSS volumes for correct color bleeding and "
-                    "scattering (not yet implemented)",
+        description="Trace photons into SSS surfaces for correct color bleeding. "
+                    "Subsurface Radius is set per-material in the Anacapa material panel.",
         default=False,
     )
     num_photons: bpy.props.IntProperty(
@@ -58,9 +58,10 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
         default=500000, min=1000, max=10000000,
     )
     photon_radius: bpy.props.FloatProperty(
-        name="Search Radius",
-        description="Photon density estimate search radius in world units. "
-                    "Smaller = sharper but noisier; larger = blurrier but cleaner",
+        name="Caustic Search Radius",
+        description="Search radius for caustic photon density estimation (world units). "
+                    "Does NOT affect SSS — set SSS radius per-material. "
+                    "Smaller = sharper but noisier caustics; larger = blurrier but cleaner.",
         default=0.1, min=0.001, max=10.0,
     )
     tile_size: bpy.props.IntProperty(
@@ -225,9 +226,43 @@ def register():
                     "transparent materials are unaffected. Off by default.",
         default=False,
     )
+    bpy.types.Material.anacapa_caustic_radius = bpy.props.FloatProperty(
+        name="Caustic Radius",
+        description="Search radius for caustic photon density estimation (world units). "
+                    "Smaller = sharper but noisier caustics; larger = blurrier but cleaner. "
+                    "0 = use the global scene default.",
+        default=0.0, min=0.0, soft_max=2.0, precision=4,
+    )
+
+    # Per-material: subsurface scattering (drives inputs:subsurface_weight,
+    # subsurface_color, subsurface_radius on UsdPreviewSurface via post-process).
+    # Only meaningful in --integrator photon mode.
+    bpy.types.Material.anacapa_subsurface = bpy.props.FloatProperty(
+        name="Subsurface Weight",
+        description="Subsurface scattering weight [0–1]. Replaces the diffuse "
+                    "layer in proportion; the photon map fills in the scattered "
+                    "contribution. Only active in --integrator photon mode.",
+        default=0.0, min=0.0, max=1.0, precision=3,
+    )
+    bpy.types.Material.anacapa_subsurface_color = bpy.props.FloatVectorProperty(
+        name="Subsurface Color",
+        description="Scattering albedo — the color of light that diffuses "
+                    "through the material (e.g. warm skin tones, waxy yellow).",
+        subtype='COLOR', default=(1.0, 1.0, 1.0), min=0.0, max=1.0,
+    )
+    bpy.types.Material.anacapa_subsurface_radius = bpy.props.FloatProperty(
+        name="Subsurface Radius",
+        description="Mean free path in scene units. Controls how far light "
+                    "bleeds beneath the surface. Larger = softer, wider glow.",
+        default=0.1, min=0.0001, soft_max=1.0, precision=4,
+    )
 
 
 def unregister():
+    del bpy.types.Material.anacapa_subsurface_radius
+    del bpy.types.Material.anacapa_subsurface_color
+    del bpy.types.Material.anacapa_subsurface
+    del bpy.types.Material.anacapa_caustic_radius
     del bpy.types.Material.anacapa_caustic
     del bpy.types.Scene.anacapa
     bpy.utils.unregister_class(AnacapaRenderSettings)

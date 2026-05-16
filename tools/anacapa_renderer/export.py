@@ -945,9 +945,8 @@ def build_command(executable, usd_path, settings, width, height, output_path,
     ]
 
     if settings.integrator == "photon":
-        # Pass 0 photons when caustic map is disabled so the pass is a no-op.
-        # SSS flag is reserved for future use.
-        effective_photons = settings.num_photons if settings.pm_caustics else 0
+        # Trace photons when caustics or SSS map is enabled.
+        effective_photons = settings.num_photons if (settings.pm_caustics or settings.pm_subsurface) else 0
         cmd += [
             "--num-photons",   str(effective_photons),
             "--photon-radius", str(settings.photon_radius),

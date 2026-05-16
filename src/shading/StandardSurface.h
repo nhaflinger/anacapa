@@ -312,7 +312,14 @@ public:
         FloatTOV     opacity       = FloatTOV(1.0f);
         float        transmission  = 0.0f;   // 0 = opaque, 1 = fully transmissive (glass)
         bool         alphaMask     = false;  // true = opacity driven by texture alpha channel
-        bool         caustic       = false;  // photon map opt-in (see IMaterial::isCausticGenerator)
+        bool         caustic        = false;  // photon map opt-in (see IMaterial::isCausticGenerator)
+        float        caustic_radius = 0.f;   // 0 = use global scene default
+
+        // Subsurface scattering layer (photon map path only)
+        float        subsurface            = 0.0f;   // weight [0,1]
+        SpectrumTOV  subsurface_color      = SpectrumTOV({1.f, 1.f, 1.f});
+        float        subsurface_radius     = 0.1f;   // mean free path in world units
+        float        subsurface_anisotropy = 0.0f;   // Henyey-Greenstein g [-1,1]
 
         // Emission
         float        emission       = 0.0f;
@@ -367,7 +374,15 @@ public:
         return r < 0.001f && (m > 0.999f || s > 0.f);
     }
 
-    bool isCausticGenerator() const override { return m_p.caustic; }
+    bool  isCausticGenerator() const override { return m_p.caustic; }
+    float causticRadius()       const override { return m_p.caustic_radius; }
+
+    SubsurfaceParams subsurfaceParams() const override {
+        return { m_p.subsurface,
+                 evalTOV(m_p.subsurface_color, {}),
+                 m_p.subsurface_radius,
+                 m_p.subsurface_anisotropy };
+    }
 
     float roughness() const override { return m_p.roughness.value; }
     float metalness() const override { return m_p.metalness.value; }
@@ -572,7 +587,8 @@ public:
         float wMetal = metal * (1.f - wCoat);
         float wSpec  = spec * (1.f - metal) * specF * (1.f - wCoat);
         float wDiff  = m_p.base * (1.f - metal)
-                     * (1.f - spec * specE) * (1.f - wCoat);
+                     * (1.f - spec * specE) * (1.f - wCoat)
+                     * (1.f - m_p.subsurface); // SSS absorbs the diffuse layer
 
         float wSum = wCoat + wMetal + wSpec + wDiff;
         if (wSum <= 0.f) return {};
@@ -701,7 +717,8 @@ public:
         float wMetal = metal * (1.f - wCoat);
         float wSpec  = spec * (1.f - metal) * specF * (1.f - wCoat);
         float wDiff  = m_p.base * (1.f - metal)
-                     * (1.f - spec * specE) * (1.f - wCoat);
+                     * (1.f - spec * specE) * (1.f - wCoat)
+                     * (1.f - m_p.subsurface); // SSS absorbs the diffuse layer
 
         float wSum = wCoat + wMetal + wSpec + wDiff;
         if (wSum <= 0.f) return {};

@@ -14,6 +14,7 @@
 #include "../sampling/HaltonSampler.h"
 #include "../shading/Lambertian.h"
 #include "../shading/MarschnerHair.h"
+#include "../shading/StandardSurface.h"
 #include "../shading/lights/AreaLight.h"
 #include "../shading/lights/DirectionalLight.h"
 #include "../shading/lights/DomeLight.h"
@@ -127,6 +128,13 @@ RenderSession::RenderSession(RenderSettings settings)
 // loadScene — dispatch to USD loader or built-in Cornell box
 // ---------------------------------------------------------------------------
 void RenderSession::loadScene() {
+    // Built-in test scenes addressable by name instead of a file path.
+    if (m_settings.scenePath == "cornell-sss") {
+        buildCornellBoxSSS();
+        appendAlembicCurves_();
+        return;
+    }
+
 #ifdef ANACAPA_ENABLE_USD
     if (!m_settings.scenePath.empty()) {
         double renderFrame = m_settings.frameSet
@@ -496,6 +504,117 @@ void RenderSession::buildCornellBox() {
     m_lights.push_back(std::move(areaLight));
 
     m_scene.envRadiance = {};
+}
+
+// ---------------------------------------------------------------------------
+// Cornell Box SSS — thin-slab subsurface scattering test scene.
+//
+// Same room geometry as the standard Cornell box.  The two interior blocks are
+// replaced by a single thin vertical SSS panel (20 cm thick, wax-like) centred
+// in the room.  A primary area light sits on the ceiling above the slab, and a
+// secondary back-light is placed behind the slab (away from the camera).
+//
+// With --integrator photon the back-light photons pass through the slab and are
+// deposited on both faces, producing a warm SSS glow visible on the front face
+// even where direct illumination is shadowed.
+//
+// Launch with:
+//   anacapa --scene cornell-sss --integrator photon \
+//           --num-photons 500000 --spp 64 -o sss_test.exr
+// ---------------------------------------------------------------------------
+void RenderSession::buildCornellBoxSSS() {
+    // -- Materials --
+    auto white = std::make_unique<LambertianMaterial>(Spectrum{0.73f, 0.73f, 0.73f});
+    auto red   = std::make_unique<LambertianMaterial>(Spectrum{0.65f, 0.05f, 0.05f});
+    auto green = std::make_unique<LambertianMaterial>(Spectrum{0.12f, 0.45f, 0.15f});
+
+    // SSS slab: warm wax-like material.
+    // subsurface_radius of 0.18 is larger than the slab thickness (0.20), so
+    // photons deposited on the back face scatter to visible depth on the front.
+    StandardSurfaceMaterial::Params sssP;
+    sssP.base_color          = SpectrumTOV({0.90f, 0.75f, 0.60f}); // warm wax base
+    sssP.base                = 1.0f;
+    sssP.roughness           = FloatTOV(0.55f);
+    sssP.specular            = FloatTOV(0.3f);
+    sssP.specular_IOR        = 1.45f;
+    sssP.subsurface          = 0.85f;
+    sssP.subsurface_color    = SpectrumTOV({1.0f, 0.45f, 0.25f}); // deep orange-red bleed
+    sssP.subsurface_radius   = 0.06f;   // σ = slab thickness → 2σ search reaches the far face
+    sssP.subsurface_anisotropy = 0.0f;
+    auto sss = std::make_unique<StandardSurfaceMaterial>(sssP);
+
+    const IMaterial* pWhite = white.get();
+    const IMaterial* pRed   = red.get();
+    const IMaterial* pGreen = green.get();
+    const IMaterial* pSSS   = sss.get();
+
+    m_materials.push_back(std::move(white));
+    m_materials.push_back(std::move(red));
+    m_materials.push_back(std::move(green));
+    m_materials.push_back(std::move(sss));
+
+    auto addQuad = [&](Vec3f v0, Vec3f v1, Vec3f v2, Vec3f v3,
+                       Vec3f inwardNormal,
+                       const IMaterial* mat) -> uint32_t {
+        MeshDesc mesh;
+        mesh.positions = {v0, v1, v2, v3};
+        Vec3f n = safeNormalize(inwardNormal);
+        mesh.normals = {n, n, n, n};
+        mesh.uvs     = {{0,0},{1,0},{1,1},{0,1}};
+        mesh.indices = {0,1,2, 0,2,3};
+        uint32_t id  = m_geomPool.addMesh(std::move(mesh));
+        if (id >= m_scene.materials.size())
+            m_scene.materials.resize(id + 1, nullptr);
+        m_scene.materials[id] = mat;
+        return id;
+    };
+
+    // -- Room walls (same as standard Cornell box) --
+    addQuad({-1,-1,0},{1,-1,0},{1,-1,2},{-1,-1,2}, {0, 1,0}, pWhite); // floor
+    addQuad({-1, 1,2},{1, 1,2},{1, 1,0},{-1, 1,0}, {0,-1,0}, pWhite); // ceiling
+    addQuad({-1,-1,2},{-1,1,2},{1,1,2},{1,-1,2},   {0,0,-1}, pWhite); // back wall
+    addQuad({-1,-1,2},{-1,1,2},{-1,1,0},{-1,-1,0}, { 1,0,0}, pRed);   // left wall
+    addQuad({1,-1,0},{1,1,0},{1,1,2},{1,-1,2},     {-1,0,0}, pGreen); // right wall
+
+    // -- Thin SSS slab: 6 cm thick, nearly full-width, standing upright --
+    // Thickness < σ (12 cm), so photons deposited on the back face fall within
+    // the Gaussian search radius of front-face queries — bleed-through is visible.
+    // The slab spans x in [-0.95, 0.95] to cover nearly the full room width so
+    // light cannot easily leak around the sides.
+    // Front face (-Z, toward camera) at z = 0.97
+    // Back  face (+Z, away from camera) at z = 1.03  (6 cm gap)
+    float sx0 = -0.95f, sx1 = 0.95f;
+    float sy0 = -1.0f,  sy1 =  0.8f;
+    float sz0 =  0.97f, sz1 =  1.03f;
+
+    // Front face — normal toward camera (-Z)
+    addQuad({sx1,sy0,sz0},{sx0,sy0,sz0},{sx0,sy1,sz0},{sx1,sy1,sz0}, {0,0,-1}, pSSS);
+    // Back face  — normal away from camera (+Z)
+    addQuad({sx0,sy0,sz1},{sx1,sy0,sz1},{sx1,sy1,sz1},{sx0,sy1,sz1}, {0,0, 1}, pSSS);
+    // Top cap
+    addQuad({sx0,sy1,sz0},{sx1,sy1,sz0},{sx1,sy1,sz1},{sx0,sy1,sz1}, {0, 1,0}, pSSS);
+    // Left cap
+    addQuad({sx0,sy0,sz1},{sx0,sy0,sz0},{sx0,sy1,sz0},{sx0,sy1,sz1}, { 1,0,0}, pSSS);
+    // Right cap
+    addQuad({sx1,sy0,sz0},{sx1,sy0,sz1},{sx1,sy1,sz1},{sx1,sy1,sz0}, {-1,0,0}, pSSS);
+
+    // -- Back-light: large warm area behind the slab —
+    // These photons must pass through the slab to reach the camera side.
+    // No direct path to the front of the room exists (slab spans almost full width).
+    // cross(u,v) = cross((0,1,0),(1,0,0)) = (0,0,-1) → faces toward camera/slab
+    auto backLight = std::make_unique<AreaLight>(
+        Vec3f{0.f, 0.f, 1.55f},         // center behind slab (well clear of z=1.03)
+        Vec3f{0.f, 0.80f, 0.f},         // u half-extent — tall
+        Vec3f{0.80f, 0.f, 0.f},         // v half-extent — wide  (swap to get -Z normal)
+        Spectrum{3.5f, 2.5f, 1.5f}      // warm orange back-light, low intensity
+    );
+    m_scene.lights.push_back(backLight.get());
+    m_lights.push_back(std::move(backLight));
+
+    m_scene.envRadiance = {};
+
+    spdlog::info("Cornell box SSS test scene: thin slab ({:.0f}cm) with back-light. "
+                 "Use --integrator photon to activate SSS.", (sz1 - sz0) * 100.f);
 }
 
 // ---------------------------------------------------------------------------

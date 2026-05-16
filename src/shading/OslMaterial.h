@@ -37,6 +37,12 @@ void oslAddSearchPath(const std::string& dir);
 // oslAddSearchPath().  Returns nullptr on failure.
 std::unique_ptr<IMaterial> makeOslMaterial(const std::string& shaderName);
 
+// Inject subsurface scattering parameters into an OslMaterial after creation.
+// mat must be a pointer returned by makeOslMaterial(); no-op for other types.
+void oslSetSubsurfaceParams(IMaterial* mat,
+                             float weight, Spectrum color,
+                             float radius, float anisotropy);
+
 #endif  // ANACAPA_ENABLE_OSL
 
 } // namespace anacapa
