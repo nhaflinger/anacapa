@@ -955,8 +955,8 @@ def build_command(executable, usd_path, settings, width, height, output_path,
     if frame is not None:
         cmd += ["--frame", str(int(frame))]
 
-    if settings.interactive:
-        cmd.append("--interactive")
+    if settings.gpu_assist:
+        cmd.append("--gpu-assist")
 
     if settings.num_threads > 0:
         cmd += ["-t", str(settings.num_threads)]

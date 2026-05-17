@@ -68,6 +68,14 @@ struct LaunchParams {
     uint32_t                 numPhotons;
     uint32_t                 frameIndex;
 
+    // SSS photon map — populated when cam.sssMapEnabled != 0.
+    //   sssPhotons       : cell-sorted SSS GpuPhoton entries
+    //   sssHashCellStart : numSSS+1 prefix-sum bucket starts
+    //   sssNumPhotons    : total SSS photon slots
+    GpuPhoton*               sssPhotons;
+    const uint32_t*          sssHashCellStart;
+    uint32_t                 sssNumPhotons;
+
     // Wavefront ray state — used only by the wavefront raygens.
     // wfRays is a flat array of size wfNumRays = tileW * tileH * batchSize.
     // __raygen__wf_bounce skips entries with kWfTerminated set, so a single

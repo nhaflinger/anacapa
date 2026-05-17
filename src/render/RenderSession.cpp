@@ -696,40 +696,40 @@ void RenderSession::render() {
                                     m_settings.imageHeight);
 
 #ifdef ANACAPA_ENABLE_METAL
-    if (m_settings.interactive) {
+    if (m_settings.gpuAssist) {
         auto metalIntegrator = std::make_unique<MetalPathIntegrator>(
             std::string(ANACAPA_METALLIB_PATH));
         if (metalIntegrator->isValid()) {
-            spdlog::info("Interactive mode: using Metal GPU backend");
+            spdlog::info("GPU assist mode: using Metal GPU backend");
             metalIntegrator->setFireflyClamp(m_settings.fireflyClamp);
             if (m_settings.integrator == IntegratorType::PhotonMap)
                 metalIntegrator->setPhotonMap(m_settings.numPhotons, m_settings.photonRadius);
             m_integrator = std::move(metalIntegrator);
         } else {
-            spdlog::warn("--interactive: Metal backend unavailable, "
+            spdlog::warn("--gpu-assist: Metal backend unavailable, "
                          "falling back to CPU path tracer");
         }
     }
 #endif
 
 #ifdef ANACAPA_ENABLE_CUDA
-    if (m_settings.interactive && !m_integrator) {
+    if (m_settings.gpuAssist && !m_integrator) {
         auto cudaIntegrator = std::make_unique<CudaPathIntegrator>();
         if (cudaIntegrator->isValid()) {
-            spdlog::info("Interactive mode: using CUDA GPU backend");
+            spdlog::info("GPU assist mode: using CUDA GPU backend");
             cudaIntegrator->setFireflyClamp(m_settings.fireflyClamp);
             if (m_settings.integrator == IntegratorType::PhotonMap)
                 cudaIntegrator->setPhotonMap(m_settings.numPhotons, m_settings.photonRadius);
             m_integrator = std::move(cudaIntegrator);
         } else {
-            spdlog::warn("--interactive: CUDA backend unavailable, "
+            spdlog::warn("--gpu-assist: CUDA backend unavailable, "
                          "falling back to CPU path tracer");
         }
     }
 #endif
 
-    if (m_settings.interactive && !m_integrator)
-        spdlog::warn("--interactive: GPU backend unavailable, "
+    if (m_settings.gpuAssist && !m_integrator)
+        spdlog::warn("--gpu-assist: GPU backend unavailable, "
                      "using CPU path tracer");
 
     if (!m_integrator) {

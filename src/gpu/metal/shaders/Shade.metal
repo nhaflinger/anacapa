@@ -951,6 +951,77 @@ static float3 queryHashGrid(
 }
 
 // ---------------------------------------------------------------------------
+// SSS photon map density estimate using the dipole-like kernel from CPU
+// estimateSSSRadiance():  exp(-r_lat/d) * norm, with depth attenuation on
+// the back-face.  Smoothstep density fade prevents bias at sparse areas.
+// ---------------------------------------------------------------------------
+static float3 querySSSHashGrid(
+    float3                         p,
+    float3                         n,
+    float3                         subsurfaceColor,
+    float                          d,
+    constant GpuCameraParams&      cam,
+    const device uint32_t*         sssCellStart,
+    const device uint32_t*         sssSortedIdx,
+    const device GpuPhoton*        sssPhotons)
+{
+    if (!cam.sssMapEnabled || d <= 0.f) return float3(0);
+
+    // Hash grid cell size = 6*d_max (set by host), so ±1 traversal covers
+    // the full 6d kernel support.  Per-material: actual search radius = 6*d.
+    float r  = 6.f * d;
+    float r2 = r * r;
+    float cs = cam.sssHashCellSize;
+
+    float3 orig = float3(cam.sssHashOrigin.x, cam.sssHashOrigin.y, cam.sssHashOrigin.z);
+    float3 rel  = p - orig;
+
+    int cx = int(floor(rel.x / cs));
+    int cy = int(floor(rel.y / cs));
+    int cz = int(floor(rel.z / cs));
+
+    uint dimX = cam.sssHashDimX;
+    uint dimY = cam.sssHashDimY;
+    uint dimZ = cam.sssHashDimZ;
+
+    float norm = 1.f / (2.f * M_PI_F * M_PI_F * d * d);
+    float3 Laccum = float3(0);
+    int cnt = 0;
+
+    for (int dz = -1; dz <= 1; ++dz)
+    for (int dy = -1; dy <= 1; ++dy)
+    for (int dx = -1; dx <= 1; ++dx) {
+        int nx = cx + dx, ny = cy + dy, nz = cz + dz;
+        if (nx < 0 || ny < 0 || nz < 0) continue;
+        if (uint(nx) >= dimX || uint(ny) >= dimY || uint(nz) >= dimZ) continue;
+
+        uint cellIdx = uint(nz) * dimX * dimY + uint(ny) * dimX + uint(nx);
+        uint start   = sssCellStart[cellIdx];
+        uint end     = sssCellStart[cellIdx + 1];
+
+        for (uint i = start; i < end; ++i) {
+            GpuPhoton ph = sssPhotons[sssSortedIdx[i]];
+            float3 phPos = float3(ph.position.x, ph.position.y, ph.position.z);
+            float3 diff  = phPos - p;
+            if (dot(diff, diff) > r2) continue;
+            ++cnt;
+            float proj  = dot(diff, n);                              // signed depth
+            float rLat2 = max(0.f, dot(diff, diff) - proj * proj);
+            float rLat  = sqrt(rLat2);
+            float w     = exp(-rLat / d) * norm;
+            if (proj < 0.f) w *= exp(proj / d);                     // back-face depth attenuation
+            float3 phPow = float3(ph.power.x, ph.power.y, ph.power.z);
+            Laccum += phPow * w;
+        }
+    }
+
+    if (cnt < 4) return float3(0);
+    float t  = min(1.f, float(cnt - 4) / 20.f);
+    float ds = t * t * (3.f - 2.f * t);
+    return subsurfaceColor * (Laccum * ds);
+}
+
+// ---------------------------------------------------------------------------
 // Main kernel
 // ---------------------------------------------------------------------------
 kernel void shade(
@@ -978,6 +1049,9 @@ kernel void shade(
     const device uint32_t*                 hashCellStart     [[ buffer(21) ]],
     const device uint32_t*                 sortedPhotonIdx   [[ buffer(22) ]],
     const device GpuPhoton*                photons           [[ buffer(23) ]],
+    const device uint32_t*                 sssCellStart      [[ buffer(24) ]],
+    const device uint32_t*                 sssSortedIdx      [[ buffer(25) ]],
+    const device GpuPhoton*                sssPhotons        [[ buffer(26) ]],
     texture2d<float, access::sample>        envTexture        [[ texture(0) ]],
     uint2                                   gid               [[ thread_position_in_grid ]])
 {
@@ -1276,16 +1350,17 @@ kernel void shade(
         // Direct lighting (skip for delta glass — no area-light PDF)
         float3 wo = -r.direction;
         if (mat.type != kMatGlass) {
-            L += throughput * sampleDirect(hitPos, n, wo,
-                                           mat.type, baseColor,
-                                           mat.roughness, mat.metalness, mat.specular,
-                                           rayTime,
-                                           lights, numLights,
-                                           materials, numMaterials,
-                                           normals, indices, meshIndexOffsets,
-                                           rng, accelStruct, cam, envTexture,
-                                           envMarginalCdf, envConditionalCdf,
-                                           specAlbedoLUT, specAvgAlbedoLUT);
+            float3 Ldirect = sampleDirect(hitPos, n, wo,
+                                          mat.type, baseColor,
+                                          mat.roughness, mat.metalness, mat.specular,
+                                          rayTime,
+                                          lights, numLights,
+                                          materials, numMaterials,
+                                          normals, indices, meshIndexOffsets,
+                                          rng, accelStruct, cam, envTexture,
+                                          envMarginalCdf, envConditionalCdf,
+                                          specAlbedoLUT, specAvgAlbedoLUT);
+            L += throughput * Ldirect;
 
             // Caustic photon map density estimate — only queried when the map
             // has been built (photonMapEnabled != 0) and buffers are non-null.
@@ -1296,6 +1371,17 @@ kernel void shade(
                                                cam, hashCellStart, sortedPhotonIdx, photons,
                                                specAlbedoLUT, specAvgAlbedoLUT);
                 L += throughput * Lcaustic;
+            }
+
+            // SSS photon map density estimate — fires for any SSS material hit.
+            if (mat.isSubsurface && cam.sssMapEnabled
+                && sssCellStart != nullptr && sssPhotons != nullptr) {
+                float3 sssColor = float3(mat.subsurfaceColor.x,
+                                        mat.subsurfaceColor.y,
+                                        mat.subsurfaceColor.z);
+                float3 Lsss = querySSSHashGrid(hitPos, n, sssColor, mat.subsurfaceRadius,
+                                               cam, sssCellStart, sssSortedIdx, sssPhotons);
+                L += throughput * Lsss * mat.subsurfaceWeight;
             }
         }
 
@@ -1469,12 +1555,14 @@ kernel void photonTrace(
     device GpuPhoton*           photons          [[ buffer(7) ]],
     constant GpuPhotonParams&   params           [[ buffer(8) ]],
     acceleration_structure<instancing, primitive_motion> accelStruct [[ buffer(9) ]],
+    device GpuPhoton*           sssPhotons       [[ buffer(10) ]],
     uint gid [[ thread_position_in_grid ]])
 {
     if (gid >= params.numPhotons) return;
 
     // Default: invalid slot
-    photons[gid].power = {0.f, 0.f, 0.f};
+    photons[gid].power    = {0.f, 0.f, 0.f};
+    sssPhotons[gid].power = {0.f, 0.f, 0.f};
 
     if (numLights == 0) return;
 
@@ -1574,6 +1662,28 @@ kernel void photonTrace(
             // "this photon is a caustic photon" — see ShadowRay.h / IMaterial.
             if (mat.causticGenerator) ++numSpecular;
             // Delta surface — throughput unchanged
+
+        } else if (mat.isSubsurface && mat.subsurfaceWeight > 0.f) {
+            // SSS hit — deposit first SSS photon, scatter Lambertian, continue
+            float entrycos  = max(0.f, -dot(r.direction, n));
+            float absorbed  = entrycos * mat.subsurfaceWeight;
+            if (absorbed > 0.f
+                && sssPhotons[gid].power.x == 0.f
+                && sssPhotons[gid].power.y == 0.f
+                && sssPhotons[gid].power.z == 0.f) {
+                float3 sp = power * absorbed;
+                sssPhotons[gid].position = {hitPos.x, hitPos.y, hitPos.z};
+                sssPhotons[gid].wi       = {r.direction.x, r.direction.y, r.direction.z};
+                sssPhotons[gid].power    = {sp.x, sp.y, sp.z};
+            }
+            float transmitted = 1.f - absorbed;
+            power *= transmitted;
+            if (max(max(power.x, power.y), power.z) < 1e-6f) break;
+            // Lambertian scatter and continue
+            r.direction    = cosineSampleHemisphere(rand2(rng), n);
+            r.origin       = hitPos + n * 1e-4f;
+            r.min_distance = 1e-4f;
+            r.max_distance = 1e10f;
 
         } else {
             // Diffuse / GGX hit

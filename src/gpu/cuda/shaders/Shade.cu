@@ -1030,6 +1030,77 @@ float3 queryPhotonMap(float3 p, float3 n, float3 wo,
     return Laccum * (1.0f / (CUDART_PI_F * r2));
 }
 
+// ---------------------------------------------------------------------------
+// SSS photon map density estimate — mirrors CPU estimateSSSRadiance().
+// Dipole-like kernel: exp(-r_lat/d) * norm, with depth attenuation on the
+// back-face (proj < 0).  Smoothstep density fade prevents bias at sparse
+// areas.  Reads from params.sssPhotons + params.sssHashCellStart.
+// ---------------------------------------------------------------------------
+static __forceinline__ __device__
+float3 querySSSPhotonMap(float3 p, float3 n, float3 subsurfaceColor, float d)
+{
+    if (!params.cam.sssMapEnabled
+        || params.sssHashCellStart == nullptr
+        || params.sssPhotons       == nullptr
+        || d <= 0.f)
+        return make_float3(0.f, 0.f, 0.f);
+
+    const float r  = params.cam.sssSearchRadius;
+    const float r2 = r * r;
+    const float cs = params.cam.sssHashCellSize;
+
+    float3 orig = make3(params.cam.sssHashOrigin);
+    float3 rel  = p - orig;
+
+    int cx = (int)floorf(rel.x / cs);
+    int cy = (int)floorf(rel.y / cs);
+    int cz = (int)floorf(rel.z / cs);
+
+    const int dimX = (int)params.cam.sssHashDimX;
+    const int dimY = (int)params.cam.sssHashDimY;
+    const int dimZ = (int)params.cam.sssHashDimZ;
+
+    const float norm = 1.f / (2.f * CUDART_PI_F * CUDART_PI_F * d * d);
+    float3 Laccum = make_float3(0.f, 0.f, 0.f);
+    int    cnt    = 0;
+
+    #pragma unroll
+    for (int dz = -1; dz <= 1; ++dz)
+    #pragma unroll
+    for (int dy = -1; dy <= 1; ++dy)
+    #pragma unroll
+    for (int dx = -1; dx <= 1; ++dx) {
+        int nx = cx + dx, ny = cy + dy, nz = cz + dz;
+        if (nx < 0 || ny < 0 || nz < 0) continue;
+        if (nx >= dimX || ny >= dimY || nz >= dimZ) continue;
+
+        uint32_t cellIdx = (uint32_t)nz * (uint32_t)dimX * (uint32_t)dimY
+                         + (uint32_t)ny * (uint32_t)dimX
+                         + (uint32_t)nx;
+        uint32_t start = __ldg(params.sssHashCellStart + cellIdx);
+        uint32_t end   = __ldg(params.sssHashCellStart + cellIdx + 1);
+
+        for (uint32_t i = start; i < end; ++i) {
+            const GpuPhoton ph = params.sssPhotons[i];
+            float3 phPos = make3(ph.position);
+            float3 diff  = phPos - p;
+            if (dot(diff, diff) > r2) continue;
+            ++cnt;
+            float proj  = dot(diff, n);
+            float rLat2 = fmaxf(0.f, dot(diff, diff) - proj * proj);
+            float rLat  = sqrtf(rLat2);
+            float w     = expf(-rLat / d) * norm;
+            if (proj < 0.f) w *= expf(proj / d);
+            Laccum += make3(ph.power) * w;
+        }
+    }
+
+    if (cnt < 4) return make_float3(0.f, 0.f, 0.f);
+    float t  = fminf(1.f, float(cnt - 4) / 20.f);
+    float ds = t * t * (3.f - 2.f * t);
+    return subsurfaceColor * (Laccum * ds);
+}
+
 // ===========================================================================
 // OptiX programs — shared closesthit / miss + photon and wavefront raygens.
 // ===========================================================================
@@ -1071,7 +1142,10 @@ extern "C" __global__ void __raygen__photon()
     if (gid >= params.numPhotons) return;
 
     // Default to "invalid slot" — the host hash-grid builder filters these out.
-    params.photons[gid].power = {0.f, 0.f, 0.f};
+    params.photons[gid].power    = {0.f, 0.f, 0.f};
+    // SSS photon slot — also default invalid until a SSS hit deposits.
+    if (params.sssPhotons != nullptr)
+        params.sssPhotons[gid].power = {0.f, 0.f, 0.f};
 
     if (params.numLights == 0) return;
 
@@ -1168,6 +1242,28 @@ extern "C" __global__ void __raygen__photon()
             // direct lighting that NEE already covers (and would otherwise
             // produce wasted photons that show up as splotchy bias).
             if (mat.causticGenerator) ++numSpecular;
+            continue;
+        }
+
+        // SSS hit — deposit first SSS photon, scatter Lambertian, continue.
+        if (mat.isSubsurface && mat.subsurfaceWeight > 0.f
+            && params.sssPhotons != nullptr) {
+            float entrycos = fmaxf(0.f, -dot(rayDir, geomN));
+            float absorbed = entrycos * mat.subsurfaceWeight;
+            const GpuPhoton& sp = params.sssPhotons[gid];
+            if (absorbed > 0.f && sp.power.x == 0.f
+                && sp.power.y == 0.f && sp.power.z == 0.f) {
+                float3 ssp = power * absorbed;
+                params.sssPhotons[gid].position = {hitPos.x, hitPos.y, hitPos.z};
+                params.sssPhotons[gid].wi       = {rayDir.x, rayDir.y, rayDir.z};
+                params.sssPhotons[gid].power    = {ssp.x, ssp.y, ssp.z};
+            }
+            float transmitted = 1.f - absorbed;
+            power = power * transmitted;
+            if (compmax(power) < 1e-6f) break;
+            // Lambertian scatter using existing per-thread RNG
+            rayDir  = cosineSampleHemisphere(rand2(rng), geomN);
+            rayOrig = hitPos + geomN * 1e-4f;
             continue;
         }
 
@@ -1606,11 +1702,16 @@ extern "C" __global__ void __raygen__wf_bounce()
     float3 wo = -1.0f * rayDir;
 
     // ---- NEE + photon-map (mat is non-glass / non-emissive here) -----------
-    L += throughput * sampleDirect(hitPos, n, wo,
-                                   mat.type, baseColor,
-                                   mat.roughness, mat.metalness,
-                                   mat.specular,
-                                   rng, rayTime);
+    {
+        float3 Ldirect = sampleDirect(hitPos, n, wo,
+                                      mat.type, baseColor,
+                                      mat.roughness, mat.metalness,
+                                      mat.specular,
+                                      rng, rayTime);
+        if (mat.isSubsurface)
+            Ldirect = Ldirect * (1.0f - mat.subsurfaceWeight);
+        L += throughput * Ldirect;
+    }
     // Photon map only fires at the first non-glass hit on the camera path,
     // signalled by prevWasDelta still being set from the camera-vertex
     // initialisation (gets cleared after the first diffuse/glossy bounce).
@@ -1620,6 +1721,12 @@ extern "C" __global__ void __raygen__wf_bounce()
                                           mat.roughness, mat.metalness,
                                           mat.specular);
         L += throughput * Lcaustic;
+    }
+    // SSS photon map — fires for any SSS material hit (all bounces, not just first).
+    if (mat.isSubsurface && params.cam.sssMapEnabled) {
+        float3 sssColor = make3(mat.subsurfaceColor);
+        float3 Lsss = querySSSPhotonMap(hitPos, n, sssColor, mat.subsurfaceRadius);
+        L += throughput * Lsss;
     }
 
     // ---- Russian roulette --------------------------------------------------

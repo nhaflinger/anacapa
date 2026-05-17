@@ -30,7 +30,7 @@ class ANACAPA_PT_sampling(bpy.types.Panel):
         layout.separator()
         layout.use_property_split = True
 
-        layout.prop(s, "interactive")
+        layout.prop(s, "gpu_assist")
         layout.separator()
         layout.prop(s, "samples")
         layout.prop(s, "max_depth")

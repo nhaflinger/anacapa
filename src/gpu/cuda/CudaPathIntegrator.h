@@ -9,7 +9,7 @@ namespace anacapa {
 // CudaPathIntegrator — GPU-accelerated path tracer (pure CUDA backend)
 //
 // Implements the same IIntegrator interface as MetalPathIntegrator.
-// Selected at runtime when --interactive is passed and ANACAPA_ENABLE_CUDA
+// Selected at runtime when --gpu-assist is passed and ANACAPA_ENABLE_CUDA
 // is defined.
 //
 // Feature parity with CPU PathIntegrator (not BDPT):

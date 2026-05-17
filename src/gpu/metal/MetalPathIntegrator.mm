@@ -107,6 +107,20 @@ struct MetalPathIntegrator::Impl {
     uint32_t  validPhotons        = 0;   // photons actually stored after trace
     uint32_t  frameIndex          = 0;
 
+    // SSS photon map — built alongside the caustic map when SSS materials are present.
+    id<MTLBuffer>  sssPhotonBuf          = nil;  // GpuPhoton[numPhotons] — SSS trace output
+    id<MTLBuffer>  sssHashCellStartBuf   = nil;  // uint32_t[numCells+1]
+    id<MTLBuffer>  sssSortedPhotonIdxBuf = nil;  // uint32_t[sssValidPhotons]
+    bool      sssMapEnabled       = false;
+    float     sssSearchRadius     = 0.1f;
+    float     sssD_max            = 0.f;   // max(radius*scale) across all SSS materials
+    GpuFloat3 sssHashGridOrigin   = {0.f, 0.f, 0.f};
+    float     sssHashCellSize     = 0.1f;
+    uint32_t  sssHashGridDimX     = 0;
+    uint32_t  sssHashGridDimY     = 0;
+    uint32_t  sssHashGridDimZ     = 0;
+    uint32_t  sssValidPhotons     = 0;
+
     void buildPhotonMap(id<MTLDevice> dev, id<MTLCommandQueue> cq,
                         id<MTLAccelerationStructure> tlas,
                         id<MTLBuffer> lightBufMTL, uint32_t nLights,
@@ -154,6 +168,18 @@ static id<MTLComputePipelineState> makePSO(id<MTLDevice> device,
 
 // Attempt to read base_color / emission from a CPU IMaterial*.
 // Returns defaults for unknown types.
+// Populate SSS fields in a GpuMaterial from the CPU IMaterial's subsurfaceParams().
+// Called as a post-processing step after all type-detection branches.
+static void fillSSSFields(GpuMaterial& gm, const IMaterial* mat) {
+    if (!mat) return;
+    auto sss = mat->subsurfaceParams();
+    if (sss.weight <= 0.f) return;
+    gm.isSubsurface      = 1u;
+    gm.subsurfaceWeight  = sss.weight;
+    gm.subsurfaceColor   = {sss.color.x, sss.color.y, sss.color.z};
+    gm.subsurfaceRadius  = sss.radius * sss.scale;
+}
+
 static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
     GpuMaterial gm{};
     gm.baseColor  = {0.5f, 0.5f, 0.5f};
@@ -230,6 +256,7 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
             gm.metalness   = ssm->params().metalness.value;
             gm.specular    = ssm->params().specular.value;
             gm.specularIOR = ssm->params().specular_IOR;
+            fillSSSFields(gm, mat);
             return gm;
         }
     }
@@ -243,6 +270,7 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
         gm.baseColor = {alb.x, alb.y, alb.z};
         gm.roughness = mat->roughness();
         gm.metalness = mat->metalness();
+        fillSSSFields(gm, mat);
         return gm;
     }
 
@@ -253,6 +281,7 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
         Spectrum alb = mat->reflectance(ctx);
         gm.baseColor = {alb.x, alb.y, alb.z};
     }
+    fillSSSFields(gm, mat);
     return gm;
 }
 
@@ -441,10 +470,12 @@ void MetalPathIntegrator::Impl::buildPhotonMap(
 
     spdlog::info("MetalPathIntegrator: tracing {} photons on GPU...", numPhotons);
 
-    // --- 1. Allocate photon output buffer ---
+    // --- 1. Allocate photon output buffers (caustic + SSS) ---
     size_t photonBytes = static_cast<size_t>(numPhotons) * sizeof(GpuPhoton);
     photonBuf = [dev newBufferWithLength:photonBytes options:MTLResourceStorageModeShared];
     memset([photonBuf contents], 0, photonBytes);
+    sssPhotonBuf = [dev newBufferWithLength:photonBytes options:MTLResourceStorageModeShared];
+    memset([sssPhotonBuf contents], 0, photonBytes);
 
     // --- 2. Upload params ---
     GpuPhotonParams params{};
@@ -473,6 +504,7 @@ void MetalPathIntegrator::Impl::buildPhotonMap(
     [enc setBuffer:photonBuf     offset:0 atIndex:7];
     [enc setBuffer:paramsBuf     offset:0 atIndex:8];
     [enc setAccelerationStructure:tlas atBufferIndex:9];
+    [enc setBuffer:sssPhotonBuf  offset:0 atIndex:10];
     [enc useResource:tlas usage:MTLResourceUsageRead];
     for (void* blasVoid : accel->blasHandles())
         [enc useResource:(__bridge id<MTLAccelerationStructure>)blasVoid usage:MTLResourceUsageRead];
@@ -503,12 +535,7 @@ void MetalPathIntegrator::Impl::buildPhotonMap(
     validPhotons = validCount;
     spdlog::info("MetalPathIntegrator: {} valid caustic photons (of {} traced)", validCount, numPhotons);
 
-    if (validCount == 0) {
-        hashCellStartBuf   = nil;
-        sortedPhotonIdxBuf = nil;
-        return;
-    }
-
+    if (validCount > 0) {
     // Expand AABB by one cell on each side
     float cs  = photonSearchRadius;
     hashCellSize   = cs;
@@ -562,6 +589,85 @@ void MetalPathIntegrator::Impl::buildPhotonMap(
                                          options:MTLResourceStorageModeShared];
     spdlog::info("MetalPathIntegrator: photon hash grid {}x{}x{} ({} cells)",
                  hashGridDimX, hashGridDimY, hashGridDimZ, numCells);
+    } else {
+        hashCellStartBuf   = nil;
+        sortedPhotonIdxBuf = nil;
+    }
+
+    // --- 5. Build SSS hash grid from sssPhotonBuf ---
+    const GpuPhoton* sssRaw = (const GpuPhoton*)[sssPhotonBuf contents];
+    float sMinX =  1e30f, sMinY =  1e30f, sMinZ =  1e30f;
+    float sMaxX = -1e30f, sMaxY = -1e30f, sMaxZ = -1e30f;
+    uint32_t sssCount = 0;
+    for (uint32_t i = 0; i < numPhotons; ++i) {
+        const GpuPhoton& ph = sssRaw[i];
+        if (ph.power.x == 0.f && ph.power.y == 0.f && ph.power.z == 0.f) continue;
+        ++sssCount;
+        sMinX = std::min(sMinX, ph.position.x); sMinY = std::min(sMinY, ph.position.y); sMinZ = std::min(sMinZ, ph.position.z);
+        sMaxX = std::max(sMaxX, ph.position.x); sMaxY = std::max(sMaxY, ph.position.y); sMaxZ = std::max(sMaxZ, ph.position.z);
+    }
+    sssValidPhotons = sssCount;
+    spdlog::info("MetalPathIntegrator: {} valid SSS photons (of {} traced)", sssCount, numPhotons);
+
+    if (sssCount == 0) {
+        sssMapEnabled         = false;
+        sssHashCellStartBuf   = nil;
+        sssSortedPhotonIdxBuf = nil;
+    } else {
+        // Cell size = search radius = 6*d_max so that a ±1 cell traversal
+        // (27 cells) covers the full kernel support.  Floor at photonSearchRadius
+        // for scenes with no SSS or very small d.
+        float scsIdeal = (sssD_max > 0.f) ? 6.f * sssD_max : photonSearchRadius;
+        float scs = std::max(scsIdeal, photonSearchRadius);
+        sssHashCellSize = scs;
+        sMinX -= scs; sMinY -= scs; sMinZ -= scs;
+        sMaxX += scs; sMaxY += scs; sMaxZ += scs;
+        sssHashGridOrigin = {sMinX, sMinY, sMinZ};
+        sssHashGridDimX   = static_cast<uint32_t>(std::ceil((sMaxX - sMinX) / scs)) + 1;
+        sssHashGridDimY   = static_cast<uint32_t>(std::ceil((sMaxY - sMinY) / scs)) + 1;
+        sssHashGridDimZ   = static_cast<uint32_t>(std::ceil((sMaxZ - sMinZ) / scs)) + 1;
+        uint32_t sssNumCells = sssHashGridDimX * sssHashGridDimY * sssHashGridDimZ;
+
+        struct SssCell { uint32_t photonIdx; uint32_t cellIdx; };
+        std::vector<SssCell> sssAssignments;
+        sssAssignments.reserve(sssCount);
+        for (uint32_t i = 0; i < numPhotons; ++i) {
+            const GpuPhoton& ph = sssRaw[i];
+            if (ph.power.x == 0.f && ph.power.y == 0.f && ph.power.z == 0.f) continue;
+            uint32_t ix = static_cast<uint32_t>((ph.position.x - sMinX) / scs);
+            uint32_t iy = static_cast<uint32_t>((ph.position.y - sMinY) / scs);
+            uint32_t iz = static_cast<uint32_t>((ph.position.z - sMinZ) / scs);
+            ix = std::min(ix, sssHashGridDimX - 1);
+            iy = std::min(iy, sssHashGridDimY - 1);
+            iz = std::min(iz, sssHashGridDimZ - 1);
+            uint32_t cellIdx = iz * sssHashGridDimX * sssHashGridDimY
+                             + iy * sssHashGridDimX + ix;
+            sssAssignments.push_back({i, cellIdx});
+        }
+        std::sort(sssAssignments.begin(), sssAssignments.end(),
+                  [](const SssCell& a, const SssCell& b){ return a.cellIdx < b.cellIdx; });
+
+        std::vector<uint32_t> sssCellStart(sssNumCells + 1, 0);
+        for (const auto& sc : sssAssignments)
+            sssCellStart[sc.cellIdx + 1]++;
+        for (uint32_t c = 0; c < sssNumCells; ++c)
+            sssCellStart[c + 1] += sssCellStart[c];
+
+        std::vector<uint32_t> sssSortedIdx(sssCount);
+        for (uint32_t i = 0; i < sssCount; ++i)
+            sssSortedIdx[i] = sssAssignments[i].photonIdx;
+
+        sssHashCellStartBuf = [dev newBufferWithBytes:sssCellStart.data()
+                                               length:sssCellStart.size() * sizeof(uint32_t)
+                                              options:MTLResourceStorageModeShared];
+        sssSortedPhotonIdxBuf = [dev newBufferWithBytes:sssSortedIdx.data()
+                                                 length:sssSortedIdx.size() * sizeof(uint32_t)
+                                                options:MTLResourceStorageModeShared];
+        sssMapEnabled = true;
+        sssSearchRadius = scs;   // matches hash cell size → ±1 traversal in shader
+        spdlog::info("MetalPathIntegrator: SSS hash grid {}x{}x{} ({} cells)",
+                     sssHashGridDimX, sssHashGridDimY, sssHashGridDimZ, sssNumCells);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -618,12 +724,19 @@ void MetalPathIntegrator::prepare(const SceneView& scene) {
         m_impl->numHairMats = nSlots;
     }
 
-    // Upload materials
+    // Upload materials; compute sssD_max for SSS hash grid sizing
     uint32_t nMat = static_cast<uint32_t>(scene.materials.size());
     m_impl->matBuf  = std::make_unique<MetalBuffer<GpuMaterial>>(
         (__bridge void*)dev, std::max(nMat, 1u));
-    for (uint32_t i = 0; i < nMat; ++i)
+    m_impl->sssD_max = 0.f;
+    for (uint32_t i = 0; i < nMat; ++i) {
         (*m_impl->matBuf)[i] = extractGpuMaterial(scene.materials[i]);
+        if (scene.materials[i]) {
+            auto sss = scene.materials[i]->subsurfaceParams();
+            if (sss.weight > 0.f)
+                m_impl->sssD_max = std::max(m_impl->sssD_max, sss.radius * sss.scale);
+        }
+    }
     m_impl->numMaterials = nMat;
 
     // Upload lights (including dome/infinite lights)
@@ -830,6 +943,14 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     camParams.hashGridDimX      = m_impl->hashGridDimX;
     camParams.hashGridDimY      = m_impl->hashGridDimY;
     camParams.hashGridDimZ      = m_impl->hashGridDimZ;
+    // SSS photon map
+    camParams.sssMapEnabled    = m_impl->sssMapEnabled && (m_impl->sssValidPhotons > 0) ? 1u : 0u;
+    camParams.sssSearchRadius  = m_impl->sssSearchRadius;
+    camParams.sssHashOrigin    = m_impl->sssHashGridOrigin;
+    camParams.sssHashCellSize  = m_impl->sssHashCellSize;
+    camParams.sssHashDimX      = m_impl->sssHashGridDimX;
+    camParams.sssHashDimY      = m_impl->sssHashGridDimY;
+    camParams.sssHashDimZ      = m_impl->sssHashGridDimZ;
     // Camera motion blur
     camParams.hasMotion = cam.hasMotion ? 1u : 0u;
     camParams.originClose     = {cam.originClose.x,     cam.originClose.y,     cam.originClose.z};
@@ -925,6 +1046,10 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
             [enc setBuffer:m_impl->sortedPhotonIdxBuf offset:0 atIndex:22];
         if (m_impl->photonBuf)
             [enc setBuffer:m_impl->photonBuf          offset:0 atIndex:23];
+        // SSS photon map hash grid (use photonBuf as dummy when SSS not active)
+        [enc setBuffer:(m_impl->sssHashCellStartBuf   ?: m_impl->photonBuf) offset:0 atIndex:24];
+        [enc setBuffer:(m_impl->sssSortedPhotonIdxBuf ?: m_impl->photonBuf) offset:0 atIndex:25];
+        [enc setBuffer:(m_impl->sssPhotonBuf          ?: m_impl->photonBuf) offset:0 atIndex:26];
         [enc setTexture:envTex atIndex:0];
         [enc useResource:tlas usage:MTLResourceUsageRead];
         for (void* blasVoid : m_impl->accel->blasHandles())
@@ -1029,6 +1154,14 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
     camParams.hashGridDimX      = m_impl->hashGridDimX;
     camParams.hashGridDimY      = m_impl->hashGridDimY;
     camParams.hashGridDimZ      = m_impl->hashGridDimZ;
+    // SSS photon map
+    camParams.sssMapEnabled    = m_impl->sssMapEnabled && (m_impl->sssValidPhotons > 0) ? 1u : 0u;
+    camParams.sssSearchRadius  = m_impl->sssSearchRadius;
+    camParams.sssHashOrigin    = m_impl->sssHashGridOrigin;
+    camParams.sssHashCellSize  = m_impl->sssHashCellSize;
+    camParams.sssHashDimX      = m_impl->sssHashGridDimX;
+    camParams.sssHashDimY      = m_impl->sssHashGridDimY;
+    camParams.sssHashDimZ      = m_impl->sssHashGridDimZ;
     // Camera motion blur
     camParams.hasMotion = cam.hasMotion ? 1u : 0u;
     camParams.originClose     = {cam.originClose.x,     cam.originClose.y,     cam.originClose.z};
@@ -1117,6 +1250,10 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
             [enc setBuffer:m_impl->sortedPhotonIdxBuf offset:0 atIndex:22];
         if (m_impl->photonBuf)
             [enc setBuffer:m_impl->photonBuf          offset:0 atIndex:23];
+        // SSS photon map hash grid (use photonBuf as dummy when SSS not active)
+        [enc setBuffer:(m_impl->sssHashCellStartBuf   ?: m_impl->photonBuf) offset:0 atIndex:24];
+        [enc setBuffer:(m_impl->sssSortedPhotonIdxBuf ?: m_impl->photonBuf) offset:0 atIndex:25];
+        [enc setBuffer:(m_impl->sssPhotonBuf          ?: m_impl->photonBuf) offset:0 atIndex:26];
 
         // Environment texture (index 0); fallback 1×1 white if no HDRI loaded
         id<MTLTexture> envTex = m_impl->envTexture

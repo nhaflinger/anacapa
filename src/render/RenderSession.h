@@ -64,7 +64,7 @@ struct RenderSettings {
     float          lightAngle     = 0.f;  // Angular radius for directional lights (degrees, 0=hard)
     bool           adaptive       = true;  // Enable adaptive per-tile sample allocation
     uint32_t       adaptiveBaseSpp = 0;   // 0 = auto (spp/4, min 16)
-    bool           interactive     = false; // Use GPU (Metal) backend when available
+    bool           gpuAssist       = false; // Use GPU (Metal/CUDA) backend when available
     bool           overrideLights    = false; // Replace scene lights with a simple white directional
     bool           overrideMaterials = false; // Replace all scene materials with white Lambertian
     std::string    pngPath;                   // If set, write sRGB-encoded PNG alongside EXR (no tone mapping)

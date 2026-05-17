@@ -80,7 +80,11 @@ struct GpuMaterial {
     // the surface uses ordinary NEE-through-glass transmittance even with a
     // photon map active; when 1 the photon-map gate fires here.
     uint32_t        causticGenerator;
-    uint32_t        _pad0;
+    // Subsurface scattering layer (SSS photon map).
+    uint32_t        isSubsurface;       // 1 = has SSS layer
+    float           subsurfaceWeight;   // [0,1] mixing weight
+    GpuFloat3       subsurfaceColor;    // scatter tint
+    float           subsurfaceRadius;   // effective d = radius * scale (precomputed by host)
 };
 
 // ---------------------------------------------------------------------------
@@ -208,6 +212,15 @@ struct GpuCameraParams {
     uint32_t  hashGridDimX;
     uint32_t  hashGridDimY;
     uint32_t  hashGridDimZ;
+
+    // SSS photon map hash grid (Metal buffers 24/25/26 for sssPhotons/sssCellStart/sssSortedIdx).
+    uint32_t  sssMapEnabled;
+    float     sssSearchRadius;
+    GpuFloat3 sssHashOrigin;
+    float     sssHashCellSize;
+    uint32_t  sssHashDimX;
+    uint32_t  sssHashDimY;
+    uint32_t  sssHashDimZ;
 };
 
 // ---------------------------------------------------------------------------

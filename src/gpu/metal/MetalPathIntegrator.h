@@ -22,7 +22,7 @@ class MetalContext;
 //   - No BDPT, no OSL
 //
 // This is appropriate for interactive/preview renders where speed > full
-// accuracy. Use --interactive to select this integrator.
+// accuracy. Use --gpu-assist to select this integrator.
 // ---------------------------------------------------------------------------
 class MetalPathIntegrator : public IIntegrator {
 public:

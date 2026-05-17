@@ -56,6 +56,16 @@ namespace anacapa {
 // ---------------------------------------------------------------------------
 // Material / light extraction (identical logic to Metal backend)
 // ---------------------------------------------------------------------------
+static void fillSSSFields(GpuMaterial& gm, const IMaterial* mat) {
+    if (!mat) return;
+    auto sss = mat->subsurfaceParams();
+    if (sss.weight <= 0.f) return;
+    gm.isSubsurface     = 1u;
+    gm.subsurfaceWeight = sss.weight;
+    gm.subsurfaceColor  = {sss.color.x, sss.color.y, sss.color.z};
+    gm.subsurfaceRadius = sss.radius * sss.scale;
+}
+
 static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
     GpuMaterial gm{};
     gm.baseColor   = {0.5f, 0.5f, 0.5f};
@@ -130,6 +140,7 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
         gm.metalness   = ssm->params().metalness.value;
         gm.specular    = ssm->params().specular.value;
         gm.specularIOR = ssm->params().specular_IOR;
+        fillSSSFields(gm, mat);
         return gm;
     }
     if (mat->flags() & BSDFFlag_Glossy) {
@@ -140,6 +151,7 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
         gm.baseColor = {alb.x, alb.y, alb.z};
         gm.roughness = mat->roughness();
         gm.metalness = mat->metalness();
+        fillSSSFields(gm, mat);
         return gm;
     }
     {
@@ -148,6 +160,7 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
         Spectrum alb = mat->reflectance(ctx);
         gm.baseColor = {alb.x, alb.y, alb.z};
     }
+    fillSSSFields(gm, mat);
     return gm;
 }
 
@@ -297,6 +310,18 @@ struct CudaPathIntegrator::Impl {
     CudaBuffer<GpuPhoton>       d_photons;
     CudaBuffer<uint32_t>        d_hashCellStart;
     CudaBuffer<uint32_t>        d_sortedPhotonIdx;
+
+    // SSS photon map — built alongside caustic map when SSS materials present.
+    CudaBuffer<GpuPhoton>       d_sssPhotons;
+    CudaBuffer<uint32_t>        d_sssHashCellStart;
+    bool                        sssMapEnabled       = false;
+    float                       sssSearchRadius     = 0.1f;
+    GpuFloat3                   sssHashGridOrigin   = {0.f, 0.f, 0.f};
+    float                       sssHashCellSize     = 0.1f;
+    uint32_t                    sssHashGridDimX     = 0;
+    uint32_t                    sssHashGridDimY     = 0;
+    uint32_t                    sssHashGridDimZ     = 0;
+    uint32_t                    sssValidPhotons     = 0;
     bool                        photonMapEnabled   = false;
     uint32_t                    numPhotons         = 0;
     float                       photonSearchRadius = 0.1f;
@@ -639,10 +664,10 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
 
     printf("[info]  CudaPathIntegrator: tracing %u photons on GPU...\n", numPhotons);
 
-    // ---- 1. Photon-trace scratch buffer (full numPhotons slots).
-    // Local to this function — replaced by a compacted, cell-sorted device
-    // buffer at the end so the shade kernel doesn't drag 8 MB of mostly-
-    // invalid photons through L2 on every hash lookup.
+    // ---- 1. Photon-trace scratch buffers (caustic + SSS).
+    // Local to this function — replaced by compacted, cell-sorted device
+    // buffers at the end so the shade kernel doesn't drag mostly-invalid
+    // photons through L2 on every hash lookup.
     CudaBuffer<GpuPhoton> traceBuf(numPhotons);
     if (!traceBuf.isValid()) {
         fprintf(stderr, "[error] CudaPathIntegrator::buildPhotonMap: "
@@ -651,6 +676,14 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
         return;
     }
     traceBuf.zero();
+
+    CudaBuffer<GpuPhoton> sssTraceBuf(numPhotons);
+    if (!sssTraceBuf.isValid()) {
+        fprintf(stderr, "[error] CudaPathIntegrator::buildPhotonMap: "
+                        "SSS photon alloc failed (%u entries)\n", numPhotons);
+        // Non-fatal: SSS map just won't be built
+    }
+    if (sssTraceBuf.isValid()) sssTraceBuf.zero();
 
     // ---- 2. Launch the photon raygen --------------------------------------
     CUstream stream = static_cast<CUstream>(ctx->cuStream());
@@ -671,7 +704,9 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
     params.triMeshIDs          = reinterpret_cast<const uint32_t*>(accel->triMeshIDBuffer());
     params.meshVertexOffsets   = reinterpret_cast<const uint32_t*>(accel->meshVertexOffsetBuffer());
     params.meshIndexOffsets    = reinterpret_cast<const uint32_t*>(accel->meshIndexOffsetBuffer());
-    params.photons             = traceBuf.ptr();   // raygen writes into this
+    params.photons             = traceBuf.ptr();   // raygen writes caustic photons here
+    params.sssPhotons          = sssTraceBuf.isValid() ? sssTraceBuf.ptr() : nullptr;
+    params.sssNumPhotons       = numPhotons;
     params.numPhotons          = numPhotons;
     params.frameIndex          = photonFrameIndex++;
     params.handle              = accel->traversableHandle();
@@ -766,6 +801,88 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
 
     printf("[info]  CudaPathIntegrator: photon hash grid %ux%ux%u (%u cells)\n",
            hashGridDimX, hashGridDimY, hashGridDimZ, numCells);
+
+    // ---- 6. Build SSS hash grid from sssTraceBuf ----------------------------
+    if (!sssTraceBuf.isValid()) {
+        sssMapEnabled = false;
+    } else {
+        std::vector<GpuPhoton> hostSssPhotons;
+        sssTraceBuf.download(hostSssPhotons);
+
+        float sMinX =  1e30f, sMinY =  1e30f, sMinZ =  1e30f;
+        float sMaxX = -1e30f, sMaxY = -1e30f, sMaxZ = -1e30f;
+        uint32_t sssCount = 0;
+        for (uint32_t i = 0; i < numPhotons; ++i) {
+            const GpuPhoton& ph = hostSssPhotons[i];
+            if (ph.power.x == 0.f && ph.power.y == 0.f && ph.power.z == 0.f) continue;
+            ++sssCount;
+            sMinX = std::min(sMinX, ph.position.x);
+            sMinY = std::min(sMinY, ph.position.y);
+            sMinZ = std::min(sMinZ, ph.position.z);
+            sMaxX = std::max(sMaxX, ph.position.x);
+            sMaxY = std::max(sMaxY, ph.position.y);
+            sMaxZ = std::max(sMaxZ, ph.position.z);
+        }
+        sssValidPhotons = sssCount;
+        printf("[info]  CudaPathIntegrator: %u valid SSS photons (of %u traced)\n",
+               sssCount, numPhotons);
+
+        if (sssCount == 0) {
+            sssMapEnabled  = false;
+            d_sssPhotons   = CudaBuffer<GpuPhoton>{};
+            d_sssHashCellStart = CudaBuffer<uint32_t>{};
+        } else {
+            const float scs = photonSearchRadius;
+            sssHashCellSize = scs;
+            sMinX -= scs; sMinY -= scs; sMinZ -= scs;
+            sMaxX += scs; sMaxY += scs; sMaxZ += scs;
+            sssHashGridOrigin = {sMinX, sMinY, sMinZ};
+            sssHashGridDimX = static_cast<uint32_t>(std::ceil((sMaxX - sMinX) / scs)) + 1u;
+            sssHashGridDimY = static_cast<uint32_t>(std::ceil((sMaxY - sMinY) / scs)) + 1u;
+            sssHashGridDimZ = static_cast<uint32_t>(std::ceil((sMaxZ - sMinZ) / scs)) + 1u;
+            uint32_t sssNumCells = sssHashGridDimX * sssHashGridDimY * sssHashGridDimZ;
+
+            struct SssCell { uint32_t photonIdx; uint32_t cellIdx; };
+            std::vector<SssCell> sssAssignments;
+            sssAssignments.reserve(sssCount);
+            for (uint32_t i = 0; i < numPhotons; ++i) {
+                const GpuPhoton& ph = hostSssPhotons[i];
+                if (ph.power.x == 0.f && ph.power.y == 0.f && ph.power.z == 0.f) continue;
+                uint32_t ix = static_cast<uint32_t>((ph.position.x - sMinX) / scs);
+                uint32_t iy = static_cast<uint32_t>((ph.position.y - sMinY) / scs);
+                uint32_t iz = static_cast<uint32_t>((ph.position.z - sMinZ) / scs);
+                ix = std::min(ix, sssHashGridDimX - 1u);
+                iy = std::min(iy, sssHashGridDimY - 1u);
+                iz = std::min(iz, sssHashGridDimZ - 1u);
+                uint32_t cellIdx = iz * sssHashGridDimX * sssHashGridDimY
+                                 + iy * sssHashGridDimX + ix;
+                sssAssignments.push_back({i, cellIdx});
+            }
+            std::sort(sssAssignments.begin(), sssAssignments.end(),
+                      [](const SssCell& a, const SssCell& b) {
+                          return a.cellIdx < b.cellIdx;
+                      });
+
+            std::vector<uint32_t> sssCellStart(sssNumCells + 1, 0);
+            for (const auto& sc : sssAssignments) sssCellStart[sc.cellIdx + 1]++;
+            for (uint32_t c = 0; c < sssNumCells; ++c) sssCellStart[c + 1] += sssCellStart[c];
+
+            // Compact SSS photons in cell-sorted order
+            std::vector<GpuPhoton> sssCompacted(sssCount);
+            for (uint32_t i = 0; i < sssCount; ++i)
+                sssCompacted[i] = hostSssPhotons[sssAssignments[i].photonIdx];
+
+            d_sssPhotons = CudaBuffer<GpuPhoton>(sssCount);
+            d_sssPhotons.upload(sssCompacted);
+            d_sssHashCellStart = CudaBuffer<uint32_t>(sssCellStart.size());
+            d_sssHashCellStart.upload(sssCellStart);
+
+            sssMapEnabled   = true;
+            sssSearchRadius = photonSearchRadius;
+            printf("[info]  CudaPathIntegrator: SSS hash grid %ux%ux%u (%u cells)\n",
+                   sssHashGridDimX, sssHashGridDimY, sssHashGridDimZ, sssNumCells);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,6 +1343,20 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.sortedPhotonIdx        = nullptr;   // unused post-compaction
     p.numPhotons             = numPhotons;
     p.frameIndex             = photonFrameIndex;
+    // SSS photon map
+    const bool sssActive = sssMapEnabled && sssValidPhotons > 0
+                           && d_sssHashCellStart.isValid()
+                           && d_sssPhotons.isValid();
+    p.cam.sssMapEnabled    = sssActive ? 1u : 0u;
+    p.cam.sssSearchRadius  = sssSearchRadius;
+    p.cam.sssHashOrigin    = sssHashGridOrigin;
+    p.cam.sssHashCellSize  = sssHashCellSize;
+    p.cam.sssHashDimX      = sssHashGridDimX;
+    p.cam.sssHashDimY      = sssHashGridDimY;
+    p.cam.sssHashDimZ      = sssHashGridDimZ;
+    p.sssPhotons           = d_sssPhotons.isValid()       ? d_sssPhotons.ptr()       : nullptr;
+    p.sssHashCellStart     = d_sssHashCellStart.isValid() ? d_sssHashCellStart.ptr() : nullptr;
+    p.sssNumPhotons        = numPhotons;
     // Wavefront state — populated explicitly by renderFrameWavefront.  When
     // the megakernel path is in use these stay null/zero and are ignored.
     p.wfRays                 = nullptr;

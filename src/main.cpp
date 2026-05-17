@@ -91,9 +91,11 @@ int main(int argc, char** argv) {
                    "Set > shutter-open to enable transformation motion blur.")
        ->default_val(0.f);
 
-    app.add_flag("--interactive", settings.interactive,
-                 "Use GPU (Metal|CUDA) backend for fast preview renders — "
-                 "lower quality, much faster (requires ANACAPA_ENABLE_METAL|ANACAPA_ENABLE_CUDA)");
+    app.add_flag("--gpu-assist", settings.gpuAssist,
+                 "Use GPU (Metal|CUDA) backend for rendering "
+                 "(requires ANACAPA_ENABLE_METAL|ANACAPA_ENABLE_CUDA)");
+    // Legacy alias so existing scripts don't break immediately.
+    app.add_flag("--interactive", settings.gpuAssist)->group("");
 
     app.add_flag("--override-lights", settings.overrideLights,
                  "Replace all scene lights with a single white directional light "
