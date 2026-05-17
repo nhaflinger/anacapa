@@ -80,6 +80,16 @@ void PhotonMapIntegrator::tracePhotons(const SceneView& scene) {
     causticPhotons.reserve(static_cast<size_t>(m_numPhotons) / 4);
     sssPhotons.reserve(static_cast<size_t>(m_numPhotons) / 2);
 
+    // Shutter interval for motion blur.  When both are 0 there is no motion
+    // blur and all photons trace at t=0 (matching the static scene geometry).
+    float shutterOpen  = 0.f;
+    float shutterClose = 0.f;
+    if (scene.camera) {
+        shutterOpen  = scene.camera->shutterOpen;
+        shutterClose = scene.camera->shutterClose;
+    }
+    bool motionBlur = (shutterClose > shutterOpen);
+
     for (int emitted = 0; emitted < m_numPhotons; ++emitted) {
         if (m_lightSampler.empty()) break;
         auto sel = m_lightSampler.sample(rand1());
@@ -97,8 +107,17 @@ void PhotonMapIntegrator::tracePhotons(const SceneView& scene) {
 
         if (!power.isFinite() || isBlack(power)) continue;
 
+        // Sample a shutter time for this photon path.  Distributing photons
+        // uniformly across the shutter window means the photon map represents
+        // time-averaged geometry, matching the statistical distribution of
+        // camera rays that also sample random times in [shutterOpen, shutterClose].
+        float photonTime = motionBlur
+                         ? shutterOpen + rand1() * (shutterClose - shutterOpen)
+                         : 0.f;
+
         Ray photonRay{les.pos, les.dir};
         photonRay.tMin = 1e-4f;
+        photonRay.time = photonTime;
 
         int numSpecular = 0;
 
@@ -116,6 +135,7 @@ void PhotonMapIntegrator::tracePhotons(const SceneView& scene) {
             float opacity = mat->evalOpacity(ctx);
             if (opacity <= 0.f) {
                 photonRay = spawnRay(si.p, si.ng, photonRay.direction);
+                photonRay.time = photonTime;
                 --bounce;
                 continue;
             }
@@ -130,6 +150,7 @@ void PhotonMapIntegrator::tracePhotons(const SceneView& scene) {
                 if (!power.isFinite() || isBlack(power)) break;
 
                 photonRay = spawnRay(si.p, si.n, bs.wi);
+                photonRay.time = photonTime;
                 photonRay.skipStrandID = si.isCurve ? si.strandID : ~0u;
                 if (mat->isCausticGenerator())
                     ++numSpecular;
@@ -165,6 +186,7 @@ void PhotonMapIntegrator::tracePhotons(const SceneView& scene) {
                 ShadingContext ctx(si, photonRay.direction);
                 Vec3f wiLocal = sampleCosineHemisphere(rand2());
                 photonRay = spawnRay(si.p, si.n, ctx.toWorld(wiLocal));
+                photonRay.time = photonTime;
                 numSpecular = 0;
             } else {
                 // Regular diffuse: store caustic photon if the path came through specular.
@@ -399,6 +421,7 @@ Spectrum PhotonMapIntegrator::Li(const Ray& ray, const SceneView& scene,
                         float thicknessScale = 1.f;
                         if (d > 0.f) {
                             Ray inwardRay = spawnRay(si.p, si.n, -si.n);
+                            inwardRay.time = ray.time;
                             TraceResult thickHit = scene.accel->trace(inwardRay);
                             if (thickHit.hit) {
                                 thicknessScale = std::exp(-thickHit.si.t / (d * 30.f));

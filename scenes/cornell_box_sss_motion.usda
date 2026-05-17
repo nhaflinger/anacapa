@@ -1,0 +1,206 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    doc = """Cornell Box — SSS motion blur test.
+    A warm-skin SSS slab translates 0.8 units left→right over one frame.
+    With shutter [0, 1] the slab should appear motion-blurred AND retain
+    its SSS glow throughout the blur streak.  If photon times are not
+    sampled correctly the SSS either vanishes or stays frozen at t=0.
+    """
+    metersPerUnit = 1
+    upAxis = "Y"
+    startTimeCode = 1
+    endTimeCode = 2
+    timeCodesPerSecond = 24
+)
+
+def Xform "World"
+{
+    def Material "WhiteMat"
+    {
+        token outputs:surface.connect = </World/WhiteMat/Shader.outputs:surface>
+        def Shader "Shader"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.73, 0.73, 0.73)
+            float inputs:metallic = 0
+            float inputs:roughness = 1
+            token outputs:surface
+        }
+    }
+
+    def Material "RedMat"
+    {
+        token outputs:surface.connect = </World/RedMat/Shader.outputs:surface>
+        def Shader "Shader"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.65, 0.05, 0.05)
+            float inputs:metallic = 0
+            float inputs:roughness = 1
+            token outputs:surface
+        }
+    }
+
+    def Material "GreenMat"
+    {
+        token outputs:surface.connect = </World/GreenMat/Shader.outputs:surface>
+        def Shader "Shader"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.12, 0.45, 0.15)
+            float inputs:metallic = 0
+            float inputs:roughness = 1
+            token outputs:surface
+        }
+    }
+
+    def Material "LightMat"
+    {
+        token outputs:surface.connect = </World/LightMat/Shader.outputs:surface>
+        def Shader "Shader"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0, 0, 0)
+            color3f inputs:emissiveColor = (15, 15, 15)
+            token outputs:surface
+        }
+    }
+
+    # SSS material: warm skin tones, clearly visible scattering
+    def Material "SSSMat"
+    {
+        token outputs:surface.connect = </World/SSSMat/Shader.outputs:surface>
+        def Shader "Shader"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.9, 0.6, 0.4)
+            float inputs:roughness = 0.6
+            float inputs:metallic = 0
+
+            # SSS params injected in the same format as the Blender addon exporter
+            float inputs:subsurface_weight = 0.8
+            color3f inputs:subsurface_color = (1.0, 0.35, 0.15)
+            color3f inputs:subsurface_radius = (0.06, 0.06, 0.06)
+            float inputs:subsurface_scale = 1.0
+
+            token outputs:surface
+        }
+    }
+
+    # --- Room geometry ----------------------------------------------------------
+
+    def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </World/WhiteMat>
+        normal3f[] normals = [(0,1,0),(0,1,0),(0,1,0),(0,1,0)]
+        point3f[] points = [(-1,-1,0),(1,-1,0),(1,-1,2),(-1,-1,2)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Mesh "Ceiling" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </World/WhiteMat>
+        normal3f[] normals = [(0,-1,0),(0,-1,0),(0,-1,0),(0,-1,0)]
+        point3f[] points = [(-1,1,2),(1,1,2),(1,1,0),(-1,1,0)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Mesh "BackWall" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </World/WhiteMat>
+        normal3f[] normals = [(0,0,-1),(0,0,-1),(0,0,-1),(0,0,-1)]
+        point3f[] points = [(-1,-1,2),(-1,1,2),(1,1,2),(1,-1,2)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Mesh "LeftWall" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </World/RedMat>
+        normal3f[] normals = [(1,0,0),(1,0,0),(1,0,0),(1,0,0)]
+        point3f[] points = [(-1,-1,2),(-1,1,2),(-1,1,0),(-1,-1,0)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Mesh "RightWall" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </World/GreenMat>
+        normal3f[] normals = [(-1,0,0),(-1,0,0),(-1,0,0),(-1,0,0)]
+        point3f[] points = [(1,-1,0),(1,1,0),(1,1,2),(1,-1,2)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Mesh "LightPatch" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </World/LightMat>
+        normal3f[] normals = [(0,-1,0),(0,-1,0),(0,-1,0),(0,-1,0)]
+        point3f[] points = [(-0.25,0.999,0.85),(0.25,0.999,0.85),(0.25,0.999,1.15),(-0.25,0.999,1.15)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    # --- SSS slab: thin flat box, translates 0.8 units left→right in one frame --
+    # Thin (0.12 units) so SSS bleed-through is clearly visible on top/bottom faces.
+    def Xform "SSSSlab"
+    {
+        def Mesh "Mesh" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0,1,2,3, 7,6,5,4, 0,4,5,1, 1,5,6,2, 2,6,7,3, 3,7,4,0]
+            rel material:binding = </World/SSSMat>
+            # Thin slab: 0.5 wide × 0.12 tall × 0.5 deep, centered at origin in X
+            point3f[] points = [
+                (-0.25,-1.0,0.75), (0.25,-1.0,0.75), (0.25,-1.0,1.25), (-0.25,-1.0,1.25),
+                (-0.25,-0.88,0.75),(0.25,-0.88,0.75),(0.25,-0.88,1.25),(-0.25,-0.88,1.25)
+            ]
+            uniform token subdivisionScheme = "none"
+        }
+
+        # Translate 0.8 units left→right over one frame (frame 1 → frame 2).
+        # At shutter [0,1] the slab sweeps its full width during exposure.
+        float3 xformOp:translate.timeSamples = {
+            1: (-0.4, 0, 0),
+            2: ( 0.4, 0, 0)
+        }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def RectLight "CeilingLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:height = 0.3
+        float inputs:intensity = 15
+        bool inputs:normalize = 0
+        float inputs:width = 0.5
+        double3 xformOp:rotateXYZ = (90, 0, 0)
+        double3 xformOp:translate = (0, 0.999, 1)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def Camera "RenderCam"
+    {
+        float2 clippingRange = (0.1, 1000)
+        float focalLength = 50
+        float focusDistance = 0
+        float fStop = 0
+        # Full-frame shutter: slab travels its entire 0.8-unit path during exposure
+        double shutter:open = 0
+        double shutter:close = 1
+        float horizontalAperture = 46.631
+        float verticalAperture = 46.631
+        double3 xformOp:rotateXYZ = (0, 180, 0)
+        double3 xformOp:translate = (0, 0, -2.5)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}
