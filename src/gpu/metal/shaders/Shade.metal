@@ -1382,23 +1382,22 @@ kernel void shade(
                                         mat.subsurfaceColor.z);
                 float3 Lsss = querySSSHashGrid(hitPos, n, sssColor, mat.subsurfaceRadius,
                                                cam, sssCellStart, sssSortedIdx, sssPhotons);
-                // Thickness attenuation: cast inward ray to measure local geometry
-                // depth.  exp(-thickness/(d*30)) suppresses bleed-through on thick
-                // geometry (torso) while leaving thin parts (fingers, ears) near 1.
-                float thicknessScale = 1.f;
-                float d = mat.subsurfaceRadius;
-                if (d > 0.f) {
-                    ray inwardRay;
-                    inwardRay.origin       = hitPos - n * 1e-4f;
-                    inwardRay.direction    = -n;
-                    inwardRay.min_distance = 1e-4f;
-                    inwardRay.max_distance = 1e10f;
-                    intersector<instancing, primitive_motion> isect;
-                    auto thickResult = isect.intersect(inwardRay, accelStruct, rayTime);
-                    if (thickResult.type != intersection_type::none)
-                        thicknessScale = exp(-thickResult.distance / (d * 30.f));
-                }
-                L += throughput * Lsss * mat.subsurfaceWeight * thicknessScale;
+                // Thickness attenuation disabled — visually preferred without it.
+                // float thicknessScale = 1.f;
+                // float d = mat.subsurfaceRadius;
+                // if (d > 0.f) {
+                //     ray inwardRay;
+                //     inwardRay.origin       = hitPos - n * 1e-4f;
+                //     inwardRay.direction    = -n;
+                //     inwardRay.min_distance = 1e-4f;
+                //     inwardRay.max_distance = 1e10f;
+                //     intersector<instancing, primitive_motion> isect;
+                //     auto thickResult = isect.intersect(inwardRay, accelStruct, rayTime);
+                //     if (thickResult.type != intersection_type::none)
+                //         thicknessScale = exp(-thickResult.distance / (d * 30.f));
+                // }
+                // L += throughput * Lsss * mat.subsurfaceWeight * thicknessScale;
+                L += throughput * Lsss * mat.subsurfaceWeight;
             }
         }
 

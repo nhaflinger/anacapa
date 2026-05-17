@@ -1111,23 +1111,30 @@ int main(int argc, char** argv)
                 if (tu.rgba.empty()) {
                     // IMAGE_OPEN — allocate live texture
                     uint32_t w = tu.w, h = tu.h;
-                    // Don't delete the old liveTex here — it stays alive in
-                    // whatever slot it was previously assigned to.  Only free
-                    // it if no slot references it (e.g. first render ever).
-                    if (g_live.liveTex) {
-                        bool ownedBySlot = false;
-                        for (auto& sl : slots)
-                            if (sl.srcTex == g_live.liveTex) { ownedBySlot = true; break; }
-                        if (!ownedBySlot)
-                            glDeleteTextures(1, &g_live.liveTex);
-                    }
-                    // Free whatever the record slot currently holds (unless it
-                    // is the old live texture we just decided to keep).
+                    // Render lands in whichever slot is active right now.
+                    int destSlot = activeSlot;
+                    // Save old live texture ID before overwriting it.
+                    GLuint oldLiveTex = g_live.liveTex;
+                    g_live.liveTex = 0;
+                    // Free whatever the destination slot currently holds.
+                    // If that happens to be the old live texture, mark it
+                    // consumed so we don't double-free below.
                     {
-                        SlotState& rs = slots[recordSlot];
-                        if (rs.srcTex && rs.srcTex != g_live.liveTex)
-                            glDeleteTextures(1, &rs.srcTex);
-                        rs.srcTex = 0;
+                        SlotState& ds = slots[destSlot];
+                        if (ds.srcTex) {
+                            if (ds.srcTex == oldLiveTex) oldLiveTex = 0;
+                            glDeleteTextures(1, &ds.srcTex);
+                            ds.srcTex = 0;
+                        }
+                    }
+                    // Old live texture may still be alive in another slot
+                    // (a prior render the user is comparing against).
+                    // Only free it if no slot owns it any more.
+                    if (oldLiveTex) {
+                        bool stillOwned = false;
+                        for (auto& sl : slots)
+                            if (sl.srcTex == oldLiveTex) { stillOwned = true; break; }
+                        if (!stillOwned) glDeleteTextures(1, &oldLiveTex);
                     }
                     glGenTextures(1, &g_live.liveTex);
                     glBindTexture(GL_TEXTURE_2D, g_live.liveTex);
@@ -1160,12 +1167,11 @@ int main(int argc, char** argv)
                         g_live.cropNormY1 = cvt(g_live.cropNormY1, g_live.cropPanelH, oY, dH);
                         g_live.cropNormIsPanel = false;
                     }
-                    // Mirror into recordSlot so color-grading pipeline sees it
-                    slots[recordSlot].srcTex = g_live.liveTex;
-                    slots[recordSlot].texW   = static_cast<int>(w);
-                    slots[recordSlot].texH   = static_cast<int>(h);
-                    slots[recordSlot].isHdr  = true;
-                    activeSlot = recordSlot;  // jump view to where tiles will land
+                    // Mirror into destSlot so color-grading pipeline sees it
+                    slots[destSlot].srcTex = g_live.liveTex;
+                    slots[destSlot].texW   = static_cast<int>(w);
+                    slots[destSlot].texH   = static_cast<int>(h);
+                    slots[destSlot].isHdr  = true;
                     SDL_SetWindowTitle(window, "Anacapa Viewer — rendering…");
                 } else {
                     // TILE — subimage update

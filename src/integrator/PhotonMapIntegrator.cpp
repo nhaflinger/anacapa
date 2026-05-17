@@ -411,23 +411,17 @@ Spectrum PhotonMapIntegrator::Li(const Ray& ray, const SceneView& scene,
                     Spectrum Lsss = m_sssMap.estimateSSSRadiance(
                         si.p, si.n, sss.color, d);
                     if (!isBlack(Lsss)) {
-                        // Thickness attenuation: cast an inward ray to measure
-                        // local geometry thickness, then attenuate by
-                        // exp(-thickness / absLength) where absLength = d * 30.
-                        // Scattering and absorption are different length scales —
-                        // absorption typically 30-50x the scattering mean free
-                        // path. Thin geometry (fingers) stays near 1; thick
-                        // geometry (torso) drops toward 0.
-                        float thicknessScale = 1.f;
-                        if (d > 0.f) {
-                            Ray inwardRay = spawnRay(si.p, si.n, -si.n);
-                            inwardRay.time = ray.time;
-                            TraceResult thickHit = scene.accel->trace(inwardRay);
-                            if (thickHit.hit) {
-                                thicknessScale = std::exp(-thickHit.si.t / (d * 30.f));
-                            }
-                        }
-                        L += beta * Lsss * sss.weight * thicknessScale;
+                        // Thickness attenuation disabled — visually preferred without it.
+                        // float thicknessScale = 1.f;
+                        // if (d > 0.f) {
+                        //     Ray inwardRay = spawnRay(si.p, si.n, -si.n);
+                        //     inwardRay.time = ray.time;
+                        //     TraceResult thickHit = scene.accel->trace(inwardRay);
+                        //     if (thickHit.hit)
+                        //         thicknessScale = std::exp(-thickHit.si.t / (d * 30.f));
+                        // }
+                        // L += beta * Lsss * sss.weight * thicknessScale;
+                        L += beta * Lsss * sss.weight;
                     }
                 }
             }
