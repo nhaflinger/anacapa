@@ -191,6 +191,87 @@ def realize_particle_instances() -> Tuple[int, List[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Step 2a-extra: Collect HALO particle systems for USD UsdGeomPoints export.
+#
+# HALO particles are not exportable via Blender's USD exporter — they have no
+# mesh representation.  We collect their world-space positions/sizes/colors
+# here and stash them at module level.  After Blender's USD export completes,
+# _inject_halo_particles() reads the stash and writes UsdGeomPoints prims
+# directly into the USD stage.
+# ---------------------------------------------------------------------------
+
+_halo_particle_stash: list = []   # list of dicts, one per emitter
+
+
+def collect_halo_particles() -> int:
+    """
+    Collect world-space particle data from all HALO particle systems.
+    Stores results in _halo_particle_stash.  Returns total particle count.
+    """
+    global _halo_particle_stash
+    _halo_particle_stash = []
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    total = 0
+
+    for obj in bpy.context.scene.objects:
+        if obj.hide_render:
+            continue
+        eval_obj = obj.evaluated_get(depsgraph)
+        for ps in eval_obj.particle_systems:
+            if ps.settings.render_type != 'HALO':
+                continue
+            particles = ps.particles
+            if not particles:
+                continue
+
+            positions = []
+            widths    = []
+            velocities = []
+            ids        = []
+
+            mat_world = obj.matrix_world
+            for p in particles:
+                if p.alive_state != 'ALIVE':
+                    continue
+                loc = mat_world @ p.location
+                positions.append((loc.x, loc.y, loc.z))
+                widths.append(p.size * 2.0)   # UsdGeomPoints uses diameter
+                vel = p.velocity
+                velocities.append((vel.x, vel.y, vel.z))
+                ids.append(p.birth_time)       # unique float per particle
+
+            if not positions:
+                continue
+
+            # Per-emitter color from the first particle material slot, if any
+            color = (1.0, 1.0, 1.0)
+            if obj.material_slots:
+                mat = obj.material_slots[0].material
+                if mat and mat.use_nodes:
+                    for node in mat.node_tree.nodes:
+                        if node.type == 'BSDF_PRINCIPLED':
+                            bc = node.inputs.get('Base Color')
+                            if bc:
+                                color = tuple(bc.default_value[:3])
+                            break
+
+            _halo_particle_stash.append({
+                'name':       f"{obj.name}_{ps.name}",
+                'positions':  positions,
+                'widths':     widths,
+                'velocities': velocities,
+                'color':      color,
+            })
+            total += len(positions)
+            log(f"  [halo] '{obj.name}/{ps.name}': {len(positions)} HALO particles collected.")
+
+    if total:
+        log(f"  [halo] Total collected: {total} particles across {len(_halo_particle_stash)} emitter(s).")
+    return total
+
+
+# ---------------------------------------------------------------------------
 # Step 2b: Realize Geometry Nodes instances
 # ---------------------------------------------------------------------------
 
@@ -1399,6 +1480,10 @@ def main():
     # --- Step 2: Particle system instances ---
     log("Step 2: Realizing particle system instances (Object/Collection render type)...")
     n_particle_instances, particle_emitters_removed = realize_particle_instances()
+
+    # --- Step 2a: Collect HALO particles (written into USD in post-process) ---
+    log("Step 2a: Collecting HALO particle systems...")
+    collect_halo_particles()
 
     # --- Step 2b: Geometry Nodes instances ---
     log("Step 2b: Realizing Geometry Nodes instances...")
@@ -4567,6 +4652,7 @@ def prepare_scene(bake_dir="."):
 
     realize_instances()
     realize_particle_instances()
+    collect_halo_particles()
     realize_gn_instances()
     convert_to_mesh()
     apply_modifiers()
@@ -4722,6 +4808,62 @@ def _inject_sss_params(usd_path):
         print(f"  [sss] subsurface params injected on {touched} UsdPreviewSurface shader(s)")
 
 
+def _inject_halo_particles(usd_path):
+    """
+    Write a UsdGeomPoints prim for each HALO particle emitter collected in
+    _halo_particle_stash.  Called after Blender's USD export so the stage
+    already exists and we just append to it.
+
+    Attributes written per emitter:
+      points          — world-space positions (Vec3f[])
+      widths          — diameters (float[]; radius = width/2 in the renderer)
+      velocities      — particle velocities (Vec3f[])
+      primvars:displayColor — per-emitter constant color (Vec3f[1])
+    """
+    global _halo_particle_stash
+    if not _halo_particle_stash:
+        return
+    try:
+        from pxr import Usd, UsdGeom, Vt, Gf, Sdf
+    except ImportError:
+        print("  [halo] pxr not available — skipping halo particle injection.")
+        return
+
+    stage = Usd.Stage.Open(usd_path)
+    if not stage:
+        print(f"  [halo] Could not open stage '{usd_path}'.")
+        return
+
+    root = stage.GetDefaultPrim() or stage.GetPseudoRoot()
+
+    for entry in _halo_particle_stash:
+        prim_path = root.GetPath().AppendPath(
+            entry['name'].replace(' ', '_').replace('.', '_').replace('/', '_'))
+        pts_prim = UsdGeom.Points.Define(stage, prim_path)
+
+        positions = entry['positions']
+        pts_prim.GetPointsAttr().Set(
+            Vt.Vec3fArray([Gf.Vec3f(*p) for p in positions]))
+
+        pts_prim.GetWidthsAttr().Set(
+            Vt.FloatArray(entry['widths']))
+
+        if entry['velocities']:
+            pts_prim.GetVelocitiesAttr().Set(
+                Vt.Vec3fArray([Gf.Vec3f(*v) for v in entry['velocities']]))
+
+        r, g, b = entry['color']
+        pts_prim.GetPrim().CreateAttribute(
+            'primvars:displayColor',
+            Sdf.ValueTypeNames.Color3fArray, False
+        ).Set(Vt.Vec3fArray([Gf.Vec3f(r, g, b)]))
+
+        print(f"  [halo] Injected '{prim_path}': {len(positions)} particles.")
+
+    stage.Save()
+    _halo_particle_stash = []
+
+
 def post_process_usd(usd_path, sky_texture=""):
     """
     Run USD post-processing steps after Blender's USD exporter has written
@@ -4736,6 +4878,7 @@ def post_process_usd(usd_path, sky_texture=""):
         return
 
     out_dir = os.path.dirname(usd_path)
+    _inject_halo_particles(usd_path)
     _patch_dome_light_texture(usd_path, out_dir, explicit_sky=sky_texture)
     _inject_materialx_textures(usd_path)
     _inject_caustic_flags(usd_path)
