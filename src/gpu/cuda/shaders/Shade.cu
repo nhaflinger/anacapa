@@ -1725,23 +1725,13 @@ extern "C" __global__ void __raygen__wf_bounce()
         L += throughput * Lcaustic;
     }
     // SSS photon map — fires for any SSS material hit (all bounces, not just first).
-    // Scale by subsurfaceWeight and a thickness attenuation factor to match
-    // the CPU integrator: cast an inward ray and dim by exp(-thickness / (d*30))
-    // so thick parts (torso) drop toward 0 while thin parts (fingers, ears)
-    // stay near 1.  Without this the SSS contribution is full-strength
-    // everywhere, producing brighter and softer rolloff than CPU.
+    // Scale by subsurfaceWeight * subsurfaceStrength to match Metal.
+    // Thickness attenuation disabled — visually preferred without it, also
+    // matches the Metal call site (see Shade.metal querySSSHashGrid caller).
     if (mat.isSubsurface && params.cam.sssMapEnabled) {
         float3 sssColor = make3(mat.subsurfaceColor);
         float3 Lsss = querySSSPhotonMap(hitPos, n, sssColor, mat.subsurfaceRadius);
-        float thicknessScale = 1.f;
-        const float d = mat.subsurfaceRadius;
-        if (d > 0.f) {
-            float3 inDir  = -1.0f * n;
-            float3 inOrig = hitPos + n * (-1e-4f);  // step just inside surface
-            TraceResult tHit = trace(inOrig, inDir, 1e-4f, 1e10f, rayTime);
-            if (tHit.valid) thicknessScale = expf(-tHit.t / (d * 30.f));
-        }
-        L += throughput * Lsss * mat.subsurfaceWeight * thicknessScale;
+        L += throughput * Lsss * mat.subsurfaceWeight * mat.subsurfaceStrength;
     }
 
     // ---- Russian roulette --------------------------------------------------
