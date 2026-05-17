@@ -41,7 +41,8 @@ std::unique_ptr<IMaterial> makeOslMaterial(const std::string& shaderName);
 // mat must be a pointer returned by makeOslMaterial(); no-op for other types.
 void oslSetSubsurfaceParams(IMaterial* mat,
                              float weight, Spectrum color,
-                             float radius, float anisotropy);
+                             float radius, float anisotropy,
+                             float strength = 1.f);
 
 #endif  // ANACAPA_ENABLE_OSL
 

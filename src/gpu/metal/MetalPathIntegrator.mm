@@ -174,10 +174,11 @@ static void fillSSSFields(GpuMaterial& gm, const IMaterial* mat) {
     if (!mat) return;
     auto sss = mat->subsurfaceParams();
     if (sss.weight <= 0.f) return;
-    gm.isSubsurface      = 1u;
-    gm.subsurfaceWeight  = sss.weight;
-    gm.subsurfaceColor   = {sss.color.x, sss.color.y, sss.color.z};
-    gm.subsurfaceRadius  = sss.radius * sss.scale;
+    gm.isSubsurface        = 1u;
+    gm.subsurfaceWeight    = sss.weight;
+    gm.subsurfaceColor     = {sss.color.x, sss.color.y, sss.color.z};
+    gm.subsurfaceRadius    = sss.radius * sss.scale;
+    gm.subsurfaceStrength  = sss.strength;
 }
 
 static GpuMaterial extractGpuMaterial(const IMaterial* mat) {

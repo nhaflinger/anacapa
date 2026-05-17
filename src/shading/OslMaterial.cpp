@@ -1388,11 +1388,13 @@ public:
     }
 
     // SSS params injected from USD after construction (via setSubsurfaceParams).
-    void setSubsurfaceParams(float weight, Spectrum color, float radius, float anisotropy) {
+    void setSubsurfaceParams(float weight, Spectrum color, float radius, float anisotropy,
+                              float strength = 1.f) {
         m_sss.weight     = weight;
         m_sss.color      = color;
         m_sss.radius     = radius;
         m_sss.anisotropy = anisotropy;
+        m_sss.strength   = strength;
     }
 
     SubsurfaceParams subsurfaceParams() const override { return m_sss; }
@@ -1694,9 +1696,10 @@ std::unique_ptr<IMaterial> makeOslMaterial(const std::string& shaderName) {
 
 void oslSetSubsurfaceParams(IMaterial* mat,
                              float weight, Spectrum color,
-                             float radius, float anisotropy) {
+                             float radius, float anisotropy,
+                             float strength) {
     if (auto* osl = dynamic_cast<OslMaterial*>(mat))
-        osl->setSubsurfaceParams(weight, color, radius, anisotropy);
+        osl->setSubsurfaceParams(weight, color, radius, anisotropy, strength);
 }
 
 } // namespace anacapa

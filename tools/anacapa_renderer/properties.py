@@ -264,9 +264,17 @@ def register():
                     "Match the Scale value from your Principled BSDF.",
         default=1.0, min=0.001, soft_max=10.0, precision=3,
     )
+    bpy.types.Material.anacapa_subsurface_strength = bpy.props.FloatProperty(
+        name="Subsurface Strength",
+        description="Independent amplifier for the SSS radiance contribution. "
+                    "1.0 = physically based; increase to boost the SSS effect "
+                    "beyond what the weight and radius alone produce.",
+        default=1.0, min=0.0, soft_max=10.0, precision=3,
+    )
 
 
 def unregister():
+    del bpy.types.Material.anacapa_subsurface_strength
     del bpy.types.Material.anacapa_subsurface_scale
     del bpy.types.Material.anacapa_subsurface_radius
     del bpy.types.Material.anacapa_subsurface_color

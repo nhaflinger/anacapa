@@ -1396,8 +1396,8 @@ kernel void shade(
                 //     if (thickResult.type != intersection_type::none)
                 //         thicknessScale = exp(-thickResult.distance / (d * 30.f));
                 // }
-                // L += throughput * Lsss * mat.subsurfaceWeight * thicknessScale;
-                L += throughput * Lsss * mat.subsurfaceWeight;
+                // L += throughput * Lsss * mat.subsurfaceWeight * mat.subsurfaceStrength * thicknessScale;
+                L += throughput * Lsss * mat.subsurfaceWeight * mat.subsurfaceStrength;
             }
         }
 

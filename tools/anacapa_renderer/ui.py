@@ -256,9 +256,10 @@ class ANACAPA_PT_material(bpy.types.Panel):
         col = box.column(align=True)
         col.prop(mat, "anacapa_subsurface",       text="Weight")
         if mat.anacapa_subsurface > 0.0:
-            col.prop(mat, "anacapa_subsurface_color",  text="Color")
-            col.prop(mat, "anacapa_subsurface_radius", text="Radius")
-            col.prop(mat, "anacapa_subsurface_scale",  text="Scale")
+            col.prop(mat, "anacapa_subsurface_color",    text="Color")
+            col.prop(mat, "anacapa_subsurface_radius",   text="Radius")
+            col.prop(mat, "anacapa_subsurface_scale",    text="Scale")
+            col.prop(mat, "anacapa_subsurface_strength", text="Strength")
             box.label(text="Photon integrator only.  Effective distance = Radius × Scale.",
                       icon='INFO')
 

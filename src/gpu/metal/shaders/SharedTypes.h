@@ -85,6 +85,8 @@ struct GpuMaterial {
     float           subsurfaceWeight;   // [0,1] mixing weight
     GpuFloat3       subsurfaceColor;    // scatter tint
     float           subsurfaceRadius;   // effective d = radius * scale (precomputed by host)
+    float           subsurfaceStrength; // independent amplifier (> 1 boosts SSS contribution)
+    float           _sss_pad[3];        // keep struct 16-byte aligned
 };
 
 // ---------------------------------------------------------------------------

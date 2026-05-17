@@ -420,8 +420,8 @@ Spectrum PhotonMapIntegrator::Li(const Ray& ray, const SceneView& scene,
                         //     if (thickHit.hit)
                         //         thicknessScale = std::exp(-thickHit.si.t / (d * 30.f));
                         // }
-                        // L += beta * Lsss * sss.weight * thicknessScale;
-                        L += beta * Lsss * sss.weight;
+                        // L += beta * Lsss * sss.weight * sss.strength * thicknessScale;
+                        L += beta * Lsss * sss.weight * sss.strength;
                     }
                 }
             }

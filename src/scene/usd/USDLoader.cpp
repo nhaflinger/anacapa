@@ -525,6 +525,10 @@ static StandardSurfaceMaterial::Params resolveOpenPBRParams(
 
             p.subsurface_anisotropy = resolveFloatTOV(
                 surface.GetInput(TfToken("subsurface_anisotropy")), 0.0f, stageDir).value;
+
+            p.subsurface_strength = resolveFloatTOV(
+                surface.GetInput(TfToken("anacapa_subsurface_strength")), 1.0f, stageDir).value;
+            if (p.subsurface_strength <= 0.f) p.subsurface_strength = 1.f;
         }
     }
 
@@ -667,7 +671,10 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                     if (scale > 0.f) radius *= scale;
                     float aniso = resolveFloatTOV(
                         preview.GetInput(TfToken("subsurface_anisotropy")), 0.0f, stageDir).value;
-                    oslSetSubsurfaceParams(osl.get(), sssWeight, sssColor.value, radius, aniso);
+                    float strength = resolveFloatTOV(
+                        preview.GetInput(TfToken("anacapa_subsurface_strength")), 1.0f, stageDir).value;
+                    if (strength <= 0.f) strength = 1.f;
+                    oslSetSubsurfaceParams(osl.get(), sssWeight, sssColor.value, radius, aniso, strength);
                     spdlog::info("USDLoader: OSL material '{}' SSS weight={:.3f} radius={:.4f}",
                                  mat.GetPrim().GetName().GetString(), sssWeight, radius);
                 }
@@ -868,6 +875,10 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
 
             p.subsurface_anisotropy = resolveFloatTOV(
                 surface.GetInput(TfToken("subsurface_anisotropy")), 0.0f, stageDir).value;
+
+            p.subsurface_strength = resolveFloatTOV(
+                surface.GetInput(TfToken("anacapa_subsurface_strength")), 1.0f, stageDir).value;
+            if (p.subsurface_strength <= 0.f) p.subsurface_strength = 1.f;
         }
     }
 

@@ -65,6 +65,7 @@ public:
         float    radius     = 0.1f;
         float    scale      = 1.f;   // world-space multiplier; effective d = radius * scale
         float    anisotropy = 0.f;
+        float    strength   = 1.f;   // independent amplifier applied to the SSS radiance
     };
 
     // Returns non-zero weight when this surface has a subsurface scattering layer.
