@@ -8,7 +8,8 @@ Named after Anacapa Island, part of California's Channel Islands.
 
 - **Unidirectional path tracing (Path)** with next event estimation
 - **Bidirectional path tracing (BDPT)** with multiple importance sampling and Veach MIS weights
-- **Caustic photon map** — two-pass photon mapping on top of path tracing; produces physically correct glass shadows, focused caustics, and the foundation for SSS; balanced kd-tree with median splitting, flat-kernel density estimation
+- **Caustic photon map** — two-pass photon mapping on top of path tracing; produces physically correct glass shadows and focused caustics; balanced kd-tree with median splitting, flat-kernel density estimation
+- **Subsurface scattering (SSS)** — photon map pass for physically correct light bleed-through in skin and translucent materials; exponential lateral kernel with depth attenuation, adaptive density fade to suppress hotspots; photon paths sample random shutter times so SSS is motion-blur-correct on moving geometry; per-material radius × scale controls effective scattering distance; configured via Blender's material panel and written to USD automatically
 - **OpenUSD scene loading** — geometry, materials, lights, camera, and animated transforms from `.usda`/`.usdc` files
 - **Transformation motion blur** — multi-sample USD xformOps with piecewise-linear interpolation per ray; arbitrary number of time samples supported for curved blur streaks; shutter interval read automatically from the camera prim's `shutter:open`/`shutter:close`, falling back to stage `startTimeCode`/`endTimeCode`
 - **Hair and fur rendering** — RenderMan-style ray-ribbon intersection with recursive de Casteljau subdivision; Marschner 2003 BSDF (R/TT/TRT lobes, exact Fresnel, Beer's law absorption, PBRT v4 variance remapping)
@@ -273,7 +274,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 | Small / distant light sources | `bdpt` | Difficult for path tracer's random scatter to hit; BDPT connects directly |
 | Glass caustics, focused refractive light | `photon` | Photon map traces actual refraction paths; path and BDPT fake glass via transmissive shadows |
 | Glass shadows (dark region around caustic) | `photon` | Only the photon integrator casts correct opaque shadows from delta materials |
-| SSS (subsurface scattering) | `photon` | Subsurface photon map planned; path tracing SSS is possible but converges slowly |
+| SSS (subsurface scattering) | `photon` | Subsurface photon map traces photons through SSS-flagged materials and estimates scattered radiance with an exponential lateral kernel; thickness attenuation suppresses bleed-through in thick geometry |
 | Emissive surfaces (large area lights) | `path` | Large lights are easy for NEE to hit; BDPT connection overhead not worth it |
 | Outdoor / HDRI dome lighting | `path` | Sky covers a wide solid angle; random scatter hits it reliably |
 | Heavily occluded scenes (corners, crevices) | `bdpt` + `--adaptive` | BDPT handles indirect light better; adaptive concentrates samples where variance is highest |
@@ -284,10 +285,12 @@ All three integrators support `--adaptive` sampling. As a rule of thumb: if your
 
 ### Photon map tuning
 
-The two parameters that control photon map quality trade off against each other:
+#### Caustics
+
+The two parameters that control caustic quality trade off against each other:
 
 - **`--num-photons`** — total photons shot from lights. More = less noise in the caustic, longer photon tracing pass.
-- **`--photon-radius`** — density estimate search radius in world units. Smaller = sharper caustic, more noise. Larger = smoother caustic, more blur.
+- **`--photon-radius`** — density estimate search radius in world units for caustics. Smaller = sharper caustic, more noise. Larger = smoother caustic, more blur.
 
 Halving the radius makes the caustic 4× noisier (area drops by 4×), so it requires roughly 4× more photons to maintain the same noise level. A practical starting point:
 
@@ -295,6 +298,24 @@ Halving the radius makes the caustic 4× noisier (area drops by 4×), so it requ
 --num-photons 500000 --photon-radius 0.05   # medium quality
 --num-photons 2000000 --photon-radius 0.025  # 2× sharper, ~4× more photons
 ```
+
+#### Subsurface Scattering
+
+SSS parameters are set **per-material** in the Blender Anacapa material panel (or directly in the USD file) — there is no global CLI radius for SSS. The effective scattering distance is `radius × scale`, matching Blender's Principled BSDF `Subsurface Radius` and `Scale` inputs.
+
+| Parameter | Description |
+|---|---|
+| **Weight** | SSS blend weight (0–1). 0 = fully diffuse, 1 = fully subsurface. |
+| **Color** | Scattering albedo — the color of light diffused through the material. |
+| **Radius** | Mean free path (scattering length) in scene units. |
+| **Scale** | World-space scale multiplier. Effective distance = Radius × Scale. Match to Blender's Principled BSDF Scale. |
+
+Practical guidance:
+
+- **Hotspots / isolated bright dots**: increase `Scale` (larger search sphere → more photons per estimate) or increase `--num-photons`.
+- **Splotchy / abrupt transitions**: increase `--num-photons` for denser photon coverage, or raise `Scale` slightly.
+- **Too much bleed-through on thick areas**: decrease `Radius` or `Scale`. Thickness attenuation automatically suppresses SSS on geometry thicker than ~30 × the effective scattering distance.
+- **SSS missing on shadowed folds or lip edges**: these receive indirect photons from nearby lit surfaces; increasing `--num-photons` improves fill in geometrically complex areas.
 
 The photon pass runs once in `prepare()` before any camera rays are traced. Render time = photon tracing + normal path tracing. For most scenes the photon tracing adds 10–30 % overhead at 500 k photons.
 
@@ -759,7 +780,10 @@ src/
                   surfaces and stores at first diffuse hit
                 PhotonMap — balanced heap-indexed kd-tree (median split,
                   axis=0xFF empty sentinel); estimateRadiance() does flat-
-                  kernel density estimate Σ f·Φ / πr²
+                  kernel density estimate Σ f·Φ / πr²;
+                  estimateSSSRadiance() uses an exponential lateral kernel
+                  exp(-r_lat/d)/(2π²d²) with back-face depth attenuation and
+                  adaptive density fade to suppress hotspots at sparse photon regions
                 LightSampler (Vose alias table), MISWeight
   film/         Film — atomic accumulation, OIDN denoising, multi-layer EXR
   render/       ThreadPool, RenderSession — shutter wiring from scene or CLI
@@ -769,8 +793,9 @@ src/
   gpu/metal/    MetalContext, MetalAccelStructure, MetalPathIntegrator (macOS only)
 
 scenes/
-  cornell_box.usda        Static Cornell box reference scene
-  cornell_box_motion.usda Cornell box with animated ShortBlock (motion blur test)
+  cornell_box.usda            Static Cornell box reference scene
+  cornell_box_motion.usda     Cornell box with animated ShortBlock (motion blur test)
+  cornell_box_sss_motion.usda SSS slab translating 0.8 units across the frame (SSS + motion blur test; render with --integrator photon)
 ```
 
 All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable zero-copy migration to GPU backends.
@@ -789,7 +814,7 @@ All memory-owning data structures use SoA (Structure-of-Arrays) layout to enable
 | 8 | Working | MaterialX/OSL shading — OpenPBR terminal resolution, UsdPreviewSurface texture fallback, JSON sidecar extraction |
 | 9 | Working | Hair and fur — Marschner BSDF, ray-ribbon intersection, Alembic loader, Blender addon integration, matassign pipeline |
 | 10 | Working | Caustic photon map — two-pass photon tracing through specular surfaces, balanced kd-tree, flat-kernel density estimation; correct glass shadows via opaque delta-material shadow rays |
-| 11 | Planned | Subsurface scattering — subsurface photon map pass; per-strand color bleeding |
+| 11 | Working | Subsurface scattering — exponential lateral kernel photon map with depth attenuation, thickness suppression, adaptive density fade, Blender Scale parameter, motion-blur-correct photon time sampling |
 
 ## License
 

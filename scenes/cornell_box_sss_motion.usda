@@ -9,8 +9,8 @@
     """
     metersPerUnit = 1
     upAxis = "Y"
-    startTimeCode = 1
-    endTimeCode = 2
+    startTimeCode = 0
+    endTimeCode = 1
     timeCodesPerSecond = 24
 )
 
@@ -79,7 +79,7 @@ def Xform "World"
             float inputs:metallic = 0
 
             # SSS params injected in the same format as the Blender addon exporter
-            float inputs:subsurface_weight = 0.8
+            float inputs:subsurface_weight = 0.5
             color3f inputs:subsurface_color = (1.0, 0.35, 0.15)
             color3f inputs:subsurface_radius = (0.06, 0.06, 0.06)
             float inputs:subsurface_scale = 1.0
@@ -159,19 +159,19 @@ def Xform "World"
             int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
             int[] faceVertexIndices = [0,1,2,3, 7,6,5,4, 0,4,5,1, 1,5,6,2, 2,6,7,3, 3,7,4,0]
             rel material:binding = </World/SSSMat>
-            # Thin slab: 0.5 wide × 0.12 tall × 0.5 deep, centered at origin in X
+            # Slab: 0.5 wide × 0.5 tall × 0.5 deep, sitting on the floor
             point3f[] points = [
                 (-0.25,-1.0,0.75), (0.25,-1.0,0.75), (0.25,-1.0,1.25), (-0.25,-1.0,1.25),
-                (-0.25,-0.88,0.75),(0.25,-0.88,0.75),(0.25,-0.88,1.25),(-0.25,-0.88,1.25)
+                (-0.25,-0.5,0.75), (0.25,-0.5,0.75), (0.25,-0.5,1.25), (-0.25,-0.5,1.25)
             ]
             uniform token subdivisionScheme = "none"
         }
 
-        # Translate 0.8 units left→right over one frame (frame 1 → frame 2).
+        # Translate 0.8 units left→right over one frame (frame 0 → frame 1).
         # At shutter [0,1] the slab sweeps its full width during exposure.
         float3 xformOp:translate.timeSamples = {
-            1: (-0.4, 0, 0),
-            2: ( 0.4, 0, 0)
+            0: (-0.4, 0, 0),
+            1: ( 0.4, 0, 0)
         }
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
