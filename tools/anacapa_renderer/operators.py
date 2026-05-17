@@ -275,8 +275,13 @@ class ANACAPA_OT_render(bpy.types.Operator):
     def modal(self, context, event):
         if event.type != 'TIMER':
             if event.type == 'ESC':
-                ANACAPA_OT_render._proc.terminate()
-                ANACAPA_OT_render._proc.wait()
+                proc = ANACAPA_OT_render._proc
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
                 self._finish(context)
                 self.report({'WARNING'}, "Render cancelled")
                 return {'CANCELLED'}
@@ -353,6 +358,26 @@ class ANACAPA_OT_render(bpy.types.Operator):
                 obj.hide_viewport = was_hidden
                 obj.pop("anacapa_hidden_for_render", None)
         ANACAPA_OT_render._hidden_for_render = []
+
+        # Clear the preview image and its backing file so a subsequent render
+        # always starts with a blank slate.  Without this, a cancelled render
+        # leaves a stale preview.png on disk; the next render (especially GPU
+        # mode, which writes no progressive PNG) reloads the old partial image
+        # making it look like the cancelled render was paused and resumed.
+        preview_img = ANACAPA_OT_render._preview_img
+        if preview_img:
+            try:
+                bpy.data.images.remove(preview_img)
+            except Exception:
+                pass
+            ANACAPA_OT_render._preview_img = None
+        preview_path = ANACAPA_OT_render._preview_path
+        if preview_path and os.path.exists(preview_path):
+            try:
+                os.remove(preview_path)
+            except Exception:
+                pass
+        ANACAPA_OT_render._preview_path = None
 
         # Re-enable dirty tracking after a short delay so Blender's own
         # post-render depsgraph updates flush through without dirtying our flags.
