@@ -30,6 +30,7 @@
 #endif
 
 #include <algorithm>
+#include <random>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -316,6 +317,7 @@ struct CudaPathIntegrator::Impl {
     CudaBuffer<uint32_t>        d_sssHashCellStart;
     bool                        sssMapEnabled       = false;
     float                       sssSearchRadius     = 0.1f;
+    float                       sssD_max            = 0.f;   // max(radius*scale) across SSS materials
     GpuFloat3                   sssHashGridOrigin   = {0.f, 0.f, 0.f};
     float                       sssHashCellSize     = 0.1f;
     uint32_t                    sssHashGridDimX     = 0;
@@ -741,14 +743,17 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
     printf("[info]  CudaPathIntegrator: %u valid caustic photons (of %u traced)\n",
            validCount, numPhotons);
 
+    // Zero caustic photons just means no caustic-flagged materials in the
+    // scene.  Drop the caustic buffers but keep going — the SSS grid below
+    // is built from a separate photon trace pass and may still have data.
     if (validCount == 0) {
         d_photons         = CudaBuffer<GpuPhoton>{};
         d_hashCellStart   = CudaBuffer<uint32_t>{};
         d_sortedPhotonIdx = CudaBuffer<uint32_t>{};
-        return;
     }
 
     // ---- 4. Build the uniform hash grid on the host ------------------------
+    if (validCount > 0) {
     const float cs = photonSearchRadius;
     hashCellSize = cs;
     minX -= cs; minY -= cs; minZ -= cs;
@@ -801,6 +806,7 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
 
     printf("[info]  CudaPathIntegrator: photon hash grid %ux%ux%u (%u cells)\n",
            hashGridDimX, hashGridDimY, hashGridDimZ, numCells);
+    } // end caustic-grid build (gated on validCount > 0)
 
     // ---- 6. Build SSS hash grid from sssTraceBuf ----------------------------
     if (!sssTraceBuf.isValid()) {
@@ -832,7 +838,12 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
             d_sssPhotons   = CudaBuffer<GpuPhoton>{};
             d_sssHashCellStart = CudaBuffer<uint32_t>{};
         } else {
-            const float scs = photonSearchRadius;
+            // Cell size = max(3 * d_max, photonSearchRadius) so a ±1 cell
+            // traversal during the query covers the kernel's 3*d support
+            // (captures ~95% of the integral).  Smaller cells than Metal's
+            // 6*d to keep per-query photon counts manageable on the A400.
+            float scsIdeal = (sssD_max > 0.f) ? 3.f * sssD_max : photonSearchRadius;
+            const float scs = std::max(scsIdeal, photonSearchRadius);
             sssHashCellSize = scs;
             sMinX -= scs; sMinY -= scs; sMinZ -= scs;
             sMaxX += scs; sMaxY += scs; sMaxZ += scs;
@@ -863,24 +874,73 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
                           return a.cellIdx < b.cellIdx;
                       });
 
+            // Per-cell photon cap with energy compensation.
+            // Dense regions (face / torso) can pack hundreds of photons per
+            // cell at typical settings, and a single SSS query scans up to
+            // 27 cells × per-cell-count photons.  Capping to kSssPerCellMax
+            // bounds query work to ~27 × kSssPerCellMax regardless of total
+            // photon count, while keeping the density estimate unbiased by
+            // scaling kept photons' power by (kept_fraction)^-1.
+            constexpr uint32_t kSssPerCellMax = 64u;
+            std::vector<GpuPhoton> sssCompacted;
+            sssCompacted.reserve(sssCount);
             std::vector<uint32_t> sssCellStart(sssNumCells + 1, 0);
-            for (const auto& sc : sssAssignments) sssCellStart[sc.cellIdx + 1]++;
-            for (uint32_t c = 0; c < sssNumCells; ++c) sssCellStart[c + 1] += sssCellStart[c];
+            uint32_t cappedTotal = 0;
+            uint32_t cappedDropped = 0;
+            std::mt19937 capRng(0xCAFEF00Du);
+            {
+                size_t i = 0;
+                while (i < sssAssignments.size()) {
+                    size_t j = i;
+                    uint32_t cell = sssAssignments[i].cellIdx;
+                    while (j < sssAssignments.size()
+                           && sssAssignments[j].cellIdx == cell) ++j;
+                    uint32_t cellCount = static_cast<uint32_t>(j - i);
+                    uint32_t kept      = std::min(cellCount, kSssPerCellMax);
+                    float    scale     = static_cast<float>(cellCount)
+                                       / static_cast<float>(kept);
 
-            // Compact SSS photons in cell-sorted order
-            std::vector<GpuPhoton> sssCompacted(sssCount);
-            for (uint32_t i = 0; i < sssCount; ++i)
-                sssCompacted[i] = hostSssPhotons[sssAssignments[i].photonIdx];
+                    if (cellCount <= kSssPerCellMax) {
+                        for (size_t k = i; k < j; ++k) {
+                            const GpuPhoton& src =
+                                hostSssPhotons[sssAssignments[k].photonIdx];
+                            sssCompacted.push_back(src);
+                        }
+                    } else {
+                        // Reservoir sample: shuffle indices, take first kept.
+                        std::vector<uint32_t> idxs(cellCount);
+                        for (uint32_t k = 0; k < cellCount; ++k) idxs[k] = k;
+                        std::shuffle(idxs.begin(), idxs.end(), capRng);
+                        idxs.resize(kept);
+                        for (uint32_t k : idxs) {
+                            GpuPhoton p = hostSssPhotons[sssAssignments[i + k].photonIdx];
+                            p.power = {p.power.x * scale,
+                                       p.power.y * scale,
+                                       p.power.z * scale};
+                            sssCompacted.push_back(p);
+                        }
+                        cappedDropped += cellCount - kept;
+                    }
+                    sssCellStart[cell + 1] = kept;
+                    cappedTotal += kept;
+                    i = j;
+                }
+            }
+            // Prefix-sum
+            for (uint32_t c = 0; c < sssNumCells; ++c)
+                sssCellStart[c + 1] += sssCellStart[c];
 
-            d_sssPhotons = CudaBuffer<GpuPhoton>(sssCount);
+            d_sssPhotons = CudaBuffer<GpuPhoton>(cappedTotal);
             d_sssPhotons.upload(sssCompacted);
             d_sssHashCellStart = CudaBuffer<uint32_t>(sssCellStart.size());
             d_sssHashCellStart.upload(sssCellStart);
 
             sssMapEnabled   = true;
             sssSearchRadius = photonSearchRadius;
-            printf("[info]  CudaPathIntegrator: SSS hash grid %ux%ux%u (%u cells)\n",
-                   sssHashGridDimX, sssHashGridDimY, sssHashGridDimZ, sssNumCells);
+            printf("[info]  CudaPathIntegrator: SSS hash grid %ux%ux%u (%u cells, "
+                   "%u kept / %u dropped after per-cell cap %u)\n",
+                   sssHashGridDimX, sssHashGridDimY, sssHashGridDimZ, sssNumCells,
+                   cappedTotal, cappedDropped, kSssPerCellMax);
         }
     }
 }
@@ -1120,11 +1180,18 @@ void CudaPathIntegrator::prepare(const SceneView& scene) {
     }
     m_impl->hairMeshBaseID = m_impl->accel->hairMeshBaseID();
 
-    // Materials
+    // Materials — also track sssD_max for SSS hash-grid cell sizing.
     uint32_t nMat = static_cast<uint32_t>(scene.materials.size());
     std::vector<GpuMaterial> gpuMats(std::max(nMat, 1u));
-    for (uint32_t i = 0; i < nMat; ++i)
+    m_impl->sssD_max = 0.f;
+    for (uint32_t i = 0; i < nMat; ++i) {
         gpuMats[i] = extractGpuMaterial(scene.materials[i]);
+        if (scene.materials[i]) {
+            auto sss = scene.materials[i]->subsurfaceParams();
+            if (sss.weight > 0.f)
+                m_impl->sssD_max = std::max(m_impl->sssD_max, sss.radius * sss.scale);
+        }
+    }
     m_impl->d_materials  = CudaBuffer<GpuMaterial>(gpuMats.size());
     m_impl->d_materials.upload(gpuMats);
     m_impl->numMaterials = nMat;
