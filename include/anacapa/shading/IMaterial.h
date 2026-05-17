@@ -63,6 +63,7 @@ public:
         float    weight     = 0.f;
         Spectrum color      = {1.f, 1.f, 1.f};
         float    radius     = 0.1f;
+        float    scale      = 1.f;   // world-space multiplier; effective d = radius * scale
         float    anisotropy = 0.f;
     };
 

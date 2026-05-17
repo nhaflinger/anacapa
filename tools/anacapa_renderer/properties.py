@@ -252,13 +252,22 @@ def register():
     )
     bpy.types.Material.anacapa_subsurface_radius = bpy.props.FloatProperty(
         name="Subsurface Radius",
-        description="Mean free path in scene units. Controls how far light "
-                    "bleeds beneath the surface. Larger = softer, wider glow.",
+        description="Mean free path (scattering length). Effective scattering "
+                    "distance = Radius × Scale. Match the value from your "
+                    "Principled BSDF Subsurface Radius.",
         default=0.1, min=0.0001, soft_max=1.0, precision=4,
+    )
+    bpy.types.Material.anacapa_subsurface_scale = bpy.props.FloatProperty(
+        name="Subsurface Scale",
+        description="World-space scale multiplier for Subsurface Radius. "
+                    "Effective scattering distance = Radius × Scale. "
+                    "Match the Scale value from your Principled BSDF.",
+        default=1.0, min=0.001, soft_max=10.0, precision=3,
     )
 
 
 def unregister():
+    del bpy.types.Material.anacapa_subsurface_scale
     del bpy.types.Material.anacapa_subsurface_radius
     del bpy.types.Material.anacapa_subsurface_color
     del bpy.types.Material.anacapa_subsurface

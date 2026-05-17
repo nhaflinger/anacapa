@@ -514,18 +514,14 @@ static StandardSurfaceMaterial::Params resolveOpenPBRParams(
                 surface.GetInput(TfToken("subsurface_color")),
                 Spectrum{1.f, 1.f, 1.f}, stageDir);
 
-            // Radius: try subsurface_scale (scalar) first, then average the
-            // color3 subsurface_radius vector if present.
-            float scale = resolveFloatTOV(
-                surface.GetInput(TfToken("subsurface_scale")), 0.f, stageDir).value;
-            if (scale > 0.f) {
-                p.subsurface_radius = scale;
-            } else {
-                SpectrumTOV radVec = resolveColorTOV(
-                    surface.GetInput(TfToken("subsurface_radius")),
-                    Spectrum{0.1f, 0.1f, 0.1f}, stageDir);
-                p.subsurface_radius = (radVec.value.x + radVec.value.y + radVec.value.z) / 3.f;
-            }
+            SpectrumTOV radVec = resolveColorTOV(
+                surface.GetInput(TfToken("subsurface_radius")),
+                Spectrum{0.1f, 0.1f, 0.1f}, stageDir);
+            p.subsurface_radius = (radVec.value.x + radVec.value.y + radVec.value.z) / 3.f;
+
+            p.subsurface_scale = resolveFloatTOV(
+                surface.GetInput(TfToken("subsurface_scale")), 1.f, stageDir).value;
+            if (p.subsurface_scale <= 0.f) p.subsurface_scale = 1.f;
 
             p.subsurface_anisotropy = resolveFloatTOV(
                 surface.GetInput(TfToken("subsurface_anisotropy")), 0.0f, stageDir).value;
@@ -662,14 +658,13 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                     SpectrumTOV sssColor = resolveColorTOV(
                         preview.GetInput(TfToken("subsurface_color")),
                         Spectrum{1.f, 1.f, 1.f}, stageDir);
+                    SpectrumTOV rv = resolveColorTOV(
+                        preview.GetInput(TfToken("subsurface_radius")),
+                        Spectrum{0.1f, 0.1f, 0.1f}, stageDir);
+                    float radius = (rv.value.x + rv.value.y + rv.value.z) / 3.f;
                     float scale = resolveFloatTOV(
-                        preview.GetInput(TfToken("subsurface_scale")), 0.f, stageDir).value;
-                    float radius = scale > 0.f ? scale : [&]{
-                        SpectrumTOV rv = resolveColorTOV(
-                            preview.GetInput(TfToken("subsurface_radius")),
-                            Spectrum{0.1f, 0.1f, 0.1f}, stageDir);
-                        return (rv.value.x + rv.value.y + rv.value.z) / 3.f;
-                    }();
+                        preview.GetInput(TfToken("subsurface_scale")), 1.f, stageDir).value;
+                    if (scale > 0.f) radius *= scale;
                     float aniso = resolveFloatTOV(
                         preview.GetInput(TfToken("subsurface_anisotropy")), 0.0f, stageDir).value;
                     oslSetSubsurfaceParams(osl.get(), sssWeight, sssColor.value, radius, aniso);
@@ -730,16 +725,13 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                     p.subsurface_color = resolveColorTOV(
                         preview.GetInput(TfToken("subsurface_color")),
                         Spectrum{1.f, 1.f, 1.f}, stageDir);
+                    SpectrumTOV radVec = resolveColorTOV(
+                        preview.GetInput(TfToken("subsurface_radius")),
+                        Spectrum{0.1f, 0.1f, 0.1f}, stageDir);
+                    p.subsurface_radius = (radVec.value.x + radVec.value.y + radVec.value.z) / 3.f;
                     float scale = resolveFloatTOV(
-                        preview.GetInput(TfToken("subsurface_scale")), 0.f, stageDir).value;
-                    if (scale > 0.f) {
-                        p.subsurface_radius = scale;
-                    } else {
-                        SpectrumTOV radVec = resolveColorTOV(
-                            preview.GetInput(TfToken("subsurface_radius")),
-                            Spectrum{0.1f, 0.1f, 0.1f}, stageDir);
-                        p.subsurface_radius = (radVec.value.x + radVec.value.y + radVec.value.z) / 3.f;
-                    }
+                        preview.GetInput(TfToken("subsurface_scale")), 1.f, stageDir).value;
+                    p.subsurface_scale = (scale > 0.f) ? scale : 1.f;
                     p.subsurface_anisotropy = resolveFloatTOV(
                         preview.GetInput(TfToken("subsurface_anisotropy")), 0.0f, stageDir).value;
                 }
@@ -865,16 +857,14 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                 surface.GetInput(TfToken("subsurface_color")),
                 Spectrum{1.f, 1.f, 1.f}, stageDir);
 
-            float scale = resolveFloatTOV(
-                surface.GetInput(TfToken("subsurface_scale")), 0.f, stageDir).value;
-            if (scale > 0.f) {
-                p.subsurface_radius = scale;
-            } else {
-                SpectrumTOV radVec = resolveColorTOV(
-                    surface.GetInput(TfToken("subsurface_radius")),
-                    Spectrum{0.1f, 0.1f, 0.1f}, stageDir);
-                p.subsurface_radius = (radVec.value.x + radVec.value.y + radVec.value.z) / 3.f;
-            }
+            SpectrumTOV radVec = resolveColorTOV(
+                surface.GetInput(TfToken("subsurface_radius")),
+                Spectrum{0.1f, 0.1f, 0.1f}, stageDir);
+            p.subsurface_radius = (radVec.value.x + radVec.value.y + radVec.value.z) / 3.f;
+
+            p.subsurface_scale = resolveFloatTOV(
+                surface.GetInput(TfToken("subsurface_scale")), 1.f, stageDir).value;
+            if (p.subsurface_scale <= 0.f) p.subsurface_scale = 1.f;
 
             p.subsurface_anisotropy = resolveFloatTOV(
                 surface.GetInput(TfToken("subsurface_anisotropy")), 0.0f, stageDir).value;

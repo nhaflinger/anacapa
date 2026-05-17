@@ -4533,6 +4533,7 @@ def _inject_sss_params(usd_path):
         weight  = mat.anacapa_subsurface
         color   = mat.anacapa_subsurface_color       # FloatVectorProperty → tuple
         radius  = mat.anacapa_subsurface_radius
+        scale   = getattr(mat, "anacapa_subsurface_scale", 1.0)
 
         for desc in Usd.PrimRange(prim):
             if not desc.IsA(UsdShade.Shader):
@@ -4548,7 +4549,9 @@ def _inject_sss_params(usd_path):
             shader.CreateInput("subsurface_weight", Sdf.ValueTypeNames.Float).Set(weight)
             shader.CreateInput("subsurface_color",  Sdf.ValueTypeNames.Color3f).Set(
                 Gf.Vec3f(color[0], color[1], color[2]))
-            shader.CreateInput("subsurface_radius", Sdf.ValueTypeNames.Float).Set(radius)
+            shader.CreateInput("subsurface_radius", Sdf.ValueTypeNames.Color3f).Set(
+                Gf.Vec3f(radius, radius, radius))
+            shader.CreateInput("subsurface_scale",  Sdf.ValueTypeNames.Float).Set(scale)
             touched += 1
 
     if touched:

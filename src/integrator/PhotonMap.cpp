@@ -177,12 +177,24 @@ Spectrum PhotonMap::estimateSSSRadiance(Vec3f p, Vec3f n,
                                          float d) const {
     if (m_photons.size() <= 1 || d <= 0.f) return {};
 
-    float searchR = 4.f * d;
+    // 6d captures 99.75% of exp(-r/d) weight; the kernel naturally decays to
+    // exp(-6)≈0.0025 at the boundary so there's no hard edge cutoff.
+    float searchR = 6.f * d;
 
     std::vector<const Photon*> nearby;
-    nearby.reserve(128);
+    nearby.reserve(256);
     search(1, p, searchR * searchR, nearby);
     if (nearby.empty()) return {};
+
+    // Hard minimum: if fewer than 4 photons found there is not enough density
+    // to produce a valid estimate — return nothing rather than a bright hotspot.
+    // Above 4, smoothstep from 0 to 1 by 24 photons to fade at sparse boundaries.
+    constexpr int kHardMin = 4;
+    constexpr int kSoftMin = 24;
+    if ((int)nearby.size() < kHardMin) return {};
+    float t = std::min(1.f, (float)((int)nearby.size() - kHardMin)
+                              / (float)(kSoftMin - kHardMin));
+    float density_scale = t * t * (3.f - 2.f * t); // smoothstep
 
     float norm = 1.f / (2.f * kPi * kPi * d * d); // extra 1/π: irradiance → radiance
     Spectrum L = {};
@@ -201,7 +213,7 @@ Spectrum PhotonMap::estimateSSSRadiance(Vec3f p, Vec3f n,
             w *= std::exp(proj / d); // proj negative → exp(-|depth|/d)
         L += ph->power * w;
     }
-    return subsurface_color * L;
+    return subsurface_color * (L * density_scale);
 }
 
 } // namespace anacapa

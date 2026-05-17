@@ -319,6 +319,7 @@ public:
         float        subsurface            = 0.0f;   // weight [0,1]
         SpectrumTOV  subsurface_color      = SpectrumTOV({1.f, 1.f, 1.f});
         float        subsurface_radius     = 0.1f;   // mean free path in world units
+        float        subsurface_scale      = 1.0f;   // world-space multiplier; effective d = radius * scale
         float        subsurface_anisotropy = 0.0f;   // Henyey-Greenstein g [-1,1]
 
         // Emission
@@ -381,6 +382,7 @@ public:
         return { m_p.subsurface,
                  evalTOV(m_p.subsurface_color, {}),
                  m_p.subsurface_radius,
+                 m_p.subsurface_scale,
                  m_p.subsurface_anisotropy };
     }
 

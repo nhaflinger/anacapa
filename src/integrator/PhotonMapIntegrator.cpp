@@ -1,6 +1,7 @@
 #include "PhotonMapIntegrator.h"
 #include "ShadowRay.h"
 #include <anacapa/shading/ShadingContext.h>
+#include "../shading/Lambertian.h"
 #include <spdlog/spdlog.h>
 #include <random>
 #include <cmath>
@@ -133,20 +134,38 @@ void PhotonMapIntegrator::tracePhotons(const SceneView& scene) {
                 if (mat->isCausticGenerator())
                     ++numSpecular;
             } else if (mat->isSubsurface()) {
-                // SSS surface: deposit once and stop, analogous to caustic
-                // photons.  Bleed-through (light exiting the far face) is
-                // achieved by the Gaussian search radius spanning the geometry
-                // thickness: when σ > half-thickness, the front-face query
-                // finds back-face deposits and vice versa.  Depositing on both
-                // faces and continuing would double-count each photon's energy.
-                Photon ph;
-                ph.position = si.p;
-                ph.normal   = si.n;
-                ph.wi       = photonRay.direction;
-                ph.power    = power;
-                ph.axis     = 0;
-                sssPhotons.push_back(ph);
-                break; // one deposit per photon path
+                // Deposit the absorbed fraction as an SSS photon, then
+                // continue the photon path with the transmitted fraction.
+                // This allows indirect photons to reach shadowed areas
+                // (inner folds, lip edges) that receive no direct photons.
+                //
+                // Absorbed fraction = entrycos * sss.weight.
+                // Transmitted fraction = 1 - absorbed.
+                // Power is conserved: deposit + continue = original power.
+                auto sss = mat->subsurfaceParams();
+                float entrycos = std::max(0.f, -dot(photonRay.direction, si.n));
+                float absorbed = entrycos * std::max(0.f, sss.weight);
+
+                if (absorbed > 0.f) {
+                    Photon ph;
+                    ph.position = si.p;
+                    ph.normal   = si.n;
+                    ph.wi       = photonRay.direction;
+                    ph.power    = power * absorbed;
+                    ph.axis     = 0;
+                    sssPhotons.push_back(ph);
+                }
+
+                // Continue with remaining energy via diffuse bounce so that
+                // indirect photons reach geometrically shadowed SSS regions.
+                float transmitted = 1.f - absorbed;
+                power = power * transmitted;
+                if (isBlack(power) || !power.isFinite()) break;
+
+                ShadingContext ctx(si, photonRay.direction);
+                Vec3f wiLocal = sampleCosineHemisphere(rand2());
+                photonRay = spawnRay(si.p, si.n, ctx.toWorld(wiLocal));
+                numSpecular = 0;
             } else {
                 // Regular diffuse: store caustic photon if the path came through specular.
                 if (numSpecular > 0) {
@@ -366,10 +385,27 @@ Spectrum PhotonMapIntegrator::Li(const Ray& ray, const SceneView& scene,
             if (!m_sssMap.empty()) {
                 auto sss = mat->subsurfaceParams();
                 if (sss.weight > 0.f) {
+                    float d = sss.radius * sss.scale;
                     Spectrum Lsss = m_sssMap.estimateSSSRadiance(
-                        si.p, si.n, sss.color, sss.radius);
-                    if (!isBlack(Lsss))
-                        L += beta * Lsss * sss.weight;
+                        si.p, si.n, sss.color, d);
+                    if (!isBlack(Lsss)) {
+                        // Thickness attenuation: cast an inward ray to measure
+                        // local geometry thickness, then attenuate by
+                        // exp(-thickness / absLength) where absLength = d * 30.
+                        // Scattering and absorption are different length scales —
+                        // absorption typically 30-50x the scattering mean free
+                        // path. Thin geometry (fingers) stays near 1; thick
+                        // geometry (torso) drops toward 0.
+                        float thicknessScale = 1.f;
+                        if (d > 0.f) {
+                            Ray inwardRay = spawnRay(si.p, si.n, -si.n);
+                            TraceResult thickHit = scene.accel->trace(inwardRay);
+                            if (thickHit.hit) {
+                                thicknessScale = std::exp(-thickHit.si.t / (d * 30.f));
+                            }
+                        }
+                        L += beta * Lsss * sss.weight * thicknessScale;
+                    }
                 }
             }
         }
