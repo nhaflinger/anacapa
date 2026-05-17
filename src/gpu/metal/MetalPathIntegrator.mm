@@ -614,10 +614,11 @@ void MetalPathIntegrator::Impl::buildPhotonMap(
         sssHashCellStartBuf   = nil;
         sssSortedPhotonIdxBuf = nil;
     } else {
-        // Cell size = search radius = 6*d_max so that a ±1 cell traversal
-        // (27 cells) covers the full kernel support.  Floor at photonSearchRadius
-        // for scenes with no SSS or very small d.
-        float scsIdeal = (sssD_max > 0.f) ? 6.f * sssD_max : photonSearchRadius;
+        // Cell size = search radius = 3*d_max so that a ±1 cell traversal
+        // (27 cells) covers 3d support (~95% of weight, same visual result as 6d
+        // at typical photon densities, with 8x fewer photons per query).
+        // Floor at photonSearchRadius for scenes with no SSS or very small d.
+        float scsIdeal = (sssD_max > 0.f) ? 3.f * sssD_max : photonSearchRadius;
         float scs = std::max(scsIdeal, photonSearchRadius);
         sssHashCellSize = scs;
         sMinX -= scs; sMinY -= scs; sMinZ -= scs;

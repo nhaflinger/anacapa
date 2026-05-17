@@ -967,9 +967,10 @@ static float3 querySSSHashGrid(
 {
     if (!cam.sssMapEnabled || d <= 0.f) return float3(0);
 
-    // Hash grid cell size = 6*d_max (set by host), so ±1 traversal covers
-    // the full 6d kernel support.  Per-material: actual search radius = 6*d.
-    float r  = 6.f * d;
+    // Hash grid cell size = 3*d_max (set by host), so ±1 traversal covers
+    // 3d kernel support (~95% of exp(-r/d) weight — same visual result as 6d
+    // at typical photon densities, with 8x fewer photons per query).
+    float r  = 3.f * d;
     float r2 = r * r;
     float cs = cam.sssHashCellSize;
 
@@ -1381,7 +1382,23 @@ kernel void shade(
                                         mat.subsurfaceColor.z);
                 float3 Lsss = querySSSHashGrid(hitPos, n, sssColor, mat.subsurfaceRadius,
                                                cam, sssCellStart, sssSortedIdx, sssPhotons);
-                L += throughput * Lsss * mat.subsurfaceWeight;
+                // Thickness attenuation: cast inward ray to measure local geometry
+                // depth.  exp(-thickness/(d*30)) suppresses bleed-through on thick
+                // geometry (torso) while leaving thin parts (fingers, ears) near 1.
+                float thicknessScale = 1.f;
+                float d = mat.subsurfaceRadius;
+                if (d > 0.f) {
+                    ray inwardRay;
+                    inwardRay.origin       = hitPos - n * 1e-4f;
+                    inwardRay.direction    = -n;
+                    inwardRay.min_distance = 1e-4f;
+                    inwardRay.max_distance = 1e10f;
+                    intersector<instancing, primitive_motion> isect;
+                    auto thickResult = isect.intersect(inwardRay, accelStruct, rayTime);
+                    if (thickResult.type != intersection_type::none)
+                        thicknessScale = exp(-thickResult.distance / (d * 30.f));
+                }
+                L += throughput * Lsss * mat.subsurfaceWeight * thicknessScale;
             }
         }
 
