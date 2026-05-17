@@ -6,7 +6,9 @@
 #include <anacapa/render/IDisplayDriver.h>
 #include <anacapa/accel/GeometryPool.h>
 #include <anacapa/accel/CurvePool.h>
+#include <anacapa/accel/HaloPool.h>
 #include <anacapa/accel/IAccelerationStructure.h>
+#include "../accel/HaloAccel.h"
 #include <anacapa/sampling/ISampler.h>
 #include <anacapa/shading/IMaterial.h>
 #include <anacapa/shading/ILight.h>
@@ -143,9 +145,11 @@ private:
     RenderSettings                        m_settings;
     GeometryPool                          m_geomPool;
     CurvePool                             m_curvePool;
+    HaloPool                              m_haloPool;
     SceneView                             m_scene;
     std::optional<Camera>                 m_camera;   // set by USD loader if present
     std::unique_ptr<IAccelerationStructure> m_accel;
+    std::unique_ptr<HaloAccel>            m_haloAccel;
     std::unique_ptr<Film>                 m_film;
     std::unique_ptr<IIntegrator>          m_integrator;
     std::unique_ptr<ISampler>             m_baseSampler;

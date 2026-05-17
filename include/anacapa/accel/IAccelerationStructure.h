@@ -24,6 +24,7 @@ struct SurfaceInteraction {
     uint32_t instanceID = ~0u;
     uint32_t strandID   = ~0u;  // Index into CurvePool (curves only; ~0u for triangles)
     bool     isCurve    = false; // True when the hit is a hair/curve primitive
+    bool     isHalo     = false; // True when the hit is a camera-facing halo disc particle
     float    h          = 0.f;  // Hair impact parameter ∈ (-1,1): px/halfW from ray-space intersection
     Vec3f    color      = {1.f, 1.f, 1.f};  // per-strand color propagated from StrandDesc
 

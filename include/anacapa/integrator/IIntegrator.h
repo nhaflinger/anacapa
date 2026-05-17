@@ -11,6 +11,7 @@ namespace anacapa {
 
 class IAccelerationStructure;
 class CurvePool;
+class HaloAccel;
 class IMaterial;
 class ILight;
 class ISampler;
@@ -185,6 +186,7 @@ struct Camera {
 struct SceneView {
     const IAccelerationStructure*        accel     = nullptr;
     const CurvePool*                     curvePool = nullptr;  // nullptr when no hair in scene
+    const HaloAccel*                     haloAccel = nullptr;  // nullptr when no particles in scene
     std::vector<const IMaterial*>        materials;   // indexed by meshID
     std::vector<const ILight*>           lights;
     const ILight*                        envLight = nullptr;  // Infinite/dome light (nullptr = constant)

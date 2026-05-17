@@ -17,6 +17,7 @@
 #include <pxr/usd/usdGeom/xformCache.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdGeom/pointInstancer.h>
+#include <pxr/usd/usdGeom/points.h>
 #include <pxr/usd/usdLux/rectLight.h>
 #include <pxr/usd/usdLux/sphereLight.h>
 #include <pxr/usd/usdLux/diskLight.h>
@@ -1804,6 +1805,81 @@ LoadedScene loadUSD(const std::string& path,
                 "({} instances, {} prototype(s))",
                 prim.GetPath().GetString(), loadedCount,
                 instanceXforms.size(), protoPaths.size());
+        }
+
+        // ---- Points (camera-facing halo disc particles) ----
+        else if (prim.IsA<UsdGeomPoints>()) {
+            UsdGeomPoints pts(prim);
+            GfMatrix4d xform = xformCache.GetLocalToWorldTransform(prim);
+
+            VtArray<GfVec3f> points;
+            pts.GetPointsAttr().Get(&points, tcOpen);
+            if (points.empty()) continue;
+
+            // widths is diameter per-point; radius = width/2
+            VtArray<float> widths;
+            pts.GetWidthsAttr().Get(&widths, tcOpen);
+
+            // Per-point display color from primvars:displayColor
+            VtArray<GfVec3f> colors;
+            UsdGeomPrimvarsAPI pvAPI(prim);
+            auto dcPv = pvAPI.GetPrimvar(TfToken("displayColor"));
+            if (dcPv) dcPv.ComputeFlattened(&colors, tcOpen);
+
+            // Material: prefer USD binding, then displayColor fallback
+            uint32_t matIdx = kDefaultMatIdx;
+            UsdShadeMaterialBindingAPI bindAPI(prim);
+            UsdShadeMaterial boundMat = bindAPI.ComputeBoundMaterial();
+            if (boundMat) {
+                std::string matPath = boundMat.GetPath().GetString();
+                auto it = matPathToIdx.find(matPath);
+                if (it != matPathToIdx.end()) {
+                    matIdx = it->second;
+                } else {
+                    matIdx = static_cast<uint32_t>(result.materials.size());
+                    result.materials.push_back(resolveMaterial(boundMat, stageDir));
+                    matPathToIdx[matPath] = matIdx;
+                }
+            } else if (!colors.empty()) {
+                GfVec3f c = colors[0];
+                uint32_t key = (uint32_t(c[0]*255) << 16) | (uint32_t(c[1]*255) << 8) | uint32_t(c[2]*255);
+                auto it = displayColorToIdx.find(key);
+                if (it != displayColorToIdx.end()) {
+                    matIdx = it->second;
+                } else {
+                    matIdx = static_cast<uint32_t>(result.materials.size());
+                    result.materials.push_back(
+                        std::make_unique<LambertianMaterial>(Spectrum{c[0], c[1], c[2]}));
+                    displayColorToIdx[key] = matIdx;
+                }
+            }
+
+            uint32_t addedCount = 0;
+            for (size_t i = 0; i < points.size(); ++i) {
+                HaloDesc h;
+                GfVec3d pt3 = xform.Transform(GfVec3d(points[i]));
+                GfVec3f wpt((float)pt3[0], (float)pt3[1], (float)pt3[2]);
+                h.center = zUp ? Vec3f{wpt[0], wpt[2], -wpt[1]}
+                               : Vec3f{wpt[0], wpt[1],  wpt[2]};
+
+                float w = widths.empty()           ? 0.02f
+                        : widths.size() == 1       ? widths[0]
+                        : i < widths.size()        ? widths[i]
+                        : widths.back();
+                h.radius = w * 0.5f;
+
+                if (!colors.empty()) {
+                    const GfVec3f& c = colors.size() == 1 ? colors[0]
+                                     : i < colors.size()  ? colors[i]
+                                     : colors.back();
+                    h.color = {c[0], c[1], c[2]};
+                }
+                h.matIdx = matIdx;
+                result.haloPool.addHalo(h);
+                ++addedCount;
+            }
+            spdlog::info("USDLoader: GeomPoints '{}' → {} halo discs",
+                         prim.GetPath().GetString(), addedCount);
         }
 
         // ---- RectLight ----

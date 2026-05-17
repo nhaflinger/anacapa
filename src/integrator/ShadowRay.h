@@ -4,6 +4,7 @@
 #include <anacapa/integrator/IIntegrator.h>
 #include <anacapa/shading/IMaterial.h>
 #include <anacapa/shading/ShadingContext.h>
+#include "../accel/HaloAccel.h"
 
 namespace anacapa {
 
@@ -36,6 +37,10 @@ inline Spectrum shadowTransmittance(Ray ray,
                                     int maxTransparent = 8)
 {
     Spectrum T = {1.f, 1.f, 1.f};
+
+    // Halo discs are treated as opaque blockers in Phase 1.
+    if (scene.haloAccel && scene.haloAccel->occluded(ray))
+        return {};
 
     for (int i = 0; i < maxTransparent; ++i) {
         TraceResult hit = scene.accel->trace(ray);

@@ -1,5 +1,6 @@
 #include "PathIntegrator.h"
 #include "ShadowRay.h"
+#include "../accel/HaloAccel.h"
 #include <anacapa/shading/ShadingContext.h>
 #include <cmath>
 
@@ -100,6 +101,15 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
 
     for (uint32_t bounce = 0; bounce <= m_maxDepth; ++bounce) {
         TraceResult hit = scene.accel->trace(r);
+
+        // Camera-facing halo disc particles — take closer of triangle and halo hits.
+        if (scene.haloAccel) {
+            Ray haloRay   = r;
+            if (hit.hit) haloRay.tMax = hit.si.t;
+            TraceResult haloHit = scene.haloAccel->trace(haloRay);
+            if (haloHit.hit && (!hit.hit || haloHit.si.t < hit.si.t))
+                hit = haloHit;
+        }
 
         if (!hit.hit) {
             // Background / environment light

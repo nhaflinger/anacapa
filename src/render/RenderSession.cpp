@@ -2,6 +2,7 @@
 #include <anacapa/render/FileDisplayDriver.h>
 #include "../accel/BVHBackend.h"
 #include "../accel/CurveBrute.h"
+#include "../accel/HaloAccel.h"
 #include "../integrator/PathIntegrator.h"
 #include "../integrator/BDPTIntegrator.h"
 #include "../integrator/PhotonMapIntegrator.h"
@@ -159,6 +160,7 @@ void RenderSession::loadScene() {
         }
         m_geomPool           = std::move(loaded.geomPool);
         m_curvePool          = std::move(loaded.curvePool);
+        m_haloPool           = std::move(loaded.haloPool);
         m_scene              = std::move(loaded.sceneView);
         m_camera             = std::move(loaded.camera);
         m_materials          = std::move(loaded.materials);
@@ -629,6 +631,13 @@ void RenderSession::buildAccelStructure() {
     m_scene.accel         = m_accel.get();
     m_scene.curvePool     = &m_curvePool;
     m_scene.hairTessSteps = m_settings.hairTessSteps;
+
+    if (m_haloPool.numHalos() > 0) {
+        m_haloAccel = std::make_unique<HaloAccel>(m_haloPool);
+        m_haloAccel->commit();
+        m_scene.haloAccel = m_haloAccel.get();
+        spdlog::info("HaloAccel: {} particles", m_haloPool.numHalos());
+    }
 }
 
 // ---------------------------------------------------------------------------
