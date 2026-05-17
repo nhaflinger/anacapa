@@ -893,6 +893,12 @@ def export_usd(usd_path, context, run_prep=True):
         if s["dirty_scene"] and prep is not None:
             print("[Anacapa] Running scene prep…")
             bake_dir = os.path.dirname(usd_path)
+            # Snapshot which objects exist and their render-visibility before prep
+            scene_obj = bpy.context.scene
+            pre_objects = {
+                obj.name: (obj.hide_render, obj.hide_viewport)
+                for obj in scene_obj.objects
+            }
             try:
                 prep.prepare_scene(bake_dir=bake_dir)
             except Exception as e:
@@ -906,7 +912,7 @@ def export_usd(usd_path, context, run_prep=True):
             export_uvmaps=True,
             export_normals=True,
             export_materials=True,
-            use_instancing=False,
+            use_instancing=True,
             generate_preview_surface=True,
             generate_materialx_network=True,
             export_textures_mode='NEW',
@@ -918,6 +924,20 @@ def export_usd(usd_path, context, run_prep=True):
                 prep.post_process_usd(usd_path)
             except Exception as e:
                 print(f"[Anacapa] USD post-process warning: {e}")
+
+        # Restore scene: remove objects prep created, restore hide states
+        if s["dirty_scene"] and prep is not None:
+            scene_obj = bpy.context.scene
+            for obj in list(scene_obj.objects):
+                if obj.name not in pre_objects:
+                    bpy.data.objects.remove(obj, do_unlink=True)
+                else:
+                    was_hr, was_hv = pre_objects[obj.name]
+                    if obj.hide_render != was_hr:
+                        obj.hide_render = was_hr
+                    if obj.hide_viewport != was_hv:
+                        obj.hide_viewport = was_hv
+            print("[Anacapa] Scene restored after export.")
 
         s["dirty_scene"]     = False
         s["dirty_transform"] = False

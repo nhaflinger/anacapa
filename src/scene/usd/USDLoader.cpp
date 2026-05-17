@@ -16,6 +16,7 @@
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/xformCache.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
+#include <pxr/usd/usdGeom/pointInstancer.h>
 #include <pxr/usd/usdLux/rectLight.h>
 #include <pxr/usd/usdLux/sphereLight.h>
 #include <pxr/usd/usdLux/diskLight.h>
@@ -40,6 +41,7 @@
 #include <fstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -1512,11 +1514,32 @@ LoadedScene loadUSD(const std::string& path,
     // Cameras collected during traversal; resolved after loop
     std::vector<UsdPrim> cameraPrims;
 
+    // Pre-collect all prim paths that serve as PointInstancer prototypes so we
+    // can skip them in the mesh branch (they are loaded with per-instance
+    // transforms instead).  Prototypes may live anywhere in the stage, not
+    // necessarily under the instancer prim.
+    std::unordered_set<std::string> instancerProtoPaths;
+    for (const UsdPrim& p : stage->Traverse()) {
+        if (!p.IsA<UsdGeomPointInstancer>()) continue;
+        SdfPathVector targets;
+        UsdGeomPointInstancer(p).GetPrototypesRel().GetTargets(&targets);
+        for (const SdfPath& tp : targets) {
+            UsdPrim protoPrim = stage->GetPrimAtPath(tp);
+            if (!protoPrim.IsValid()) continue;
+            for (const UsdPrim& child : UsdPrimRange(protoPrim))
+                instancerProtoPaths.insert(child.GetPath().GetString());
+            instancerProtoPaths.insert(tp.GetString());
+        }
+    }
+
     // --- Traverse all prims ---
     for (const UsdPrim& prim : stage->Traverse()) {
 
         // ---- Mesh ----
         if (prim.IsA<UsdGeomMesh>()) {
+            // Skip meshes that are PointInstancer prototypes — handled below.
+            if (instancerProtoPaths.count(prim.GetPath().GetString())) continue;
+
             UsdGeomMesh usdMesh(prim);
 
             // Detect animated transforms by comparing the full world transform
@@ -1685,6 +1708,102 @@ LoadedScene loadUSD(const std::string& path,
 
             spdlog::debug("USDLoader: mesh '{}' → meshID={} matIdx={}",
                           prim.GetPath().GetString(), meshID, matIdx);
+        }
+
+        // ---- PointInstancer (particle / instance scatter) ----
+        else if (prim.IsA<UsdGeomPointInstancer>()) {
+            UsdGeomPointInstancer instancer(prim);
+            GfMatrix4d instancerToWorld = xformCache.GetLocalToWorldTransform(prim);
+
+            SdfPathVector protoPaths;
+            instancer.GetPrototypesRel().GetTargets(&protoPaths);
+            if (protoPaths.empty()) {
+                spdlog::warn("USDLoader: instancer '{}' has no prototypes",
+                             prim.GetPath().GetString());
+                continue;
+            }
+
+            VtArray<int> protoIndices;
+            instancer.GetProtoIndicesAttr().Get(&protoIndices, tcOpen);
+            if (protoIndices.empty()) {
+                spdlog::warn("USDLoader: instancer '{}' has no instances",
+                             prim.GetPath().GetString());
+                continue;
+            }
+
+            // Per-instance transforms in instancer-local space, including each
+            // prototype root's own local transform (IncludeProtoXform).
+            // Multiplying by instancerToWorld gives the proto-root world transform
+            // for each instance.
+            VtArray<GfMatrix4d> instanceXforms;
+            if (!instancer.ComputeInstanceTransformsAtTime(
+                    &instanceXforms, tcOpen, tcOpen,
+                    UsdGeomPointInstancer::IncludeProtoXform)) {
+                spdlog::warn("USDLoader: instancer '{}' — failed to compute transforms",
+                             prim.GetPath().GetString());
+                continue;
+            }
+            if (instanceXforms.size() != protoIndices.size()) continue;
+
+            // Gather mesh prims per prototype with each mesh's transform relative
+            // to the prototype root.  A single prototype may contain multiple
+            // child meshes (e.g. a small hierarchy of leaf parts).
+            struct ProtoMeshEntry { UsdGeomMesh usdMesh; GfMatrix4d relToRoot; };
+            std::vector<std::vector<ProtoMeshEntry>> protoMeshes(protoPaths.size());
+            for (size_t pi = 0; pi < protoPaths.size(); ++pi) {
+                UsdPrim protoPrim = stage->GetPrimAtPath(protoPaths[pi]);
+                if (!protoPrim.IsValid()) continue;
+                GfMatrix4d protoRootWorldInv =
+                    xformCache.GetLocalToWorldTransform(protoPrim).GetInverse();
+                for (const UsdPrim& child : UsdPrimRange(protoPrim)) {
+                    if (!child.IsA<UsdGeomMesh>()) continue;
+                    GfMatrix4d childWorld = xformCache.GetLocalToWorldTransform(child);
+                    protoMeshes[pi].push_back(
+                        {UsdGeomMesh(child), protoRootWorldInv * childWorld});
+                }
+            }
+
+            // Material resolve helper — same caching pattern as the mesh branch.
+            auto resolveMaterialIdx = [&](const UsdShadeMaterial& mat) -> uint32_t {
+                if (!mat) return kDefaultMatIdx;
+                std::string matPath = mat.GetPath().GetString();
+                auto it = matPathToIdx.find(matPath);
+                if (it != matPathToIdx.end()) return it->second;
+                uint32_t idx = static_cast<uint32_t>(result.materials.size());
+                result.materials.push_back(resolveMaterial(mat, stageDir));
+                matPathToIdx[matPath] = idx;
+                return idx;
+            };
+
+            int loadedCount = 0;
+            for (size_t ii = 0; ii < instanceXforms.size(); ++ii) {
+                int pi = protoIndices[ii];
+                if (pi < 0 || pi >= (int)protoPaths.size()) continue;
+
+                // World transform of the prototype root for this instance.
+                GfMatrix4d instanceProtoWorld = instancerToWorld * instanceXforms[ii];
+
+                for (auto& pm : protoMeshes[pi]) {
+                    GfMatrix4d meshWorld = instanceProtoWorld * pm.relToRoot;
+                    uint32_t meshID = loadMesh(pm.usdMesh, meshWorld, {}, result.geomPool, zUp);
+                    if (meshID == ~0u) continue;
+
+                    if (meshID >= result.sceneView.materials.size())
+                        result.sceneView.materials.resize(meshID + 1, nullptr);
+
+                    UsdShadeMaterialBindingAPI bindAPI(pm.usdMesh.GetPrim());
+                    UsdShadeMaterial boundMat = bindAPI.ComputeBoundMaterial();
+                    result.sceneView.materials[meshID] =
+                        result.materials[resolveMaterialIdx(boundMat)].get();
+                    ++loadedCount;
+                }
+            }
+
+            spdlog::info(
+                "USDLoader: instancer '{}' → {} mesh copies "
+                "({} instances, {} prototype(s))",
+                prim.GetPath().GetString(), loadedCount,
+                instanceXforms.size(), protoPaths.size());
         }
 
         // ---- RectLight ----

@@ -77,6 +77,13 @@ def select_only(obj):
 
 def log(msg: str):
     print(f"[prep_usd] {msg}")
+    try:
+        import tempfile, os
+        log_path = os.path.join(tempfile.gettempdir(), "anacapa_prep.log")
+        with open(log_path, "a") as _lf:
+            _lf.write(f"[prep_usd] {msg}\n")
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +188,108 @@ def realize_particle_instances() -> Tuple[int, List[str]]:
         emitters_removed.append(emitter_name)
 
     return created, emitters_removed
+
+
+# ---------------------------------------------------------------------------
+# Step 2b: Realize Geometry Nodes instances
+# ---------------------------------------------------------------------------
+
+def realize_gn_instances() -> Tuple[int, List[str]]:
+    """
+    Realize Geometry Nodes objects into standalone mesh objects.
+
+    Two strategies:
+    1. GN mesh generators (e.g. procedural moss): new_from_object() returns a
+       non-empty mesh — create one realized object with the generator's world TM.
+    2. GN instancers (e.g. scattered leaves): new_from_object() returns empty
+       because the output is virtual instances, not realized geometry.  Fall back
+       to depsgraph.object_instances with this object as parent and create one
+       mesh object per instance.
+
+    hide_render is intentionally NOT filtered here — GN generator objects are
+    often hidden in render (they're just the scatter surface) while their
+    instanced children are the actual visible geometry.
+
+    Returns (objects_realized, generator_names_hidden).
+    """
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+
+    gn_objects = [
+        obj for obj in bpy.context.scene.objects
+        if any(m.type == 'NODES' for m in obj.modifiers)
+    ]
+
+    total_scene = len(list(bpy.context.scene.objects))
+    log(f"  [gn] Scanning {total_scene} scene objects for NODES modifiers...")
+    if not gn_objects:
+        log(f"  [gn] No GN objects found.")
+        return 0, []
+
+    log(f"  [gn] Found {len(gn_objects)} GN object(s): {[o.name for o in gn_objects]}")
+
+    scene_collection = bpy.context.scene.collection
+    created = 0
+    hidden: List[str] = []
+
+    for obj in gn_objects:
+        # --- Strategy 1: realized mesh output ----------------------------------
+        try:
+            eval_obj = obj.evaluated_get(depsgraph)
+            new_mesh = bpy.data.meshes.new_from_object(eval_obj, depsgraph=depsgraph)
+        except Exception as e:
+            log(f"  [gn] '{obj.name}' new_from_object failed: {e}")
+            new_mesh = None
+
+        if new_mesh is not None and len(new_mesh.polygons) > 0:
+            log(f"  [gn] '{obj.name}' → {len(new_mesh.polygons)} polygons (realized mesh).")
+            new_obj = bpy.data.objects.new(f"{obj.name}_gn_realized", new_mesh)
+            new_obj.matrix_world = obj.matrix_world.copy()
+            scene_collection.objects.link(new_obj)
+            created += 1
+            obj.hide_render   = True
+            obj.hide_viewport = True
+            hidden.append(obj.name)
+            continue
+
+        if new_mesh is not None:
+            bpy.data.meshes.remove(new_mesh)
+
+        # --- Strategy 2: GN instancer — collect via depsgraph instances --------
+        log(f"  [gn] '{obj.name}' mesh is empty — trying depsgraph instances...")
+        inst_count = 0
+        for inst in depsgraph.object_instances:
+            if not inst.is_instance:
+                continue
+            if inst.parent is None or inst.parent.original != obj:
+                continue
+            try:
+                eval_inst = inst.object.evaluated_get(depsgraph)
+                inst_mesh = bpy.data.meshes.new_from_object(eval_inst, depsgraph=depsgraph)
+            except Exception as e:
+                log(f"  [gn] instance of '{obj.name}' new_from_object failed: {e}")
+                continue
+            if inst_mesh is None or len(inst_mesh.polygons) == 0:
+                if inst_mesh:
+                    bpy.data.meshes.remove(inst_mesh)
+                continue
+            inst_obj = bpy.data.objects.new(f"{obj.name}_gni_{inst_count:04d}", inst_mesh)
+            inst_obj.matrix_world = inst.matrix_world.copy()
+            scene_collection.objects.link(inst_obj)
+            created += 1
+            inst_count += 1
+
+        if inst_count > 0:
+            log(f"  [gn] '{obj.name}' → {inst_count} instances realized.")
+            obj.hide_render   = True
+            obj.hide_viewport = True
+            hidden.append(obj.name)
+        else:
+            log(f"  [gn] '{obj.name}' — no mesh and no instances found, skipping.")
+
+    if created:
+        log(f"  [gn] Total: {created} object(s) realized; hidden generators: {hidden}")
+
+    return created, hidden
 
 
 # ---------------------------------------------------------------------------
@@ -1290,6 +1399,10 @@ def main():
     # --- Step 2: Particle system instances ---
     log("Step 2: Realizing particle system instances (Object/Collection render type)...")
     n_particle_instances, particle_emitters_removed = realize_particle_instances()
+
+    # --- Step 2b: Geometry Nodes instances ---
+    log("Step 2b: Realizing Geometry Nodes instances...")
+    n_gn, gn_hidden = realize_gn_instances()
 
     # --- Step 3: Convert non-mesh ---
     log("Step 3: Converting non-mesh objects to mesh...")
@@ -3869,22 +3982,57 @@ def _patch_dome_light_texture(usd_path, out_dir, explicit_sky=""):
 
         # Use explicit --sky-texture if provided, otherwise search World shaders
         sky_image_path = None
+        sky_strength = 1.0  # Background node Strength multiplier
+
         if explicit_sky and os.path.exists(explicit_sky):
             sky_image_path = os.path.abspath(explicit_sky)
             print(f"  [dome patch] Using explicit sky texture: '{sky_image_path}'")
         else:
-            # Search World shader node trees for a sky/environment image
+            # Recursively collect all nodes in a node tree (including node groups).
+            def _all_nodes(node_tree, _visited=None):
+                if _visited is None:
+                    _visited = set()
+                for node in node_tree.nodes:
+                    yield node
+                    if node.type == 'GROUP' and node.node_tree \
+                            and id(node.node_tree) not in _visited:
+                        _visited.add(id(node.node_tree))
+                        yield from _all_nodes(node.node_tree, _visited)
+
             for world in bpy.data.worlds:
                 if not world.use_nodes:
                     continue
+                # Capture Background node Strength (may be overridden below).
                 for node in world.node_tree.nodes:
-                    if node.type in ('TEX_ENVIRONMENT', 'TEX_SKY', 'TEX_IMAGE'):
-                        img = getattr(node, 'image', None)
-                        if img and img.filepath:
-                            fpath = bpy.path.abspath(img.filepath)
-                            if os.path.exists(fpath):
-                                sky_image_path = fpath
-                                break
+                    if node.type == 'BACKGROUND':
+                        try:
+                            sky_strength = float(node.inputs['Strength'].default_value)
+                        except Exception:
+                            pass
+
+                for node in _all_nodes(world.node_tree):
+                    if node.type not in ('TEX_ENVIRONMENT', 'TEX_IMAGE'):
+                        continue
+                    img = getattr(node, 'image', None)
+                    if not img:
+                        continue
+                    # Try filepath_from_user first (handles relative paths properly),
+                    # then fall back to bpy.path.abspath on the raw filepath.
+                    fpath = ''
+                    try:
+                        fpath = img.filepath_from_user()
+                    except Exception:
+                        pass
+                    if not fpath:
+                        fpath = bpy.path.abspath(img.filepath) if img.filepath else ''
+                    if not fpath:
+                        continue
+                    # Accept the path even if the file doesn't exist locally —
+                    # packed images or network paths may not resolve on this machine.
+                    sky_image_path = fpath
+                    print(f"  [dome patch] Found sky image '{fpath}' "
+                          f"(exists={os.path.exists(fpath)})")
+                    break
                 if sky_image_path:
                     break
 
@@ -3893,15 +4041,27 @@ def _patch_dome_light_texture(usd_path, out_dir, explicit_sky=""):
                   f"Re-export with --sky-texture <path> to fix.")
             continue
 
+        if not os.path.exists(sky_image_path):
+            print(f"  [dome patch] Sky image '{sky_image_path}' not found on disk — skipping.")
+            continue
+
         # Copy sky image to textures/
         sky_fname = os.path.basename(sky_image_path)
         dst = os.path.join(tex_dir, sky_fname)
         if not os.path.exists(dst):
             shutil.copy2(sky_image_path, dst)
 
-        # Rewrite the DomeLight texture path (relative to USD)
+        # Rewrite the DomeLight texture path (relative to USD).
         rel_path = f"./textures/{sky_fname}"
         ap_attr.Set(Sdf.AssetPath(rel_path))
+
+        # Also update intensity with the Background node Strength if non-trivial.
+        if sky_strength != 1.0:
+            dome.GetPrim().CreateAttribute(
+                'inputs:intensity', Sdf.ValueTypeNames.Float
+            ).Set(sky_strength)
+            print(f"  [dome patch] Updated DomeLight intensity → {sky_strength:.3f}")
+
         print(f"  [dome patch] Rewrote DomeLight texture → '{rel_path}'")
         patched = True
 
@@ -4407,6 +4567,7 @@ def prepare_scene(bake_dir="."):
 
     realize_instances()
     realize_particle_instances()
+    realize_gn_instances()
     convert_to_mesh()
     apply_modifiers()
     apply_transforms()
