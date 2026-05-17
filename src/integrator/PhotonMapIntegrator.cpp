@@ -411,16 +411,6 @@ Spectrum PhotonMapIntegrator::Li(const Ray& ray, const SceneView& scene,
                     Spectrum Lsss = m_sssMap.estimateSSSRadiance(
                         si.p, si.n, sss.color, d);
                     if (!isBlack(Lsss)) {
-                        // Thickness attenuation disabled — visually preferred without it.
-                        // float thicknessScale = 1.f;
-                        // if (d > 0.f) {
-                        //     Ray inwardRay = spawnRay(si.p, si.n, -si.n);
-                        //     inwardRay.time = ray.time;
-                        //     TraceResult thickHit = scene.accel->trace(inwardRay);
-                        //     if (thickHit.hit)
-                        //         thicknessScale = std::exp(-thickHit.si.t / (d * 30.f));
-                        // }
-                        // L += beta * Lsss * sss.weight * sss.strength * thicknessScale;
                         L += beta * Lsss * sss.weight * sss.strength;
                     }
                 }
