@@ -13,7 +13,9 @@
 #include <anacapa/accel/GeometryPool.h>
 
 // Material type-detection includes — used in prepare() only
+#include "../../accel/HaloAccel.h"
 #include "../../shading/Lambertian.h"
+#include "../../shading/SoftParticle.h"
 #include "../../shading/StandardSurface.h"
 #include "../../shading/MarschnerHair.h"
 #include "../../shading/ChiangHair.h"
@@ -86,6 +88,12 @@ struct MetalPathIntegrator::Impl {
     id<MTLBuffer> hairMatBuf      = nil;
     uint32_t      numHairMats     = 0;
     uint32_t      hairMeshBaseID  = 0xFFFFFFFFu;
+
+    // Halo disc particle buffers — uploaded once per prepare()
+    id<MTLBuffer> haloDescBuf   = nil;  // GpuHaloDesc[numHalos]
+    id<MTLBuffer> haloNodeBuf   = nil;  // GpuHaloNode[numHaloNodes]
+    id<MTLBuffer> haloPrimIdxBuf = nil; // uint32_t[numHaloPrimIdx]
+    uint32_t      numHalos      = 0;
 
     // Pointer to scene geometry (for building the accel structure)
     const GeometryPool* geomPool = nullptr;
@@ -194,6 +202,19 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
 
     if (!mat) return gm;
     gm.causticGenerator = mat->isCausticGenerator() ? 1u : 0u;
+
+    // SoftParticleMaterial — always emissive, opacity stored in roughness.
+    // Handled first so opacity is always propagated even when emission is zero
+    // (zero emission means "use per-particle hd.color at render time").
+    if (auto* spm = dynamic_cast<const SoftParticleMaterial*>(mat)) {
+        SurfaceInteraction si; si.n = si.ng = {0,0,1};
+        ShadingContext ctx(si, {0,0,-1});
+        Spectrum Le = spm->Le(ctx, {0,0,1});
+        gm.type     = kMatEmissive;
+        gm.emissive = {Le.x, Le.y, Le.z};
+        gm.roughness = spm->opacity();
+        return gm;
+    }
 
     // Emissive — covers EmissiveMaterial, StandardSurfaceMaterial with emission > 0,
     // OslMaterial with emission, etc.  Use a dummy front-face ShadingContext so Le
@@ -726,6 +747,48 @@ void MetalPathIntegrator::prepare(const SceneView& scene) {
         m_impl->numHairMats = nSlots;
     }
 
+    // Halo disc particle buffers — uploaded from the CPU HaloAccel BVH data.
+    m_impl->haloDescBuf    = nil;
+    m_impl->haloNodeBuf    = nil;
+    m_impl->haloPrimIdxBuf = nil;
+    m_impl->numHalos       = 0;
+    if (scene.haloAccel && !scene.haloAccel->pool().halos().empty()) {
+        const auto& halos   = scene.haloAccel->pool().halos();
+        const auto& nodes   = scene.haloAccel->nodes();
+        const auto& primIdx = scene.haloAccel->primIdx();
+
+        // GpuHaloDesc mirrors HaloDesc; matIdx comes from HaloDesc::matIdx.
+        std::vector<GpuHaloDesc> gpuHalos;
+        gpuHalos.reserve(halos.size());
+        for (const auto& h : halos) {
+            GpuHaloDesc gd{};
+            gd.center      = {h.center.x,      h.center.y,      h.center.z};
+            gd.radius      = h.radius;
+            gd.centerClose = {h.centerClose.x, h.centerClose.y, h.centerClose.z};
+            gd.matIdx      = h.matIdx;
+            gd.color       = {h.color.x,       h.color.y,       h.color.z};
+            gpuHalos.push_back(gd);
+        }
+        m_impl->haloDescBuf = [dev newBufferWithBytes:gpuHalos.data()
+                                               length:gpuHalos.size() * sizeof(GpuHaloDesc)
+                                              options:MTLResourceStorageModeShared];
+        m_impl->numHalos = static_cast<uint32_t>(gpuHalos.size());
+
+        if (!nodes.empty()) {
+            // GpuHaloNode matches HaloNode memory layout exactly.
+            m_impl->haloNodeBuf = [dev newBufferWithBytes:nodes.data()
+                                                   length:nodes.size() * sizeof(GpuHaloNode)
+                                                  options:MTLResourceStorageModeShared];
+        }
+        if (!primIdx.empty()) {
+            m_impl->haloPrimIdxBuf = [dev newBufferWithBytes:primIdx.data()
+                                                      length:primIdx.size() * sizeof(uint32_t)
+                                                     options:MTLResourceStorageModeShared];
+        }
+        spdlog::info("MetalPathIntegrator: uploaded {} halo particles ({} BVH nodes)",
+                     gpuHalos.size(), nodes.size());
+    }
+
     // Upload materials; compute sssD_max for SSS hash grid sizing
     uint32_t nMat = static_cast<uint32_t>(scene.materials.size());
     m_impl->matBuf  = std::make_unique<MetalBuffer<GpuMaterial>>(
@@ -938,6 +1001,7 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     camParams.pixelFilterBins   = m_impl->pixelFilterBins;
     camParams.pixelFilterRadius = m_impl->pixelFilterRadius;
     camParams.hairMeshBaseID    = m_impl->hairMeshBaseID;
+    camParams.numHalos          = m_impl->numHalos;
     camParams.photonMapEnabled  = m_impl->photonMapEnabled && (m_impl->validPhotons > 0) ? 1u : 0u;
     camParams.photonSearchRadius = m_impl->photonSearchRadius;
     camParams.hashGridOrigin    = m_impl->hashGridOrigin;
@@ -1052,6 +1116,10 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
         [enc setBuffer:(m_impl->sssHashCellStartBuf   ?: m_impl->photonBuf) offset:0 atIndex:24];
         [enc setBuffer:(m_impl->sssSortedPhotonIdxBuf ?: m_impl->photonBuf) offset:0 atIndex:25];
         [enc setBuffer:(m_impl->sssPhotonBuf          ?: m_impl->photonBuf) offset:0 atIndex:26];
+        // Halo disc particle buffers (nil-safe — Metal passes null device ptr; guarded by cam.numHalos > 0)
+        if (m_impl->haloDescBuf)   [enc setBuffer:m_impl->haloDescBuf    offset:0 atIndex:27];
+        if (m_impl->haloNodeBuf)   [enc setBuffer:m_impl->haloNodeBuf    offset:0 atIndex:28];
+        if (m_impl->haloPrimIdxBuf)[enc setBuffer:m_impl->haloPrimIdxBuf offset:0 atIndex:29];
         [enc setTexture:envTex atIndex:0];
         [enc useResource:tlas usage:MTLResourceUsageRead];
         for (void* blasVoid : m_impl->accel->blasHandles())
@@ -1149,6 +1217,7 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
     camParams.pixelFilterBins   = m_impl->pixelFilterBins;
     camParams.pixelFilterRadius = m_impl->pixelFilterRadius;
     camParams.hairMeshBaseID    = m_impl->hairMeshBaseID;
+    camParams.numHalos          = m_impl->numHalos;
     camParams.photonMapEnabled  = m_impl->photonMapEnabled && (m_impl->validPhotons > 0) ? 1u : 0u;
     camParams.photonSearchRadius = m_impl->photonSearchRadius;
     camParams.hashGridOrigin    = m_impl->hashGridOrigin;
@@ -1256,6 +1325,10 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
         [enc setBuffer:(m_impl->sssHashCellStartBuf   ?: m_impl->photonBuf) offset:0 atIndex:24];
         [enc setBuffer:(m_impl->sssSortedPhotonIdxBuf ?: m_impl->photonBuf) offset:0 atIndex:25];
         [enc setBuffer:(m_impl->sssPhotonBuf          ?: m_impl->photonBuf) offset:0 atIndex:26];
+        // Halo disc particle buffers (nil-safe)
+        if (m_impl->haloDescBuf)   [enc setBuffer:m_impl->haloDescBuf    offset:0 atIndex:27];
+        if (m_impl->haloNodeBuf)   [enc setBuffer:m_impl->haloNodeBuf    offset:0 atIndex:28];
+        if (m_impl->haloPrimIdxBuf)[enc setBuffer:m_impl->haloPrimIdxBuf offset:0 atIndex:29];
 
         // Environment texture (index 0); fallback 1×1 white if no HDRI loaded
         id<MTLTexture> envTex = m_impl->envTexture

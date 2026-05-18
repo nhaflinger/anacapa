@@ -120,6 +120,35 @@ struct GpuHairTri {
 };
 
 // ---------------------------------------------------------------------------
+// GpuHaloDesc — one camera-facing disc particle (matches HaloDesc layout).
+// center/centerClose are motion-blur endpoints; radius is disc radius.
+// color is the per-particle tint used as emission when matIdx has no Le.
+// matIdx indexes into the materials[] buffer for Le lookup.
+// ---------------------------------------------------------------------------
+struct GpuHaloDesc {
+    GpuFloat3 center;
+    float     radius;
+    GpuFloat3 centerClose;
+    uint32_t  matIdx;
+    GpuFloat3 color;
+    float     _pad;
+};
+
+// ---------------------------------------------------------------------------
+// GpuHaloNode — binary SAH BVH node over halo disc particles.
+// Interior: left_or_prim = left child, right_or_count = right child.
+// Leaf:     left_or_prim = first index in haloPrimIdx,
+//           right_or_count = count | 0x80000000.
+// Matches HaloNode memory layout exactly.
+// ---------------------------------------------------------------------------
+struct GpuHaloNode {
+    float    bmin[3];
+    float    bmax[3];
+    uint32_t left_or_prim;
+    uint32_t right_or_count;
+};
+
+// ---------------------------------------------------------------------------
 // GpuLight — all light types encoded as a tagged union
 // ---------------------------------------------------------------------------
 enum GpuLightType : uint32_t {
@@ -223,6 +252,12 @@ struct GpuCameraParams {
     uint32_t  sssHashDimX;
     uint32_t  sssHashDimY;
     uint32_t  sssHashDimZ;
+
+    // Halo disc particles — software BVH traversal in the shade kernel.
+    // buffers 27/28/29 hold GpuHaloDesc[], GpuHaloNode[], uint32_t[] primIdx.
+    // 0 when no particles are in the scene (buffers are nil; not accessed).
+    uint32_t  numHalos;
+    uint32_t  _halo_pad[3];
 };
 
 // ---------------------------------------------------------------------------

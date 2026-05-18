@@ -1023,6 +1023,95 @@ static float3 querySSSHashGrid(
 }
 
 // ---------------------------------------------------------------------------
+// Halo disc particle traversal — software BVH matching CPU HaloAccel
+// ---------------------------------------------------------------------------
+
+// Camera-facing disc intersection.
+// N = normalize(rayOrig - center); disc plane dot(N, P-center)=0.
+// Returns hit t in outT on success.
+static bool intersectHaloDisc(GpuHaloDesc h, float3 rayOrig, float3 rayDir,
+                               float tMin, float tMax, float rayTime,
+                               thread float& outT)
+{
+    float3 center = float3(h.center.x, h.center.y, h.center.z)
+                  + (float3(h.centerClose.x, h.centerClose.y, h.centerClose.z)
+                   - float3(h.center.x, h.center.y, h.center.z)) * rayTime;
+
+    float3 toOrig = rayOrig - center;
+    float  lenSq  = dot(toOrig, toOrig);
+    if (lenSq < 1e-12f) return false;
+    float3 N = toOrig * rsqrt(lenSq);
+
+    float denom = dot(N, rayDir);
+    if (abs(denom) < 1e-6f) return false;
+
+    float t = dot(N, center - rayOrig) / denom;
+    if (t < tMin || t >= tMax) return false;
+
+    float3 hitPt = rayOrig + rayDir * t;
+    float3 delta = hitPt - center;
+    if (dot(delta, delta) > h.radius * h.radius) return false;
+
+    outT = t;
+    return true;
+}
+
+// Software BVH traversal over halo particles.
+// Returns the hit halo index (into halos[]), or -1 on no hit.
+// outT is set to the closest hit distance (starts at tMax).
+static int traverseHaloBVH(
+    float3 rayOrig, float3 rayDir, float tMin, float tMax, float rayTime,
+    const device GpuHaloDesc* halos,
+    const device GpuHaloNode* nodes,
+    const device uint32_t*    primIdx,
+    thread float& outT)
+{
+    outT = tMax;
+    int bestIdx = -1;
+
+    float3 safe = float3(abs(rayDir.x) > 1e-9f ? rayDir.x : 1e-9f,
+                         abs(rayDir.y) > 1e-9f ? rayDir.y : 1e-9f,
+                         abs(rayDir.z) > 1e-9f ? rayDir.z : 1e-9f);
+    float3 invDir = 1.0f / safe;
+
+    uint stack[64];
+    int top = 0;
+    stack[top++] = 0u;
+
+    while (top > 0) {
+        uint ni = stack[--top];
+        GpuHaloNode node = nodes[ni];
+
+        float3 bmin = float3(node.bmin[0], node.bmin[1], node.bmin[2]);
+        float3 bmax = float3(node.bmax[0], node.bmax[1], node.bmax[2]);
+        float3 t0 = (bmin - rayOrig) * invDir;
+        float3 t1 = (bmax - rayOrig) * invDir;
+        float tn = max3(min(t0.x, t1.x), min(t0.y, t1.y), min(t0.z, t1.z));
+        float tf = min3(max(t0.x, t1.x), max(t0.y, t1.y), max(t0.z, t1.z));
+        tn = max(tn, tMin);
+        if (tn > tf || tn >= outT) continue;
+
+        if (node.right_or_count & 0x80000000u) {
+            uint first = node.left_or_prim;
+            uint count = node.right_or_count & 0x7FFFFFFFu;
+            for (uint j = 0; j < count; ++j) {
+                uint idx = primIdx[first + j];
+                float t;
+                if (intersectHaloDisc(halos[idx], rayOrig, rayDir,
+                                      tMin, outT, rayTime, t)) {
+                    outT    = t;
+                    bestIdx = int(idx);
+                }
+            }
+        } else {
+            stack[top++] = node.right_or_count;
+            stack[top++] = node.left_or_prim;
+        }
+    }
+    return bestIdx;
+}
+
+// ---------------------------------------------------------------------------
 // Main kernel
 // ---------------------------------------------------------------------------
 kernel void shade(
@@ -1053,6 +1142,9 @@ kernel void shade(
     const device uint32_t*                 sssCellStart      [[ buffer(24) ]],
     const device uint32_t*                 sssSortedIdx      [[ buffer(25) ]],
     const device GpuPhoton*                sssPhotons        [[ buffer(26) ]],
+    const device GpuHaloDesc*              halos             [[ buffer(27) ]],
+    const device GpuHaloNode*              haloNodes         [[ buffer(28) ]],
+    const device uint32_t*                 haloPrimIdx       [[ buffer(29) ]],
     texture2d<float, access::sample>        envTexture        [[ texture(0) ]],
     uint2                                   gid               [[ thread_position_in_grid ]])
 {
@@ -1133,6 +1225,44 @@ kernel void shade(
 
         intersection_result<triangle_data, instancing, primitive_motion> res =
             isect.intersect(r, accelStruct, 0xFF, rayTime);
+
+        // Halo disc particles — drain all overlapping halos in front of the nearest mesh
+        // without consuming main bounce budget.  Up to 256 halos per camera ray.
+        if (cam.numHalos > 0 && halos != nullptr && haloNodes != nullptr && haloPrimIdx != nullptr) {
+            float meshT = (res.type != intersection_type::none) ? res.distance : r.max_distance;
+            for (uint hPass = 0; hPass < 256u; ++hPass) {
+                float haloT;
+                int haloIdx = traverseHaloBVH(r.origin, r.direction, r.min_distance,
+                                               meshT, rayTime,
+                                               halos, haloNodes, haloPrimIdx, haloT);
+                if (haloIdx < 0) break;
+
+                GpuHaloDesc hd = halos[haloIdx];
+                float3 particleColor = float3(hd.color.x, hd.color.y, hd.color.z);
+                float3 Le      = particleColor;
+                float  opacity = 1.0f;
+                uint   hMatIdx = hd.matIdx;
+                if (hMatIdx < numMaterials) {
+                    float3 emissive = float3(materials[hMatIdx].emissive.x,
+                                            materials[hMatIdx].emissive.y,
+                                            materials[hMatIdx].emissive.z);
+                    if (emissive.x > 0.f || emissive.y > 0.f || emissive.z > 0.f)
+                        Le = emissive * particleColor;
+                    opacity = materials[hMatIdx].roughness;
+                }
+                L += throughput * Le;
+                throughput *= (1.0f - opacity);
+
+                float3 hitPt = r.origin + r.direction * haloT;
+                r.origin     = hitPt + r.direction * 1e-4f;
+                r.min_distance = 1e-4f;
+                prevPos      = hitPt;
+                prevWasDelta = true;
+
+                if (throughput.x < 1e-4f && throughput.y < 1e-4f && throughput.z < 1e-4f)
+                    break;
+            }
+        }
 
         if (res.type == intersection_type::none) {
             // Background / env light — apply MIS weight against NEE dome-sampling PDF.

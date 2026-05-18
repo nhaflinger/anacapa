@@ -227,7 +227,88 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
     m_impl->blasArray  = [NSMutableArray arrayWithCapacity:numMeshes];
 
     if (numMeshes == 0) {
-        spdlog::error("MetalAccelStructure: empty geometry pool");
+        // Particles-only scene — no triangle geometry at all.
+        // Build a single dummy BLAS (one degenerate triangle far from the scene)
+        // so the TLAS is valid.  The shader will never intersect this triangle.
+        spdlog::info("MetalAccelStructure: no mesh geometry — building dummy BLAS for particles-only scene");
+
+        static const float dv[3][3] = {{1e20f,0,0},{0,1e20f,0},{0,0,1e20f}};
+        static const uint32_t di[3] = {0, 1, 2};
+        id<MTLBuffer> dvBuf = [device newBufferWithBytes:dv length:sizeof(dv)
+                                                 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> diBuf = [device newBufferWithBytes:di length:sizeof(di)
+                                                 options:MTLResourceStorageModeShared];
+
+        // All attribute buffers: 1 dummy element each so Metal doesn't see nil buffers.
+        PackedFloat3 dummyN{0,1,0};
+        PackedFloat2 dummyUV{0,0};
+        uint32_t     dummyZero = 0;
+        m_impl->positionBuffer        = dvBuf;
+        m_impl->positionBufferClose   = dvBuf;
+        m_impl->normalBuffer          = [device newBufferWithBytes:&dummyN length:sizeof(PackedFloat3)
+                                                           options:MTLResourceStorageModeShared];
+        m_impl->uvBuffer              = [device newBufferWithBytes:&dummyUV length:sizeof(PackedFloat2)
+                                                           options:MTLResourceStorageModeShared];
+        m_impl->indexBuffer           = diBuf;
+        m_impl->triMeshIDBuffer       = [device newBufferWithBytes:&dummyZero length:sizeof(uint32_t)
+                                                           options:MTLResourceStorageModeShared];
+        m_impl->meshVertexOffsetBuffer = [device newBufferWithBytes:&dummyZero length:sizeof(uint32_t)
+                                                            options:MTLResourceStorageModeShared];
+        m_impl->meshIndexOffsetBuffer  = [device newBufferWithBytes:&dummyZero length:sizeof(uint32_t)
+                                                            options:MTLResourceStorageModeShared];
+
+        MTLAccelerationStructureTriangleGeometryDescriptor* geomDesc =
+            [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
+        geomDesc.vertexBuffer       = dvBuf;
+        geomDesc.vertexBufferOffset = 0;
+        geomDesc.vertexStride       = sizeof(float) * 3;
+        geomDesc.vertexFormat       = MTLAttributeFormatFloat3;
+        geomDesc.indexBuffer        = diBuf;
+        geomDesc.indexBufferOffset  = 0;
+        geomDesc.indexType          = MTLIndexTypeUInt32;
+        geomDesc.triangleCount      = 1;
+        geomDesc.opaque             = YES;
+
+        MTLPrimitiveAccelerationStructureDescriptor* blasDesc =
+            [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+        blasDesc.geometryDescriptors = @[geomDesc];
+
+        id<MTLAccelerationStructure> dummyBlas = buildAccelStructure(device, cmdQueue, blasDesc);
+        if (!dummyBlas) {
+            spdlog::error("MetalAccelStructure: dummy BLAS build failed");
+            return;
+        }
+        [m_impl->blasArray addObject:dummyBlas];
+
+        // Build TLAS with this single dummy instance.
+        size_t instDescSize = sizeof(MTLAccelerationStructureInstanceDescriptor);
+        id<MTLBuffer> instBuf = [device newBufferWithLength:instDescSize
+                                                    options:MTLResourceStorageModeShared];
+        MTLAccelerationStructureInstanceDescriptor* inst =
+            (MTLAccelerationStructureInstanceDescriptor*)[instBuf contents];
+        memset(inst, 0, instDescSize);
+        inst->transformationMatrix.columns[0] = {1, 0, 0};
+        inst->transformationMatrix.columns[1] = {0, 1, 0};
+        inst->transformationMatrix.columns[2] = {0, 0, 1};
+        inst->transformationMatrix.columns[3] = {0, 0, 0};
+        inst->options                          = MTLAccelerationStructureInstanceOptionOpaque;
+        inst->mask                             = 0xFF;
+        inst->intersectionFunctionTableOffset  = 0;
+        inst->accelerationStructureIndex       = 0;
+
+        MTLInstanceAccelerationStructureDescriptor* tlasDesc =
+            [MTLInstanceAccelerationStructureDescriptor descriptor];
+        tlasDesc.instancedAccelerationStructures = m_impl->blasArray;
+        tlasDesc.instanceCount                   = 1;
+        tlasDesc.instanceDescriptorBuffer        = instBuf;
+
+        m_impl->tlas = buildAccelStructure(device, cmdQueue, tlasDesc);
+        if (!m_impl->tlas) {
+            spdlog::error("MetalAccelStructure: dummy TLAS build failed");
+            return;
+        }
+        m_impl->valid = true;
+        spdlog::info("MetalAccelStructure: dummy BLAS+TLAS built for particles-only scene");
         return;
     }
 

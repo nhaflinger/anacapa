@@ -102,14 +102,45 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
     for (uint32_t bounce = 0; bounce <= m_maxDepth; ++bounce) {
         TraceResult hit = scene.accel->trace(r);
 
-        // Camera-facing halo disc particles — take closer of triangle and halo hits.
+        // Camera-facing halo disc particles — inner loop drains all halos in
+        // front of the nearest mesh hit without consuming the bounce budget.
         if (scene.haloAccel) {
-            Ray haloRay   = r;
-            if (hit.hit) haloRay.tMax = hit.si.t;
-            TraceResult haloHit = scene.haloAccel->trace(haloRay);
-            if (haloHit.hit && (!hit.hit || haloHit.si.t < hit.si.t))
-                hit = haloHit;
+            for (uint32_t hPass = 0; hPass < 256u; ++hPass) {
+                Ray haloRay = r;
+                if (hit.hit) haloRay.tMax = hit.si.t;
+                TraceResult haloHit = scene.haloAccel->trace(haloRay);
+                if (!haloHit.hit) break;
+
+                const SurfaceInteraction& hsi = haloHit.si;
+                const IMaterial* hmat = nullptr;
+                if (hsi.meshID < scene.materials.size())
+                    hmat = scene.materials[hsi.meshID];
+
+                if (hmat) {
+                    ShadingContext hctx(hsi, r.direction);
+                    Vec3f hwo = -r.direction;
+                    Spectrum hLe = hmat->Le(hctx, hwo);
+                    if (!isBlack(hLe)) L += beta * hLe;
+                    BSDFSample bs = hmat->sample(hctx, hwo, {0.f, 0.f}, 0.f);
+                    // Use pdf > 0 guard only (not isValid) so opacity=1 → f={0,0,0}
+                    // correctly zeroes beta (full absorption is a valid physical state).
+                    if (bs.pdf > 0.f) beta *= bs.f / bs.pdf;
+                }
+
+                // Advance ray past this halo disc
+                Vec3f hitPt = r.origin + r.direction * haloHit.si.t;
+                r.origin    = hitPt + r.direction * 1e-4f;
+                r.tMin      = 1e-4f;
+                prevP        = hitPt;
+                prevWasDelta = true;
+
+                if (beta.x < 1e-4f && beta.y < 1e-4f && beta.z < 1e-4f) { bounce = m_maxDepth + 1; break; }
+            }
+            if (bounce > m_maxDepth) break;
         }
+
+        // Retrace mesh BVH from updated ray origin (halo inner loop may have moved r).
+        hit = scene.accel->trace(r);
 
         if (!hit.hit) {
             // Background / environment light

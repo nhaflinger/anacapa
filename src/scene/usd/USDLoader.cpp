@@ -2,6 +2,7 @@
 
 #include "USDLoader.h"
 #include "../../shading/Lambertian.h"
+#include "../../shading/SoftParticle.h"
 #include "../../shading/StandardSurface.h"
 #include "../../shading/OslMaterial.h"
 #include "../../shading/lights/AreaLight.h"
@@ -1396,25 +1397,66 @@ LoadedScene loadUSD(const std::string& path,
         stageDir = (slash != std::string::npos) ? stagePath.substr(0, slash) : ".";
     }
 
-    // Try to load the MaterialX JSON sidecar produced by blender_prep_for_usd_export.py.
-    // The sidecar captures the full ND_open_pbr_surface node graph for diagnostic logging.
-    // Texture resolution itself happens through the USD prim connections above (ND_image_*
-    // nodes are now handled by resolveUVTexture); the sidecar provides a human-readable
-    // record and may serve as a fallback in future phases.
+    // Load the MaterialX JSON sidecar produced by blender_prep_for_usd_export.py.
+    // For particle prims (GeomPoints / PointInstancer halos) this sidecar acts as
+    // a live override: geometry_opacity and emission_color × emission_luminance drive
+    // the SoftParticleMaterial created for each halo.  Editing the JSON and
+    // re-rendering picks up the changes without touching the .usdc file.
+    struct SidecarMat {
+        Spectrum emission = {1.f, 1.f, 1.f};  // emission_color × emission_luminance
+        float    opacity  = 1.f;               // geometry_opacity
+    };
+    std::map<std::string, SidecarMat> sidecarMats;
     {
         std::string sidecarPath = path + ".materials.json";
         std::ifstream sidecarFile(sidecarPath);
         if (sidecarFile.is_open()) {
             try {
                 nlohmann::json sidecar = nlohmann::json::parse(sidecarFile);
-                int matCount = static_cast<int>(sidecar.size());
                 spdlog::info("USDLoader: MaterialX sidecar loaded — {} material(s) in '{}'",
-                             matCount, sidecarPath);
+                             static_cast<int>(sidecar.size()), sidecarPath);
                 for (auto& [matPath, matData] : sidecar.items()) {
-                    int nodeCount = matData.contains("nodes")
-                                    ? static_cast<int>(matData["nodes"].size()) : 0;
-                    spdlog::debug("USDLoader:   material '{}' — {} node(s) in graph",
-                                  matPath, nodeCount);
+                    SidecarMat sm;
+                    if (matData.contains("root") && matData.contains("nodes")) {
+                        std::string rootPath = matData["root"].get<std::string>();
+                        auto& nodes = matData["nodes"];
+                        if (nodes.contains(rootPath)) {
+                            auto& inp = nodes[rootPath]["inputs"];
+
+                            // base_color is the primary particle tint color.
+                            if (inp.contains("base_color") && inp["base_color"].is_array()
+                                    && inp["base_color"].size() >= 3) {
+                                sm.emission = {
+                                    inp["base_color"][0].get<float>(),
+                                    inp["base_color"][1].get<float>(),
+                                    inp["base_color"][2].get<float>()
+                                };
+                            }
+                            // emission_color × emission_luminance overrides base_color
+                            // when emission is non-zero (user wants a glowing/bright particle).
+                            float lum = inp.contains("emission_luminance")
+                                        ? inp["emission_luminance"].get<float>() : 1.f;
+                            if (inp.contains("emission_color") && inp["emission_color"].is_array()
+                                    && inp["emission_color"].size() >= 3) {
+                                float er = inp["emission_color"][0].get<float>();
+                                float eg = inp["emission_color"][1].get<float>();
+                                float eb = inp["emission_color"][2].get<float>();
+                                if (er > 0.f || eg > 0.f || eb > 0.f) {
+                                    sm.emission = { er * lum, eg * lum, eb * lum };
+                                }
+                            }
+                            // If color is still zero (both base and emission unset), default
+                            // to white so per-particle displayColor tinting shows through.
+                            if (sm.emission.x == 0.f && sm.emission.y == 0.f && sm.emission.z == 0.f)
+                                sm.emission = {1.f, 1.f, 1.f};
+
+                            if (inp.contains("geometry_opacity"))
+                                sm.opacity = inp["geometry_opacity"].get<float>();
+                        }
+                    }
+                    sidecarMats[matPath] = sm;
+                    spdlog::debug("USDLoader: sidecar '{}' — color=({:.2f},{:.2f},{:.2f}) opacity={:.2f}",
+                                  matPath, sm.emission.x, sm.emission.y, sm.emission.z, sm.opacity);
                 }
             } catch (const std::exception& e) {
                 spdlog::warn("USDLoader: failed to parse MaterialX sidecar '{}': {}",
@@ -1884,31 +1926,78 @@ LoadedScene loadUSD(const std::string& path,
             auto dcPv = pvAPI.GetPrimvar(TfToken("displayColor"));
             if (dcPv) dcPv.ComputeFlattened(&colors, tcOpen);
 
-            // Material: prefer USD binding, then displayColor fallback
+            // Halo particles always use SoftParticleMaterial.
+            // sidecarMats drives emission and opacity; per-particle color tinting
+            // comes from hd.color (displayColor) at render time.
             uint32_t matIdx = kDefaultMatIdx;
-            UsdShadeMaterialBindingAPI bindAPI(prim);
-            UsdShadeMaterial boundMat = bindAPI.ComputeBoundMaterial();
-            if (boundMat) {
-                std::string matPath = boundMat.GetPath().GetString();
-                auto it = matPathToIdx.find(matPath);
+            {
+                SoftParticleMaterial::Params spp;
+                std::string cacheKey = "softparticle::default";
+
+                // Find the sidecar material for this particle prim.
+                // 1. Try ComputeBoundMaterial() — works when the USD has an explicit binding.
+                // 2. If that fails, infer by path convention:
+                //    prim "{root}/{ObjName}_gn_particles" → look for sidecar keys under
+                //    "{root}/{ObjName}/_materials/" (Blender USD exporter convention).
+                // 3. Fallback: use the first available sidecar entry (single-particle scenes).
+                auto applySidecar = [&](const std::string& matPath) {
+                    cacheKey = "softparticle::" + matPath;
+                    auto sit = sidecarMats.find(matPath);
+                    if (sit != sidecarMats.end()) {
+                        spp.color            = sit->second.emission;
+                        spp.emissionStrength = 1.f;
+                        spp.opacity          = sit->second.opacity;
+                        spdlog::info("USDLoader: particle sidecar → color=({:.2f},{:.2f},{:.2f}) opacity={:.2f}",
+                                     spp.color.x, spp.color.y, spp.color.z, spp.opacity);
+                        return true;
+                    }
+                    return false;
+                };
+
+                bool found = false;
+                UsdShadeMaterialBindingAPI bindAPI(prim);
+                UsdShadeMaterial boundMat = bindAPI.ComputeBoundMaterial();
+                if (boundMat) {
+                    found = applySidecar(boundMat.GetPath().GetString());
+                }
+
+                if (!found && !sidecarMats.empty()) {
+                    // Path-convention fallback: strip "_gn_particles" suffix to recover
+                    // the Blender object name, then search for "/{objName}/_materials/".
+                    std::string primName = prim.GetName();
+                    std::string parentPath = prim.GetParent().GetPath().GetString();
+                    const std::string gnSuffix = "_gn_particles";
+                    std::string prefix;
+                    if (primName.size() > gnSuffix.size() &&
+                        primName.compare(primName.size() - gnSuffix.size(),
+                                         gnSuffix.size(), gnSuffix) == 0) {
+                        std::string objName = primName.substr(0, primName.size() - gnSuffix.size());
+                        prefix = parentPath + "/" + objName + "/_materials/";
+                    }
+
+                    for (auto& [k, v] : sidecarMats) {
+                        if (!prefix.empty() && k.compare(0, prefix.size(), prefix) == 0) {
+                            found = applySidecar(k);
+                            break;
+                        }
+                    }
+                    // Last resort: use first sidecar entry.
+                    if (!found) {
+                        found = applySidecar(sidecarMats.begin()->first);
+                    }
+                }
+
+                if (!found)
+                    spdlog::info("USDLoader: GeomPoints '{}' — no sidecar material, using defaults",
+                                 prim.GetPath().GetString());
+
+                auto it = matPathToIdx.find(cacheKey);
                 if (it != matPathToIdx.end()) {
                     matIdx = it->second;
                 } else {
                     matIdx = static_cast<uint32_t>(result.materials.size());
-                    result.materials.push_back(resolveMaterial(boundMat, stageDir));
-                    matPathToIdx[matPath] = matIdx;
-                }
-            } else if (!colors.empty()) {
-                GfVec3f c = colors[0];
-                uint32_t key = (uint32_t(c[0]*255) << 16) | (uint32_t(c[1]*255) << 8) | uint32_t(c[2]*255);
-                auto it = displayColorToIdx.find(key);
-                if (it != displayColorToIdx.end()) {
-                    matIdx = it->second;
-                } else {
-                    matIdx = static_cast<uint32_t>(result.materials.size());
-                    result.materials.push_back(
-                        std::make_unique<LambertianMaterial>(Spectrum{c[0], c[1], c[2]}));
-                    displayColorToIdx[key] = matIdx;
+                    result.materials.push_back(std::make_unique<SoftParticleMaterial>(spp));
+                    matPathToIdx[cacheKey] = matIdx;
                 }
             }
 
@@ -2329,6 +2418,31 @@ LoadedScene loadUSD(const std::string& path,
 
     // Pad materials vector to cover all mesh IDs
     result.sceneView.materials.resize(result.geomPool.numMeshes(), nullptr);
+
+    // Wire halo materials into sceneView.materials.
+    // During traversal, hd.matIdx was assigned as an index into result.materials
+    // (the unique_ptr vector).  sceneView.materials is indexed by meshID, so halo
+    // materials must live AFTER all the mesh slots.  Remap now that numMeshes is final.
+    {
+        std::unordered_map<uint32_t, uint32_t> matIdxRemap; // result.materials idx → sceneView idx
+        for (auto& h : result.haloPool.halos()) {
+            uint32_t oldIdx = h.matIdx;
+            if (matIdxRemap.count(oldIdx)) continue;
+            if (oldIdx < result.materials.size() && result.materials[oldIdx]) {
+                uint32_t svIdx = static_cast<uint32_t>(result.sceneView.materials.size());
+                result.sceneView.materials.push_back(result.materials[oldIdx].get());
+                matIdxRemap[oldIdx] = svIdx;
+            }
+        }
+        for (auto& h : result.haloPool.halos())
+            if (matIdxRemap.count(h.matIdx))
+                h.matIdx = matIdxRemap[h.matIdx];
+        if (!matIdxRemap.empty())
+            spdlog::info("USDLoader: wired {} halo material(s) into sceneView at indices {}..{}",
+                         matIdxRemap.size(),
+                         result.geomPool.numMeshes(),
+                         static_cast<uint32_t>(result.sceneView.materials.size()) - 1);
+    }
 
     // Default env radiance — black
     result.sceneView.envRadiance = {};

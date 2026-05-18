@@ -13,7 +13,7 @@ namespace anacapa {
 // centerClose — world-space position at shutter-close (= center when no motion)
 // radius      — disc radius (= widths/2 from UsdGeomPoints, which stores diameters)
 // color       — per-particle base color (from primvars:displayColor or white)
-// matIdx      — index into LoadedScene::materials; drives shading + emission
+// matIdx      — index into SceneView::materials (= scene.materials[]); drives shading + emission
 // ---------------------------------------------------------------------------
 struct HaloDesc {
     Vec3f    center      = {};
@@ -45,6 +45,7 @@ public:
     size_t numHalos() const { return m_halos.size(); }
 
     const std::vector<HaloDesc>& halos() const { return m_halos; }
+          std::vector<HaloDesc>& halos()       { return m_halos; }
 
 private:
     std::vector<HaloDesc> m_halos;

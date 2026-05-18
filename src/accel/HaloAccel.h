@@ -46,6 +46,11 @@ public:
     TraceResult trace(const Ray& ray) const;
     bool        occluded(const Ray& ray) const;
 
+    // GPU upload accessors
+    const HaloPool&               pool()    const { return m_pool; }
+    const std::vector<HaloNode>&  nodes()   const { return m_nodes; }
+    const std::vector<uint32_t>&  primIdx() const { return m_primIdx; }
+
 private:
     const HaloPool&        m_pool;
     std::vector<HaloNode>  m_nodes;
