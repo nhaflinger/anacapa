@@ -402,6 +402,9 @@ void RenderSession::appendAlembicParticles_() {
     AlembicPointsOptions opts;
     opts.baseMaterialIndex = static_cast<uint32_t>(m_scene.materials.size());
     opts.frameNumber       = m_settings.frameSet ? m_settings.frameNumber : 0;
+    opts.motionBlur        = (m_settings.shutterClose > m_settings.shutterOpen);
+    opts.shutterOpen       = m_settings.shutterOpen;
+    opts.shutterClose      = m_settings.shutterClose;
 
     const size_t matsBefore = m_materials.size();
 

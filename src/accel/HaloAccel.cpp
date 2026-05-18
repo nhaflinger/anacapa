@@ -54,7 +54,11 @@ static bool intersectHaloDisc(const HaloDesc& h, const Ray& ray,
                                float tMin, float& bestT,
                                SurfaceInteraction& outSI)
 {
-    Vec3f toOrigin = ray.origin - h.center;
+    Vec3f center = h.hasMotion()
+        ? h.center + (h.centerClose - h.center) * ray.time
+        : h.center;
+
+    Vec3f toOrigin = ray.origin - center;
     float lenSq = dot(toOrigin, toOrigin);
     if (lenSq < 1e-12f) return false;  // ray origin at particle center
     float invLen = 1.f / std::sqrt(lenSq);
@@ -63,11 +67,11 @@ static bool intersectHaloDisc(const HaloDesc& h, const Ray& ray,
     float denom = dot(N, ray.direction);
     if (std::abs(denom) < 1e-6f) return false;  // ray nearly parallel to disc
 
-    float t = dot(N, h.center - ray.origin) / denom;
+    float t = dot(N, center - ray.origin) / denom;
     if (t < tMin || t >= bestT) return false;
 
     Vec3f hitPt = ray.origin + ray.direction * t;
-    Vec3f delta = hitPt - h.center;
+    Vec3f delta = hitPt - center;
     float distSq = dot(delta, delta);
     if (distSq > h.radius * h.radius) return false;
 
@@ -103,7 +107,11 @@ static bool intersectHaloDisc(const HaloDesc& h, const Ray& ray,
 static bool intersectHaloDiscAny(const HaloDesc& h, const Ray& ray,
                                   float tMin, float tMax)
 {
-    Vec3f toOrigin = ray.origin - h.center;
+    Vec3f center = h.hasMotion()
+        ? h.center + (h.centerClose - h.center) * ray.time
+        : h.center;
+
+    Vec3f toOrigin = ray.origin - center;
     float lenSq = dot(toOrigin, toOrigin);
     if (lenSq < 1e-12f) return false;
     Vec3f N = toOrigin * (1.f / std::sqrt(lenSq));
@@ -111,11 +119,11 @@ static bool intersectHaloDiscAny(const HaloDesc& h, const Ray& ray,
     float denom = dot(N, ray.direction);
     if (std::abs(denom) < 1e-6f) return false;
 
-    float t = dot(N, h.center - ray.origin) / denom;
+    float t = dot(N, center - ray.origin) / denom;
     if (t < tMin || t >= tMax) return false;
 
     Vec3f hitPt = ray.origin + ray.direction * t;
-    Vec3f delta = hitPt - h.center;
+    Vec3f delta = hitPt - center;
     return dot(delta, delta) <= h.radius * h.radius;
 }
 
@@ -280,12 +288,17 @@ void HaloAccel::commit()
         const HaloDesc& h = halos[i];
         HaloWork w;
         w.haloIdx = i;
-        w.bmin[0] = h.center.x - h.radius;  w.bmax[0] = h.center.x + h.radius;
-        w.bmin[1] = h.center.y - h.radius;  w.bmax[1] = h.center.y + h.radius;
-        w.bmin[2] = h.center.z - h.radius;  w.bmax[2] = h.center.z + h.radius;
-        w.centroid[0] = h.center.x;
-        w.centroid[1] = h.center.y;
-        w.centroid[2] = h.center.z;
+        // Expand bounds to cover full motion arc (union of sphere at open and close)
+        w.bmin[0] = std::min(h.center.x, h.centerClose.x) - h.radius;
+        w.bmin[1] = std::min(h.center.y, h.centerClose.y) - h.radius;
+        w.bmin[2] = std::min(h.center.z, h.centerClose.z) - h.radius;
+        w.bmax[0] = std::max(h.center.x, h.centerClose.x) + h.radius;
+        w.bmax[1] = std::max(h.center.y, h.centerClose.y) + h.radius;
+        w.bmax[2] = std::max(h.center.z, h.centerClose.z) + h.radius;
+        // Centroid = midpoint of open and close
+        w.centroid[0] = (h.center.x + h.centerClose.x) * 0.5f;
+        w.centroid[1] = (h.center.y + h.centerClose.y) * 0.5f;
+        w.centroid[2] = (h.center.z + h.centerClose.z) * 0.5f;
         work.push_back(w);
     }
 

@@ -481,23 +481,40 @@ static void processIPoints(const Alembic::AbcGeom::IPoints& pointsObj,
     size_t numSamples = schema.getNumSamples();
     if (numSamples == 0) return;
 
-    // --- resolve time selector for this frame ---
-    ISampleSelector sel;  // defaults to index 0
+    // --- resolve time selectors for this frame ---
+    double fps = inferFPS(schema);
+    if (fps <= 0.0)
+        fps = (opts.framesPerSecond > 0.f) ? opts.framesPerSecond : 24.0;
+
+    ISampleSelector selOpen;
     if (opts.frameNumber != 0 || numSamples > 1) {
-        double fps = inferFPS(schema);
-        if (fps <= 0.0)
-            fps = (opts.framesPerSecond > 0.f) ? opts.framesPerSecond : 24.0;
-        double sampleTime = opts.frameNumber / fps;
-        sel = ISampleSelector(sampleTime, ISampleSelector::kNearIndex);
+        double sampleTime = (opts.frameNumber + opts.shutterOpen) / fps;
+        selOpen = ISampleSelector(sampleTime, ISampleSelector::kNearIndex);
     }
 
     IPointsSchema::Sample samp;
-    schema.get(samp, sel);
+    schema.get(samp, selOpen);
+    const ISampleSelector& sel = selOpen;  // alias for attribute reads below
 
     auto positions = samp.getPositions();
     if (!positions || positions->size() == 0) return;
 
     size_t numPoints = positions->size();
+
+    // Motion blur: read a second sample at shutter-close time.
+    IPointsSchema::Sample sampClose;
+    bool hasClose = false;
+    if (opts.motionBlur && numSamples > 1) {
+        double closeTime = (opts.frameNumber + opts.shutterClose) / fps;
+        ISampleSelector selClose(closeTime, ISampleSelector::kNearIndex);
+        schema.get(sampClose, selClose);
+        auto closePos = sampClose.getPositions();
+        if (closePos && closePos->size() == numPoints)
+            hasClose = true;
+        else if (closePos && closePos->size() != numPoints)
+            spdlog::warn("AlembicLoader: IPoints '{}' close sample size mismatch — motion blur disabled",
+                         pointsObj.getFullName());
+    }
 
     // --- widths / radius ---
     // Blender exports particle radius as a custom float attribute "radius".
@@ -592,11 +609,16 @@ static void processIPoints(const Alembic::AbcGeom::IPoints& pointsObj,
     // --- world transform ---
     Mat4f xform = getWorldXform(pointsObj);
 
-    const Imath::V3f* pts = positions->get();
+    const Imath::V3f* pts      = positions->get();
+    const Imath::V3f* ptsClose = hasClose ? sampClose.getPositions()->get() : nullptr;
+
     for (size_t i = 0; i < numPoints; ++i) {
         const auto& p = pts[i];
         HaloDesc h;
         h.center = xform.transformPoint({p.x, p.y, p.z});
+        h.centerClose = ptsClose
+            ? xform.transformPoint({ptsClose[i].x, ptsClose[i].y, ptsClose[i].z})
+            : h.center;
         h.radius = radii[i];
         h.color  = colors.empty() ? Vec3f{1.f, 1.f, 1.f} : colors[i];
         h.matIdx = opts.baseMaterialIndex;

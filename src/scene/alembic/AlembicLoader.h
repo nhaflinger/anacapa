@@ -75,6 +75,11 @@ struct AlembicPointsOptions {
     int      frameNumber    = 0;
     // Override FPS for frame→time conversion. 0 = auto-detect from archive.
     float    framesPerSecond = 0.f;
+    // Motion blur: when motionBlur=true, a second sample is read at shutterClose
+    // and stored in HaloDesc::centerClose for linear interpolation at ray.time.
+    bool     motionBlur   = false;
+    float    shutterOpen  = 0.f;   // shutter-open offset in frames (usually 0)
+    float    shutterClose = 0.5f;  // shutter-close offset in frames
 };
 
 // ---------------------------------------------------------------------------

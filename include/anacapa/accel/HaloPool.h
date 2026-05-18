@@ -9,16 +9,24 @@ namespace anacapa {
 // ---------------------------------------------------------------------------
 // HaloDesc — one camera-facing disc particle.
 //
-// center  — world-space position
-// radius  — disc radius (= widths/2 from UsdGeomPoints, which stores diameters)
-// color   — per-particle base color (from primvars:displayColor or white)
-// matIdx  — index into LoadedScene::materials; drives shading + emission
+// center      — world-space position at shutter-open (or static position)
+// centerClose — world-space position at shutter-close (= center when no motion)
+// radius      — disc radius (= widths/2 from UsdGeomPoints, which stores diameters)
+// color       — per-particle base color (from primvars:displayColor or white)
+// matIdx      — index into LoadedScene::materials; drives shading + emission
 // ---------------------------------------------------------------------------
 struct HaloDesc {
-    Vec3f    center  = {};
-    float    radius  = 0.01f;
-    Vec3f    color   = {1.f, 1.f, 1.f};
-    uint32_t matIdx  = 0;
+    Vec3f    center      = {};
+    Vec3f    centerClose = {};   // same as center when no motion blur
+    float    radius      = 0.01f;
+    Vec3f    color       = {1.f, 1.f, 1.f};
+    uint32_t matIdx      = 0;
+
+    bool hasMotion() const {
+        return center.x != centerClose.x
+            || center.y != centerClose.y
+            || center.z != centerClose.z;
+    }
 };
 
 // ---------------------------------------------------------------------------
