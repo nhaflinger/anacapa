@@ -37,6 +37,7 @@ struct RenderSettings {
     std::string    scenePath;              // empty → built-in Cornell box
     std::string    cameraPath;             // empty → auto-select from USD
     std::string    curvesPath;             // Alembic .abc file for hair/fur (empty = none)
+    std::string    particlesPath;          // Alembic .abc file for IPoints particles (empty = none)
     // Material assignment files loaded in order; later entries override earlier ones.
     // Auto-discovered <abc>.matassign.json is always loaded first (if present).
     std::vector<std::string> matassignPaths;
@@ -132,6 +133,8 @@ private:
     // Load Alembic curves into m_curvePool (no-op if curvesPath is empty or
     // ANACAPA_ENABLE_ALEMBIC is not set)
     void appendAlembicCurves_();
+    // Load Alembic IPoints into m_haloPool (no-op if particlesPath is empty)
+    void appendAlembicParticles_();
 
     IDisplayDriver*                        m_displayDriver = nullptr;
     std::atomic<bool>                      m_cancelRequested{false};

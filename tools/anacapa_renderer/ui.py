@@ -133,9 +133,14 @@ class ANACAPA_PT_particles(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        s = context.scene.anacapa
+        layout.use_property_split = True
+
         layout.operator("anacapa.bake_particles", icon='PHYSICS')
-        layout.label(text="Bake GN simulations to disk before rendering.",
-                     icon='INFO')
+        layout.label(text="Bake GN simulations before rendering.", icon='INFO')
+
+        layout.separator()
+        layout.prop(s, "particles_path")
 
 
 # ---------------------------------------------------------------------------

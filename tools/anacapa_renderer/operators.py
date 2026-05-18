@@ -196,11 +196,13 @@ class ANACAPA_OT_render(bpy.types.Operator):
         output_path  = os.path.join(tmp_dir, "render.exr")
         preview_path = os.path.join(tmp_dir, "preview.png")
         executable   = get_executable(context)
+        particles_abc = bpy.path.abspath(settings.particles_path) if settings.particles_path else None
         cmd          = build_command(executable, usd_path, settings,
                                      width, height, output_path,
                                      curves_path=abc_path,
                                      matassign_paths=matassign_paths,
-                                     frame=context.scene.frame_current)
+                                     frame=context.scene.frame_current,
+                                     particles_path=particles_abc)
 
         # --- Viewer / display driver ---
         use_viewer = settings.use_viewer
@@ -510,11 +512,13 @@ class ANACAPA_OT_export_scene(bpy.types.Operator):
             self.report({'ERROR'}, "USD export produced no file")
             return {'CANCELLED'}
 
+        particles_abc = bpy.path.abspath(settings.particles_path) if settings.particles_path else None
         cmd = build_command(executable, usd_path, settings,
                             width, height, output_path,
                             curves_path=abc_path,
                             matassign_paths=matassign_paths,
-                            frame=context.scene.frame_current)
+                            frame=context.scene.frame_current,
+                            particles_path=particles_abc)
         cmd_str = shlex.join(cmd)
 
         print("\n" + "=" * 72)

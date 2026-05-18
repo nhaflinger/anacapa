@@ -3,6 +3,7 @@
 #include "AlembicLoader.h"
 #include "../../shading/MarschnerHair.h"
 #include "../../shading/ChiangHair.h"
+#include "../../shading/SoftParticle.h"
 
 #include <Alembic/AbcGeom/All.h>
 #include <Alembic/AbcCoreFactory/IFactory.h>
@@ -450,6 +451,208 @@ bool loadAlembicCurves(const std::string&                        path,
 
     outMaterials.push_back(std::make_unique<MarschnerHairMaterial>(
         MarschnerHairMaterial::Params{}));
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// IPoints — particle point cloud support
+// ---------------------------------------------------------------------------
+
+// Infer frames-per-second from the schema's first TimeSampling object.
+// Returns 0 if timing info is unavailable.
+static double inferFPS(const Alembic::AbcGeom::IPointsSchema& schema) {
+    auto ts = schema.getTimeSampling();
+    if (!ts) return 0.0;
+    auto tsType = ts->getTimeSamplingType();
+    double tpc = tsType.getTimePerCycle();
+    if (tpc <= 0.0) return 0.0;
+    // For uniform sampling, tpc == 1/fps; numSamplesPerCycle is usually 1.
+    uint32_t spc = tsType.getNumSamplesPerCycle();
+    return (spc > 0) ? (static_cast<double>(spc) / tpc) : (1.0 / tpc);
+}
+
+static void processIPoints(const Alembic::AbcGeom::IPoints& pointsObj,
+                            const AlembicPointsOptions&      opts,
+                            HaloPool&                        pool) {
+    using namespace Alembic::AbcGeom;
+
+    auto schema = pointsObj.getSchema();
+    size_t numSamples = schema.getNumSamples();
+    if (numSamples == 0) return;
+
+    // --- resolve time selector for this frame ---
+    ISampleSelector sel;  // defaults to index 0
+    if (opts.frameNumber != 0 || numSamples > 1) {
+        double fps = inferFPS(schema);
+        if (fps <= 0.0)
+            fps = (opts.framesPerSecond > 0.f) ? opts.framesPerSecond : 24.0;
+        double sampleTime = opts.frameNumber / fps;
+        sel = ISampleSelector(sampleTime, ISampleSelector::kNearIndex);
+    }
+
+    IPointsSchema::Sample samp;
+    schema.get(samp, sel);
+
+    auto positions = samp.getPositions();
+    if (!positions || positions->size() == 0) return;
+
+    size_t numPoints = positions->size();
+
+    // --- widths / radius ---
+    // Blender exports particle radius as a custom float attribute "radius".
+    // Standard Alembic width (diameter) may also be present as "widths".
+    // We prefer "radius" (Blender convention) over "widths" (RenderMan convention).
+    std::vector<float> radii;
+    {
+        ICompoundProperty arb = schema.getArbGeomParams();
+        if (arb.valid()) {
+            // Try "radius" attribute first (Blender GN radius = actual radius)
+            if (arb.getPropertyHeader("radius")) {
+                IFloatGeomParam rParam(arb, "radius");
+                if (rParam.valid()) {
+                    IFloatGeomParam::Sample rs;
+                    rParam.getExpanded(rs, sel);
+                    if (rs.getVals() && rs.getVals()->size() > 0) {
+                        const float* rd = rs.getVals()->get();
+                        size_t rn = rs.getVals()->size();
+                        if (rn == numPoints) {
+                            radii.resize(numPoints);
+                            for (size_t i = 0; i < numPoints; ++i)
+                                radii[i] = rd[i] * opts.radiusScale;
+                        } else if (rn == 1) {
+                            radii.assign(numPoints, rd[0] * opts.radiusScale);
+                        }
+                    }
+                }
+            }
+            // Fall back to "widths" (Alembic diameter convention, so halve it)
+            if (radii.empty() && arb.getPropertyHeader("widths")) {
+                IFloatGeomParam wParam(arb, "widths");
+                if (wParam.valid()) {
+                    IFloatGeomParam::Sample ws;
+                    wParam.getExpanded(ws, sel);
+                    if (ws.getVals() && ws.getVals()->size() > 0) {
+                        const float* wd = ws.getVals()->get();
+                        size_t wn = ws.getVals()->size();
+                        if (wn == numPoints) {
+                            radii.resize(numPoints);
+                            for (size_t i = 0; i < numPoints; ++i)
+                                radii[i] = wd[i] * 0.5f * opts.radiusScale;
+                        } else if (wn == 1) {
+                            radii.assign(numPoints, wd[0] * 0.5f * opts.radiusScale);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also check the built-in widths param on the schema itself
+        if (radii.empty()) {
+            IFloatGeomParam wParam = schema.getWidthsParam();
+            if (wParam.valid()) {
+                IFloatGeomParam::Sample ws;
+                wParam.getExpanded(ws, sel);
+                if (ws.getVals() && ws.getVals()->size() > 0) {
+                    const float* wd = ws.getVals()->get();
+                    size_t wn = ws.getVals()->size();
+                    if (wn == numPoints) {
+                        radii.resize(numPoints);
+                        for (size_t i = 0; i < numPoints; ++i)
+                            radii[i] = wd[i] * 0.5f * opts.radiusScale;
+                    } else if (wn == 1) {
+                        radii.assign(numPoints, wd[0] * 0.5f * opts.radiusScale);
+                    }
+                }
+            }
+        }
+    }
+    if (radii.empty())
+        radii.assign(numPoints, opts.defaultRadius);
+
+    // --- per-particle color (optional) ---
+    std::vector<Vec3f> colors;
+    {
+        ICompoundProperty arb = schema.getArbGeomParams();
+        if (arb.valid() && arb.getPropertyHeader("color")) {
+            IC3fGeomParam cParam(arb, "color");
+            if (cParam.valid()) {
+                IC3fGeomParam::Sample cs;
+                cParam.getExpanded(cs, sel);
+                if (cs.getVals() && cs.getVals()->size() == numPoints) {
+                    const Imath::C3f* cd = cs.getVals()->get();
+                    colors.resize(numPoints);
+                    for (size_t i = 0; i < numPoints; ++i)
+                        colors[i] = {cd[i].x, cd[i].y, cd[i].z};
+                }
+            }
+        }
+    }
+
+    // --- world transform ---
+    Mat4f xform = getWorldXform(pointsObj);
+
+    const Imath::V3f* pts = positions->get();
+    for (size_t i = 0; i < numPoints; ++i) {
+        const auto& p = pts[i];
+        HaloDesc h;
+        h.center = xform.transformPoint({p.x, p.y, p.z});
+        h.radius = radii[i];
+        h.color  = colors.empty() ? Vec3f{1.f, 1.f, 1.f} : colors[i];
+        h.matIdx = opts.baseMaterialIndex;
+        pool.addHalo(h);
+    }
+
+    spdlog::info("AlembicLoader: IPoints '{}' → {} particles @ frame {} ({} sample(s) total)",
+                 pointsObj.getFullName(), numPoints, opts.frameNumber, numSamples);
+}
+
+static void traverseForPoints(const Alembic::AbcGeom::IObject& obj,
+                               const AlembicPointsOptions&      opts,
+                               HaloPool&                        pool) {
+    using namespace Alembic::AbcGeom;
+
+    if (IPoints::matches(obj.getMetaData())) {
+        processIPoints(IPoints(obj, Alembic::Abc::kWrapExisting), opts, pool);
+    }
+
+    for (size_t i = 0; i < obj.getNumChildren(); ++i)
+        traverseForPoints(obj.getChild(i), opts, pool);
+}
+
+bool loadAlembicPoints(const std::string&                        path,
+                       const AlembicPointsOptions&               opts,
+                       HaloPool&                                 outPool,
+                       std::vector<std::unique_ptr<IMaterial>>&  outMaterials) {
+    using namespace Alembic;
+
+    AbcCoreFactory::IFactory factory;
+    AbcCoreFactory::IFactory::CoreType coreType;
+    Abc::IArchive archive = factory.getArchive(path, coreType);
+
+    if (!archive.valid()) {
+        spdlog::error("AlembicLoader: cannot open particles file '{}'", path);
+        return false;
+    }
+
+    spdlog::info("AlembicLoader: loading particles from '{}' ({})",
+                 path,
+                 coreType == AbcCoreFactory::IFactory::kOgawa ? "Ogawa" : "HDF5");
+
+    size_t halosBefore = outPool.numHalos();
+    traverseForPoints(archive.getTop(), opts, outPool);
+    size_t halosLoaded = outPool.numHalos() - halosBefore;
+
+    if (halosLoaded == 0) {
+        spdlog::warn("AlembicLoader: no IPoints objects found in '{}'", path);
+    } else {
+        spdlog::info("AlembicLoader: {} total particles loaded from '{}'",
+                     halosLoaded, path);
+    }
+
+    // Default soft-particle material: white additive emitter.
+    // Callers can override per-particle matIdx after loading if needed.
+    outMaterials.push_back(std::make_unique<SoftParticleMaterial>());
 
     return true;
 }

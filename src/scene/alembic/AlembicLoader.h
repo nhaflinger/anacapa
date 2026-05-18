@@ -3,6 +3,7 @@
 #ifdef ANACAPA_ENABLE_ALEMBIC
 
 #include <anacapa/accel/CurvePool.h>
+#include <anacapa/accel/HaloPool.h>
 #include <anacapa/shading/IMaterial.h>
 #include <memory>
 #include <string>
@@ -62,6 +63,37 @@ bool loadAlembicCurves(const std::string&                        path,
                        CurvePool&                                outPool,
                        std::vector<std::unique_ptr<IMaterial>>&  outMaterials,
                        std::vector<AlembicObjectRange>*          outRanges = nullptr);
+
+// ---------------------------------------------------------------------------
+// AlembicPointsOptions
+// ---------------------------------------------------------------------------
+struct AlembicPointsOptions {
+    float    defaultRadius  = 0.02f;   // fallback when no radius/widths channel present
+    float    radiusScale    = 1.0f;    // multiply all radii by this factor
+    uint32_t baseMaterialIndex = 0;    // index of SoftParticleMaterial in owning scene
+    // Frame to evaluate. 0 = first sample.
+    int      frameNumber    = 0;
+    // Override FPS for frame→time conversion. 0 = auto-detect from archive.
+    float    framesPerSecond = 0.f;
+};
+
+// ---------------------------------------------------------------------------
+// loadAlembicPoints
+//
+// Reads all IPoints objects from an Alembic .abc file and appends HaloDesc
+// entries to outPool.  Positions are evaluated at frameNumber using the
+// archive's own time sampling (auto-detects FPS from TimeSampling; falls
+// back to framesPerSecond or 24 fps if the archive has no timing info).
+//
+// One SoftParticleMaterial is appended to outMaterials.  All halos initially
+// get materialIndex = opts.baseMaterialIndex.
+//
+// Returns true if the archive was opened successfully.
+// ---------------------------------------------------------------------------
+bool loadAlembicPoints(const std::string&                        path,
+                       const AlembicPointsOptions&               opts,
+                       HaloPool&                                 outPool,
+                       std::vector<std::unique_ptr<IMaterial>>&  outMaterials);
 
 } // namespace anacapa
 

@@ -55,6 +55,8 @@ int main(int argc, char** argv) {
                    "USD/USDA/USDC scene file to load (requires ANACAPA_ENABLE_USD)");
     app.add_option("--curves", settings.curvesPath,
                    "Alembic .abc file containing hair/fur curves (requires ANACAPA_ENABLE_ALEMBIC)");
+    app.add_option("--particles", settings.particlesPath,
+                   "Alembic .abc file containing IPoints particle clouds (requires ANACAPA_ENABLE_ALEMBIC)");
     app.add_option("--matassign", settings.matassignPaths,
                    "Material assignment JSON file (repeatable; later files override earlier ones). "
                    "<abc>.matassign.json is always auto-discovered alongside --curves.")

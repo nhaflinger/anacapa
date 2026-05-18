@@ -133,6 +133,7 @@ void RenderSession::loadScene() {
     if (m_settings.scenePath == "cornell-sss") {
         buildCornellBoxSSS();
         appendAlembicCurves_();
+        appendAlembicParticles_();
         return;
     }
 
@@ -287,6 +288,7 @@ void RenderSession::loadScene() {
         }
 
         appendAlembicCurves_();
+        appendAlembicParticles_();
         return;
     }
 #endif
@@ -294,6 +296,7 @@ void RenderSession::loadScene() {
         spdlog::warn("--scene requires ANACAPA_ENABLE_USD; falling back to Cornell box");
     buildCornellBox();
     appendAlembicCurves_();
+    appendAlembicParticles_();
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +389,40 @@ void RenderSession::appendAlembicCurves_() {
     if (!m_settings.curvesPath.empty())
         spdlog::warn("--curves requires ANACAPA_ENABLE_ALEMBIC; ignoring '{}'",
                      m_settings.curvesPath);
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// appendAlembicParticles_ — load IPoints from an Alembic file (if requested)
+// ---------------------------------------------------------------------------
+void RenderSession::appendAlembicParticles_() {
+#ifdef ANACAPA_ENABLE_ALEMBIC
+    if (m_settings.particlesPath.empty()) return;
+
+    AlembicPointsOptions opts;
+    opts.baseMaterialIndex = static_cast<uint32_t>(m_scene.materials.size());
+    opts.frameNumber       = m_settings.frameSet ? m_settings.frameNumber : 0;
+
+    const size_t matsBefore = m_materials.size();
+
+    bool ok = loadAlembicPoints(m_settings.particlesPath, opts,
+                                m_haloPool, m_materials);
+    if (!ok) {
+        spdlog::error("Failed to load Alembic particles from '{}'",
+                      m_settings.particlesPath);
+        return;
+    }
+
+    // Mirror the SoftParticleMaterial into the raw-pointer list.
+    for (size_t i = matsBefore; i < m_materials.size(); ++i)
+        m_scene.materials.push_back(m_materials[i].get());
+
+    spdlog::info("appendAlembicParticles: {} halos loaded from '{}'",
+                 m_haloPool.numHalos(), m_settings.particlesPath);
+#else
+    if (!m_settings.particlesPath.empty())
+        spdlog::warn("--particles requires ANACAPA_ENABLE_ALEMBIC; ignoring '{}'",
+                     m_settings.particlesPath);
 #endif
 }
 
