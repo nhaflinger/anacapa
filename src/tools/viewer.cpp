@@ -123,6 +123,12 @@ struct LiveState {
 
     // Render controls
     bool paused = false;
+
+    // Progress tracking (reader thread writes, main thread reads)
+    std::atomic<uint32_t> tilesReceived{0};
+    std::atomic<uint64_t> pixelsFilled{0};
+    uint32_t totalPixels = 0;  // set from IMAGE_OPEN width*height
+    uint32_t imageSpp    = 0;  // set from IMAGE_OPEN spp field
 } g_live;
 
 // Send a command message to the connected renderer (viewer→renderer direction)
@@ -188,6 +194,7 @@ uniform float uTemperature;   // -1=cool, 0=neutral, +1=warm
 uniform bool  uTonemap;       // fallback ACES on/off (when OCIO disabled)
 uniform bool  uUseLut;        // true when OCIO shader is active
 uniform bool  uIsHdr;         // true when source is a float HDR image
+uniform int   uChannelMode;   // 0=RGB, 1=R, 2=G, 3=B, 4=A
 
 // sRGB decode/encode (approximate gamma 2.2)
 vec3 srgbToLinear(vec3 c) { return pow(max(c, 0.0), vec3(2.2)); }
@@ -212,7 +219,23 @@ vec3 applyTemperature(vec3 c, float t) {
 // When OCIO is active it calls the injected function; when not, dead branch.
 static const char* kFragMain = R"glsl(
 void main() {
-    vec3 c = texture(uTex, vUV).rgb;
+    vec4 texel = texture(uTex, vUV);
+
+    // Channel isolation — show a single channel as greyscale, bypassing grading.
+    if (uChannelMode >= 1 && uChannelMode <= 3) {
+        float v = (uChannelMode == 1) ? texel.r
+                : (uChannelMode == 2) ? texel.g : texel.b;
+        if (!uIsHdr) v = pow(max(v, 0.0), 2.2);  // sRGB decode for LDR source
+        v *= pow(2.0, uExposure);
+        fragColor = vec4(linearToSrgb(vec3(clamp(v, 0.0, 1.0))), 1.0);
+        return;
+    }
+    if (uChannelMode == 4) {
+        fragColor = vec4(vec3(texel.a), 1.0);
+        return;
+    }
+
+    vec3 c = texel.rgb;
 
     // Decode to linear light (skip for HDR which is already linear)
     if (!uIsHdr)
@@ -559,6 +582,7 @@ struct SlotState {
     float    contrast   = 0.f;
     float    temperature= 0.f;
     bool     toneMap    = false;  // fallback ACES (when OCIO disabled)
+    int      channelMode = 0;    // 0=RGB, 1=R, 2=G, 3=B, 4=A
 };
 
 // ---------------------------------------------------------------------------
@@ -588,10 +612,11 @@ static void processImage(const SlotState& s, bool useOcio)
     }
 #endif
 
-    glUniform1f(glGetUniformLocation(g_shader, "uExposure"),    s.exposure);
+    glUniform1f(glGetUniformLocation(g_shader, "uExposure"),     s.exposure);
     glUniform1f(glGetUniformLocation(g_shader, "uSaturation"),  s.saturation);
     glUniform1f(glGetUniformLocation(g_shader, "uContrast"),    s.contrast);
     glUniform1f(glGetUniformLocation(g_shader, "uTemperature"), s.temperature);
+    glUniform1i(glGetUniformLocation(g_shader, "uChannelMode"), s.channelMode);
 #ifdef ANACAPA_HAVE_OCIO
     glUniform1i(glGetUniformLocation(g_shader, "uTonemap"),     useOcio ? 0 : 1);
 #else
@@ -670,7 +695,7 @@ static bool uploadTextureToSlot(const char* path, SlotState& s)
                         dst[x*4 + 0] = row[x*nc + 0];
                         dst[x*4 + 1] = row[x*nc + 1];
                         dst[x*4 + 2] = row[x*nc + 2];
-                        dst[x*4 + 3] = 1.f;
+                        dst[x*4 + 3] = (nc >= 4) ? row[x*nc + 3] : 1.f;
                     }
                 }
                 if (readOk) {
@@ -776,9 +801,13 @@ static void socketReaderThread(int clientFd) {
         switch (static_cast<MsgType>(hdr.type)) {
         case IMAGE_OPEN: {
             if (hdr.payloadLen < 12) break;
-            uint32_t w, h;
-            std::memcpy(&w, payload.data() + 0, 4);
-            std::memcpy(&h, payload.data() + 4, 4);
+            uint32_t w, h, spp = 0;
+            std::memcpy(&w,   payload.data() + 0, 4);
+            std::memcpy(&h,   payload.data() + 4, 4);
+            std::memcpy(&spp, payload.data() + 8, 4);
+            g_live.imageSpp = spp;
+            g_live.tilesReceived.store(0);
+            g_live.pixelsFilled.store(0);
             // If a pre-launch normalized crop was drawn, convert to pixels
             // and send SET_CROP to the renderer before it starts rendering tiles.
             // Send crop to renderer if one is active.  cropNormActive persists
@@ -866,6 +895,8 @@ static void socketReaderThread(int clientFd) {
                     d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 1.f;
                 }
             }
+            g_live.tilesReceived.fetch_add(1);
+            g_live.pixelsFilled.fetch_add(tu.w * tu.h);
             {
                 std::lock_guard<std::mutex> lk(g_live.queueMtx);
                 g_live.queue.push(std::move(tu));
@@ -1145,10 +1176,11 @@ int main(int argc, char** argv)
                     std::vector<float> zeros(w * h * 4, 0.f);
                     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0,
                                  GL_RGBA, GL_FLOAT, zeros.data());
-                    g_live.liveW  = w;
-                    g_live.liveH  = h;
-                    g_live.active = true;
-                    g_live.done   = false;
+                    g_live.liveW       = w;
+                    g_live.liveH       = h;
+                    g_live.totalPixels = w * h;
+                    g_live.active      = true;
+                    g_live.done        = false;
                     // Convert pre-launch panel-relative norm to image-display-relative
                     // so the overlay stays at the same screen position it was drawn.
                     if (g_live.cropNormIsPanel &&
@@ -1394,9 +1426,11 @@ int main(int argc, char** argv)
         }
 
         // ---- Left sidebar ---------------------------------------------------
-        const float kPanelW = 220.f;
+        const float kPanelW  = 220.f;
+        const float kStatusH = ImGui::GetFrameHeightWithSpacing() + 6.f;
+        const float kContentH = io.DisplaySize.y - menubarH - kStatusH;
         ImGui::SetNextWindowPos({0, menubarH});
-        ImGui::SetNextWindowSize({kPanelW, io.DisplaySize.y - menubarH});
+        ImGui::SetNextWindowSize({kPanelW, kContentH});
         ImGui::Begin("Controls", nullptr,
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
             ImGuiWindowFlags_NoBringToFrontOnFocus);
@@ -1465,6 +1499,26 @@ int main(int argc, char** argv)
         ImGui::SetNextItemWidth(-1);
         ImGui::SliderFloat("##tmp", &as.temperature, -1.f, 1.f, "Temp: %.2f");
 
+        ImGui::SeparatorText("Channels");
+        {
+            static const char* kChLabels[] = { "RGB", "R", "G", "B", "A" };
+            float btnW = (kPanelW - 16.f - 4.f * 4.f) / 5.f;
+            for (int i = 0; i < 5; ++i) {
+                if (i > 0) ImGui::SameLine(0.f, 4.f);
+                bool sel = (as.channelMode == i);
+                if (sel) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        {0.2f,0.5f,0.9f,1.f});
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.3f,0.6f,1.0f,1.f});
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        {0.25f,0.25f,0.28f,1.f});
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.35f,0.35f,0.40f,1.f});
+                }
+                if (ImGui::Button(kChLabels[i], {btnW, 0}))
+                    as.channelMode = i;
+                ImGui::PopStyleColor(2);
+            }
+        }
+
         ImGui::SeparatorText("View");
         ImGui::Checkbox("Fit to window", &fitToWin);
         if (!fitToWin) {
@@ -1493,7 +1547,7 @@ int main(int argc, char** argv)
         // ---- Image panel ----------------------------------------------------
         float imgX = kPanelW;
         float imgW = io.DisplaySize.x - kPanelW;
-        float imgH = io.DisplaySize.y - menubarH;
+        float imgH = kContentH;
 
         ImGui::SetNextWindowPos({imgX, menubarH});
         ImGui::SetNextWindowSize({imgW, imgH});
@@ -1740,6 +1794,44 @@ int main(int argc, char** argv)
             ImGui::End();
         }
 
+        ImGui::End();
+
+        // ---- Status bar -----------------------------------------------------
+        ImGui::SetNextWindowPos({0, menubarH + kContentH});
+        ImGui::SetNextWindowSize({io.DisplaySize.x, kStatusH});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {8.f, 3.f});
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, {0.13f, 0.13f, 0.14f, 1.f});
+        ImGui::Begin("##statusbar", nullptr,
+            ImGuiWindowFlags_NoTitleBar  | ImGuiWindowFlags_NoResize  |
+            ImGuiWindowFlags_NoMove      | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoDecoration);
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+
+        if (socketMode) {
+            if (g_live.active && !g_live.done) {
+                uint32_t tiles   = g_live.tilesReceived.load();
+                uint64_t filled  = g_live.pixelsFilled.load();
+                uint32_t total   = g_live.totalPixels;
+                float    pct     = (total > 0) ? float(filled) / float(total) * 100.f : 0.f;
+                if (g_live.paused)
+                    ImGui::TextDisabled("Paused  %u tiles, %.1f%%", tiles, pct);
+                else
+                    ImGui::TextDisabled("Rendering  %u tiles, %.1f%%", tiles, pct);
+            } else if (g_live.done) {
+                uint32_t w = g_live.liveW, h = g_live.liveH, spp = g_live.imageSpp;
+                ImGui::TextDisabled("Done  %ux%u, %u spp", w, h, spp);
+            } else {
+                ImGui::TextDisabled("Waiting for renderer on %s", sockPath.c_str());
+            }
+        } else {
+            const SlotState& ss = slots[activeSlot];
+            if (ss.texW > 0)
+                ImGui::TextDisabled("Slot %d — %dx%d%s", activeSlot + 1,
+                                    ss.texW, ss.texH, ss.isHdr ? "  HDR" : "");
+            else
+                ImGui::TextDisabled("Slot %d — empty", activeSlot + 1);
+        }
         ImGui::End();
 
         // ---- Render ---------------------------------------------------------
