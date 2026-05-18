@@ -1757,6 +1757,7 @@ LoadedScene loadUSD(const std::string& path,
                     GfVec3f wpt((float)pt3[0], (float)pt3[1], (float)pt3[2]);
                     h.center = zUp ? Vec3f{wpt[0], wpt[2], -wpt[1]}
                                    : Vec3f{wpt[0], wpt[1],  wpt[2]};
+                    h.centerClose = h.center;
                     float r = 0.05f;
                     if (ii < rawScales.size()) {
                         float s = std::max({rawScales[ii][0],
@@ -1918,6 +1919,7 @@ LoadedScene loadUSD(const std::string& path,
                 GfVec3f wpt((float)pt3[0], (float)pt3[1], (float)pt3[2]);
                 h.center = zUp ? Vec3f{wpt[0], wpt[2], -wpt[1]}
                                : Vec3f{wpt[0], wpt[1],  wpt[2]};
+                h.centerClose = h.center;
 
                 float w = widths.empty()           ? 0.02f
                         : widths.size() == 1       ? widths[0]
