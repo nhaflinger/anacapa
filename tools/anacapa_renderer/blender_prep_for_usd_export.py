@@ -203,6 +203,146 @@ def realize_particle_instances() -> Tuple[int, List[str]]:
 _halo_particle_stash: list = []   # list of dicts, one per emitter
 
 
+def _find_gn_bake_dir(obj):
+    """Return (bake_dir, bake_id) for the first GN bake on obj, or (None, None)."""
+    blend_dir = os.path.dirname(bpy.data.filepath)
+    if not blend_dir:
+        return None, None
+    for mod in obj.modifiers:
+        if mod.type != 'NODES':
+            continue
+        for bake in mod.bakes:
+            bake_id = str(getattr(bake, 'bake_id', ''))
+            if not bake_id:
+                continue
+            candidates = []
+            rel = bake.directory or getattr(mod, 'bake_directory', '')
+            if rel:
+                candidates.append(os.path.join(bpy.path.abspath(rel), bake_id))
+            for root in [os.path.join(blend_dir, 'caches'),
+                         blend_dir,
+                         os.path.join(blend_dir, '..', 'caches')]:
+                candidates.append(os.path.join(root, bake_id))
+            for c in candidates:
+                if os.path.isdir(c):
+                    return c, bake_id
+    return None, None
+
+
+def _read_gn_bake_frame(obj, frame):
+    """Read world-space positions and IDs from a GN bake at the given integer frame.
+    Returns (positions, ids) where each is a list, or ([], []) if unavailable.
+    """
+    import struct as _struct, json as _json, mathutils as _mu
+    bake_dir, _ = _find_gn_bake_dir(obj)
+    if not bake_dir:
+        return [], []
+    meta_path = os.path.join(bake_dir, 'meta', f'{int(frame):05d}_00000.json')
+    if not os.path.exists(meta_path):
+        return [], []
+    try:
+        with open(meta_path) as f:
+            meta = _json.load(f)
+        pc_data = None
+        for item in meta.get('items', {}).values():
+            if item.get('type') == 'GEOMETRY':
+                pc_data = item.get('data', {}).get('pointcloud')
+                break
+        if not pc_data or pc_data['num_points'] == 0:
+            return [], []
+        attrs    = {a['name']: a for a in pc_data.get('attributes', [])}
+        pos_info = attrs.get('position')
+        id_info  = attrs.get('id')
+        if not pos_info:
+            return [], []
+        num = pc_data['num_points']
+        blob_path = os.path.join(bake_dir, 'blobs', pos_info['data']['name'])
+        if not os.path.exists(blob_path):
+            return [], []
+        mw = obj.matrix_world
+        with open(blob_path, 'rb') as bf:
+            bf.seek(pos_info['data']['start'])
+            raw = _struct.unpack(f'{num * 3}f', bf.read(pos_info['data']['size']))
+        positions = []
+        for i in range(num):
+            lp = _mu.Vector((raw[i*3], raw[i*3+1], raw[i*3+2]))
+            wp = mw @ lp
+            positions.append((wp.x, wp.y, wp.z))
+        ids = []
+        if id_info:
+            id_blob = os.path.join(bake_dir, 'blobs', id_info['data']['name'])
+            if os.path.exists(id_blob):
+                with open(id_blob, 'rb') as bf:
+                    bf.seek(id_info['data']['start'])
+                    ids = list(_struct.unpack(f'{num}i', bf.read(id_info['data']['size'])))
+        return positions, ids
+    except Exception as e:
+        log(f"  [halo] _read_gn_bake_frame '{obj.name}' frame {frame}: {e}")
+        return [], []
+
+
+def _close_positions_by_id(obj, open_pos, open_ids, close_lo, close_hi, close_t):
+    """Return close-frame positions matched by particle ID.
+
+    Uses forward interpolation (close_lo → close_hi) when possible, falls back
+    to backward extrapolation ((close_lo-1) → close_lo) when close_hi is missing
+    (e.g. last frame of bake).  Particles that died before the close frame keep
+    their open position (no motion for that particle).
+    """
+    n = len(open_pos)
+    if not open_ids or len(open_ids) != n:
+        return None
+
+    if close_t < 1e-6:
+        # Shutter close lands on an integer frame — read it directly.
+        cp, ci = _read_gn_bake_frame(obj, close_lo)
+        if not cp:
+            return None
+        by_id = dict(zip(ci, cp)) if ci else {}
+        if by_id:
+            return [by_id.get(open_ids[i], open_pos[i]) for i in range(n)]
+        # No IDs in close frame — fall back to index if counts match.
+        if len(cp) == n:
+            return cp
+        return None
+
+    # Sub-integer: interpolate between open frame (= close_lo) and close_hi.
+    cp_hi, ci_hi = _read_gn_bake_frame(obj, close_hi)
+    if cp_hi:
+        by_id_hi = dict(zip(ci_hi, cp_hi)) if ci_hi else {}
+        result = []
+        for i in range(n):
+            oid = open_ids[i]
+            p0  = open_pos[i]
+            p1  = by_id_hi.get(oid) if by_id_hi else (cp_hi[i] if i < len(cp_hi) else None)
+            if p1 is not None:
+                result.append((p0[0]+(p1[0]-p0[0])*close_t,
+                               p0[1]+(p1[1]-p0[1])*close_t,
+                               p0[2]+(p1[2]-p0[2])*close_t))
+            else:
+                result.append(p0)  # particle died — no motion
+        return result
+
+    # close_hi unavailable — extrapolate from (close_lo-1) → close_lo velocity.
+    cp_prev, ci_prev = _read_gn_bake_frame(obj, close_lo - 1)
+    if cp_prev:
+        by_id_prev = dict(zip(ci_prev, cp_prev)) if ci_prev else {}
+        result = []
+        for i in range(n):
+            oid    = open_ids[i]
+            p0     = open_pos[i]
+            p_prev = by_id_prev.get(oid) if by_id_prev else (cp_prev[i] if i < len(cp_prev) else None)
+            if p_prev is not None:
+                result.append((p0[0]+(p0[0]-p_prev[0])*close_t,
+                               p0[1]+(p0[1]-p_prev[1])*close_t,
+                               p0[2]+(p0[2]-p_prev[2])*close_t))
+            else:
+                result.append(p0)
+        return result
+
+    return None
+
+
 def _extract_color_from_material(obj):
     """Return (r, g, b) base color from obj's first material slot, or white."""
     if obj.material_slots:
@@ -313,16 +453,16 @@ def collect_halo_particles() -> int:
         return None, None
 
     def _read_gn_bake(obj, frame):
-        """Read particle positions/radii from Blender GN bake cache on disk.
-        Returns (positions, widths, velocities) or ([], [], []).
+        """Read particle data from Blender GN bake cache on disk.
+        Returns (positions, widths, velocities, ids) or ([], [], [], []).
         """
         bake_dir, bake_id = _find_gn_bake_dir(obj)
         if not bake_dir:
-            return [], [], []
+            return [], [], [], []
         meta_path = os.path.join(bake_dir, 'meta', f'{frame:05d}_00000.json')
         if not os.path.exists(meta_path):
             log(f"  [halo] GN '{obj.name}': bake found ({bake_id}) but no frame {frame} cache.")
-            return [], [], []
+            return [], [], [], []
         try:
             with open(meta_path) as f:
                 meta = _json.load(f)
@@ -332,19 +472,19 @@ def collect_halo_particles() -> int:
                     pc_data = item.get('data', {}).get('pointcloud')
                     break
             if not pc_data:
-                return [], [], []
+                return [], [], [], []
             num_pts = pc_data['num_points']
             if num_pts == 0:
-                return [], [], []
+                return [], [], [], []
             attrs = {a['name']: a for a in pc_data.get('attributes', [])}
             pos_info = attrs.get('position')
             rad_info = attrs.get('radius')
+            id_info  = attrs.get('id')
             if not pos_info:
-                return [], [], []
-            blob_name = pos_info['data']['name']
-            blob_path = os.path.join(bake_dir, 'blobs', blob_name)
+                return [], [], [], []
+            blob_path = os.path.join(bake_dir, 'blobs', pos_info['data']['name'])
             if not os.path.exists(blob_path):
-                return [], [], []
+                return [], [], [], []
             mw = obj.matrix_world
             positions, widths, velocities = [], [], []
             with open(blob_path, 'rb') as bf:
@@ -361,11 +501,18 @@ def collect_halo_particles() -> int:
                 r = radii[i] if radii else 0.05
                 widths.append(max(r, 0.001) * 2.0)
                 velocities.append((0.0, 0.0, 0.0))
+            ids = []
+            if id_info:
+                id_blob = os.path.join(bake_dir, 'blobs', id_info['data']['name'])
+                if os.path.exists(id_blob):
+                    with open(id_blob, 'rb') as bf:
+                        bf.seek(id_info['data']['start'])
+                        ids = list(struct.unpack(f'{num_pts}i', bf.read(id_info['data']['size'])))
             log(f"  [halo] GN '{obj.name}': bake cache → {num_pts} particles at frame {frame}.")
-            return positions, widths, velocities
+            return positions, widths, velocities, ids
         except Exception as e:
             log(f"  [halo] GN '{obj.name}': bake read error: {e}")
-            return [], [], []
+            return [], [], [], []
 
     def _read_verts_from_mesh(mesh_data, matrix_world):
         """Return (positions, widths, velocities) from an evaluated Blender mesh."""
@@ -393,10 +540,10 @@ def collect_halo_particles() -> int:
         and any(m.type == 'NODES' for m in obj.modifiers)
     ]
     for obj in gn_emitters:
-        positions, widths, velocities = [], [], []
+        positions, widths, velocities, ids = [], [], [], []
 
         # --- Strategy 0: read on-disk GN bake cache (most reliable) -------------
-        positions, widths, velocities = _read_gn_bake(obj, current_frame)
+        positions, widths, velocities, ids = _read_gn_bake(obj, current_frame)
 
         if not positions:
             # --- Strategy 1: duplicate + convert to mesh ------------------------
@@ -434,7 +581,7 @@ def collect_halo_particles() -> int:
                 result = bpy.ops.object.simulation_nodes_cache_bake(selected=False)
                 log(f"  [halo] GN '{obj.name}': bake result={result}")
                 if 'FINISHED' in result:
-                    positions, widths, velocities = _read_gn_bake(obj, current_frame)
+                    positions, widths, velocities, ids = _read_gn_bake(obj, current_frame)
             except Exception as e:
                 log(f"  [halo] GN '{obj.name}': auto-bake failed: {e}")
 
@@ -485,6 +632,7 @@ def collect_halo_particles() -> int:
                 'positions':  positions,
                 'widths':     widths,
                 'velocities': velocities,
+                'ids':        ids,
                 'color':      _extract_color_from_material(obj),
                 'frame':      current_frame,
             })
@@ -5071,17 +5219,18 @@ def _inject_sss_params(usd_path):
         print(f"  [sss] subsurface params injected on {touched} UsdPreviewSurface shader(s)")
 
 
-def _inject_halo_particles(usd_path):
+def _inject_halo_particles(usd_path, shutter_close=0.0):
     """
     Write a UsdGeomPoints prim for each HALO particle emitter collected in
     _halo_particle_stash.  Called after Blender's USD export so the stage
     already exists and we just append to it.
 
     Attributes written per emitter:
-      points          — world-space positions (Vec3f[])
-      widths          — diameters (float[]; radius = width/2 in the renderer)
-      velocities      — particle velocities (Vec3f[])
-      primvars:displayColor — per-emitter constant color (Vec3f[1])
+      points                    — world-space positions (Vec3f[])
+      widths                    — diameters (float[])
+      velocities                — particle velocities (Vec3f[])
+      primvars:displayColor     — per-emitter constant color (Vec3f[1])
+      anacapa:closePositions    — shutter-close positions for motion blur (Vec3f[])
     """
     global _halo_particle_stash
     if not _halo_particle_stash:
@@ -5098,33 +5247,71 @@ def _inject_halo_particles(usd_path):
         return
 
     root = stage.GetDefaultPrim() or stage.GetPseudoRoot()
-
+    do_motion_blur = shutter_close > 0.0
     fps = bpy.context.scene.render.fps if hasattr(bpy.context.scene.render, 'fps') else 24
+
+    # Ensure the stage has an authored time range so the renderer's
+    # HasAuthoredTimeCodeRange() check enables motion blur.
+    if do_motion_blur and not stage.HasAuthoredTimeCodeRange():
+        frame_num = _halo_particle_stash[0].get('frame', bpy.context.scene.frame_current) \
+                    if _halo_particle_stash else bpy.context.scene.frame_current
+        stage.SetStartTimeCode(frame_num)
+        stage.SetEndTimeCode(round(frame_num + shutter_close))
 
     for entry in _halo_particle_stash:
         prim_path = root.GetPath().AppendPath(
             entry['name'].replace(' ', '_').replace('.', '_').replace('/', '_'))
         pts_prim = UsdGeom.Points.Define(stage, prim_path)
 
-        # Write at the correct time code so the renderer samples it correctly.
-        time = Usd.TimeCode(entry['frame'])
-
+        time      = Usd.TimeCode(entry['frame'])
         positions = entry['positions']
         pts_prim.GetPointsAttr().Set(
             Vt.Vec3fArray([Gf.Vec3f(*p) for p in positions]), time)
-
         pts_prim.GetWidthsAttr().Set(
             Vt.FloatArray(entry['widths']), time)
-
         if entry['velocities']:
             pts_prim.GetVelocitiesAttr().Set(
                 Vt.Vec3fArray([Gf.Vec3f(*v) for v in entry['velocities']]), time)
 
         r, g, b = entry['color']
         pts_prim.GetPrim().CreateAttribute(
-            'primvars:displayColor',
-            Sdf.ValueTypeNames.Color3fArray, False
+            'primvars:displayColor', Sdf.ValueTypeNames.Color3fArray, False
         ).Set(Vt.Vec3fArray([Gf.Vec3f(r, g, b)]), time)
+
+        # Motion blur: write close positions as a custom attribute.
+        if do_motion_blur:
+            frame       = entry.get('frame', bpy.context.scene.frame_current)
+            close_float = frame + shutter_close
+            close_lo    = int(close_float)
+            close_hi    = close_lo + 1
+            close_t     = close_float - close_lo   # fractional part in [0, 1)
+            close_positions = None
+
+            name = entry['name']
+            if name.endswith('_gn_particles'):
+                obj_name = name[:-len('_gn_particles')]
+                obj = bpy.context.scene.objects.get(obj_name)
+                if obj:
+                    close_positions = _close_positions_by_id(
+                        obj, positions, entry.get('ids', []),
+                        close_lo, close_hi, close_t)
+                    log(f"  [halo] '{name}': close={close_float:.3f} "
+                        f"got={len(close_positions) if close_positions else 0}")
+
+            if close_positions is None:
+                # Velocity extrapolation fallback (non-GN or missing IDs).
+                dt  = shutter_close / fps
+                vel = entry.get('velocities', [])
+                if vel and any(v != (0.0, 0.0, 0.0) for v in vel):
+                    close_positions = [
+                        (p[0] + v[0]*dt, p[1] + v[1]*dt, p[2] + v[2]*dt)
+                        for p, v in zip(positions, vel)
+                    ]
+
+            if close_positions:
+                pts_prim.GetPrim().CreateAttribute(
+                    'anacapa:closePositions', Sdf.ValueTypeNames.Point3fArray, False
+                ).Set(Vt.Vec3fArray([Gf.Vec3f(*p) for p in close_positions]))
 
         print(f"  [halo] Injected '{prim_path}': {len(positions)} particles at frame {entry['frame']}.")
 
@@ -5132,7 +5319,7 @@ def _inject_halo_particles(usd_path):
     _halo_particle_stash = []
 
 
-def post_process_usd(usd_path, sky_texture=""):
+def post_process_usd(usd_path, sky_texture="", shutter_close=0.0):
     """
     Run USD post-processing steps after Blender's USD exporter has written
     the file.  Patches the DomeLight texture, injects MaterialX textures,
@@ -5146,7 +5333,7 @@ def post_process_usd(usd_path, sky_texture=""):
         return
 
     out_dir = os.path.dirname(usd_path)
-    _inject_halo_particles(usd_path)
+    _inject_halo_particles(usd_path, shutter_close=shutter_close)
     _patch_dome_light_texture(usd_path, out_dir, explicit_sky=sky_texture)
     _inject_materialx_textures(usd_path)
     _inject_caustic_flags(usd_path)

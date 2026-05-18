@@ -868,13 +868,19 @@ def _usd_export(filepath, context, **kwargs):
         bpy.ops.wm.usd_export(filepath=filepath, **kwargs)
 
 
-def export_usd(usd_path, context, run_prep=True):
+def export_usd(usd_path, context, run_prep=True, shutter_close=0.0):
     """
     Export the scene to a single USD file.
     Skips prep when only transforms changed.
     Skips export entirely when nothing changed.
     """
     s = _state()
+
+    # Invalidate when shutter_close changes so particle close positions are rewritten.
+    s.setdefault("cached_particle_shutter_close", None)
+    if s["cached_particle_shutter_close"] != shutter_close:
+        s["dirty_scene"] = True
+        s["cached_particle_shutter_close"] = shutter_close
 
     # Nothing changed — reuse cached USD
     cached = s["cached_usd_path"]
@@ -923,7 +929,7 @@ def export_usd(usd_path, context, run_prep=True):
 
         if prep is not None and s["dirty_scene"]:
             try:
-                prep.post_process_usd(usd_path)
+                prep.post_process_usd(usd_path, shutter_close=shutter_close)
             except Exception as e:
                 print(f"[Anacapa] USD post-process warning: {e}")
 

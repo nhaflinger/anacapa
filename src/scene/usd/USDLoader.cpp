@@ -1912,6 +1912,17 @@ LoadedScene loadUSD(const std::string& path,
                 }
             }
 
+            // Motion blur: read anacapa:closePositions if present.
+            // Not gated on enableMotionBlur — the attribute is written by our
+            // Python exporter whenever shutter_close > 0, regardless of whether
+            // the stage has a full authored time range.
+            VtArray<GfVec3f> closePoints;
+            {
+                auto closeAttr = prim.GetAttribute(TfToken("anacapa:closePositions"));
+                if (closeAttr)
+                    closeAttr.Get(&closePoints);
+            }
+
             uint32_t addedCount = 0;
             for (size_t i = 0; i < points.size(); ++i) {
                 HaloDesc h;
@@ -1919,7 +1930,15 @@ LoadedScene loadUSD(const std::string& path,
                 GfVec3f wpt((float)pt3[0], (float)pt3[1], (float)pt3[2]);
                 h.center = zUp ? Vec3f{wpt[0], wpt[2], -wpt[1]}
                                : Vec3f{wpt[0], wpt[1],  wpt[2]};
-                h.centerClose = h.center;
+
+                if (!closePoints.empty() && i < closePoints.size()) {
+                    GfVec3d cp3 = xform.Transform(GfVec3d(closePoints[i]));
+                    GfVec3f cwpt((float)cp3[0], (float)cp3[1], (float)cp3[2]);
+                    h.centerClose = zUp ? Vec3f{cwpt[0], cwpt[2], -cwpt[1]}
+                                        : Vec3f{cwpt[0], cwpt[1],  cwpt[2]};
+                } else {
+                    h.centerClose = h.center;
+                }
 
                 float w = widths.empty()           ? 0.02f
                         : widths.size() == 1       ? widths[0]

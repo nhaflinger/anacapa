@@ -178,10 +178,18 @@ class ANACAPA_OT_render(bpy.types.Operator):
             self.report({'INFO'}, f"Hidden {len(hidden_for_render)} hair object(s) for render")
 
         # --- Export USD (runs prep_scene, which may convert/remove Curves) ---
+        _shutter_close = 0.0
+        if getattr(settings, 'use_motion_blur', False):
+            _shutter  = getattr(settings, 'motion_blur_shutter', 0.5)
+            _position = getattr(settings, 'motion_blur_position', 'CENTER')
+            if _shutter > 0:
+                _shutter_close = _shutter if _position in ('START', 'END') \
+                                 else _shutter / 2.0
+
         self.report({'INFO'}, "Exporting USD…")
         export_mod._state()["suppress_dirty"] = True
         try:
-            export_usd(usd_path, context)
+            export_usd(usd_path, context, shutter_close=_shutter_close)
         except Exception as e:
             self.report({'ERROR'}, f"USD export failed: {e}")
             shutil.rmtree(tmp_dir, ignore_errors=True)
