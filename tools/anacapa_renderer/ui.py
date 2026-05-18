@@ -116,6 +116,29 @@ class ANACAPA_PT_hair(bpy.types.Panel):
 
 
 # ---------------------------------------------------------------------------
+# Particles
+# ---------------------------------------------------------------------------
+
+class ANACAPA_PT_particles(bpy.types.Panel):
+    bl_label       = "Particles"
+    bl_space_type  = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context     = "render"
+    bl_options     = {'DEFAULT_CLOSED'}
+    COMPAT_ENGINES = {'ANACAPA'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.engine == 'ANACAPA'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator("anacapa.bake_particles", icon='PHYSICS')
+        layout.label(text="Bake GN simulations to disk before rendering.",
+                     icon='INFO')
+
+
+# ---------------------------------------------------------------------------
 # Lighting
 # ---------------------------------------------------------------------------
 
@@ -273,6 +296,7 @@ _classes = [
     ANACAPA_PT_adaptive,
     ANACAPA_PT_film,
     ANACAPA_PT_hair,
+    ANACAPA_PT_particles,
     ANACAPA_PT_lighting,
     ANACAPA_PT_camera,
     ANACAPA_PT_output,

@@ -203,17 +203,44 @@ def realize_particle_instances() -> Tuple[int, List[str]]:
 _halo_particle_stash: list = []   # list of dicts, one per emitter
 
 
+def _extract_color_from_material(obj):
+    """Return (r, g, b) base color from obj's first material slot, or white."""
+    if obj.material_slots:
+        mat = obj.material_slots[0].material
+        if mat and mat.use_nodes:
+            for node in mat.node_tree.nodes:
+                if node.type == 'BSDF_PRINCIPLED':
+                    bc = node.inputs.get('Base Color')
+                    if bc:
+                        return tuple(bc.default_value[:3])
+    return (1.0, 1.0, 1.0)
+
+
 def collect_halo_particles() -> int:
     """
-    Collect world-space particle data from all HALO particle systems.
+    Collect world-space particle data for UsdGeomPoints export.
+
+    Handles two particle systems:
+    1. Legacy HALO particles  — via obj.particle_systems with render_type=='HALO'
+    2. Blender 4.x GN-based particles — appear as NODES modifiers; positions
+       collected from depsgraph.object_instances (no mesh extraction needed).
+
     Stores results in _halo_particle_stash.  Returns total particle count.
     """
     global _halo_particle_stash
     _halo_particle_stash = []
 
+    # Read the depsgraph as-is — do NOT call frame_set() here.
+    # For GN simulation zones, frame_set() resets the incremental simulation back
+    # to frame 1 (they require sequential evaluation and can't jump to an arbitrary
+    # frame unless baked).  The viewport is already at the correct frame; just
+    # capture that evaluated state.
+    current_frame = bpy.context.scene.frame_current
     depsgraph = bpy.context.evaluated_depsgraph_get()
+    log(f"  [halo] Collecting particles at frame {current_frame}.")
     total = 0
 
+    # --- Legacy HALO particle systems ---
     for obj in bpy.context.scene.objects:
         if obj.hide_render:
             continue
@@ -225,46 +252,247 @@ def collect_halo_particles() -> int:
             if not particles:
                 continue
 
-            positions = []
-            widths    = []
+            positions  = []
+            widths     = []
             velocities = []
-            ids        = []
-
-            mat_world = obj.matrix_world
+            mat_world  = obj.matrix_world
             for p in particles:
                 if p.alive_state != 'ALIVE':
                     continue
                 loc = mat_world @ p.location
                 positions.append((loc.x, loc.y, loc.z))
-                widths.append(p.size * 2.0)   # UsdGeomPoints uses diameter
+                widths.append(p.size * 2.0)
                 vel = p.velocity
                 velocities.append((vel.x, vel.y, vel.z))
-                ids.append(p.birth_time)       # unique float per particle
 
             if not positions:
                 continue
-
-            # Per-emitter color from the first particle material slot, if any
-            color = (1.0, 1.0, 1.0)
-            if obj.material_slots:
-                mat = obj.material_slots[0].material
-                if mat and mat.use_nodes:
-                    for node in mat.node_tree.nodes:
-                        if node.type == 'BSDF_PRINCIPLED':
-                            bc = node.inputs.get('Base Color')
-                            if bc:
-                                color = tuple(bc.default_value[:3])
-                            break
 
             _halo_particle_stash.append({
                 'name':       f"{obj.name}_{ps.name}",
                 'positions':  positions,
                 'widths':     widths,
                 'velocities': velocities,
-                'color':      color,
+                'color':      _extract_color_from_material(obj),
+                'frame':      current_frame,
             })
             total += len(positions)
-            log(f"  [halo] '{obj.name}/{ps.name}': {len(positions)} HALO particles collected.")
+            log(f"  [halo] legacy '{obj.name}/{ps.name}': {len(positions)} particles.")
+
+    # --- Blender 4.x/5.x GN-based particle systems ---
+    # GN simulation zones cannot expose their state through the standard Python
+    # mesh API in an operator context.  Strategy 0 reads the on-disk bake cache
+    # directly (most reliable).  Strategies 1-3 are fallbacks for non-simulation
+    # GN setups where no bake exists.
+    import mathutils, struct, json as _json
+
+    def _find_gn_bake_dir(obj):
+        """Return (bake_dir_path, bake_id_str) for the first GN bake on obj, or (None, None)."""
+        blend_dir = os.path.dirname(bpy.data.filepath)
+        if not blend_dir:
+            return None, None
+        for mod in obj.modifiers:
+            if mod.type != 'NODES':
+                continue
+            for bake in mod.bakes:
+                bake_id = str(getattr(bake, 'bake_id', ''))
+                if not bake_id:
+                    continue
+                # Try the path the modifier stores, then search near the blend file
+                candidates = []
+                rel = bake.directory or getattr(mod, 'bake_directory', '')
+                if rel:
+                    candidates.append(os.path.join(bpy.path.abspath(rel), bake_id))
+                for root in [os.path.join(blend_dir, 'caches'),
+                             blend_dir,
+                             os.path.join(blend_dir, '..', 'caches')]:
+                    candidates.append(os.path.join(root, bake_id))
+                for c in candidates:
+                    if os.path.isdir(c):
+                        return c, bake_id
+        return None, None
+
+    def _read_gn_bake(obj, frame):
+        """Read particle positions/radii from Blender GN bake cache on disk.
+        Returns (positions, widths, velocities) or ([], [], []).
+        """
+        bake_dir, bake_id = _find_gn_bake_dir(obj)
+        if not bake_dir:
+            return [], [], []
+        meta_path = os.path.join(bake_dir, 'meta', f'{frame:05d}_00000.json')
+        if not os.path.exists(meta_path):
+            log(f"  [halo] GN '{obj.name}': bake found ({bake_id}) but no frame {frame} cache.")
+            return [], [], []
+        try:
+            with open(meta_path) as f:
+                meta = _json.load(f)
+            pc_data = None
+            for item in meta.get('items', {}).values():
+                if item.get('type') == 'GEOMETRY':
+                    pc_data = item.get('data', {}).get('pointcloud')
+                    break
+            if not pc_data:
+                return [], [], []
+            num_pts = pc_data['num_points']
+            if num_pts == 0:
+                return [], [], []
+            attrs = {a['name']: a for a in pc_data.get('attributes', [])}
+            pos_info = attrs.get('position')
+            rad_info = attrs.get('radius')
+            if not pos_info:
+                return [], [], []
+            blob_name = pos_info['data']['name']
+            blob_path = os.path.join(bake_dir, 'blobs', blob_name)
+            if not os.path.exists(blob_path):
+                return [], [], []
+            mw = obj.matrix_world
+            positions, widths, velocities = [], [], []
+            with open(blob_path, 'rb') as bf:
+                bf.seek(pos_info['data']['start'])
+                floats = struct.unpack(f'{num_pts * 3}f', bf.read(pos_info['data']['size']))
+                radii = None
+                if rad_info:
+                    bf.seek(rad_info['data']['start'])
+                    radii = struct.unpack(f'{num_pts}f', bf.read(rad_info['data']['size']))
+            for i in range(num_pts):
+                lp = mathutils.Vector((floats[i*3], floats[i*3+1], floats[i*3+2]))
+                wp = mw @ lp
+                positions.append((wp.x, wp.y, wp.z))
+                r = radii[i] if radii else 0.05
+                widths.append(max(r, 0.001) * 2.0)
+                velocities.append((0.0, 0.0, 0.0))
+            log(f"  [halo] GN '{obj.name}': bake cache → {num_pts} particles at frame {frame}.")
+            return positions, widths, velocities
+        except Exception as e:
+            log(f"  [halo] GN '{obj.name}': bake read error: {e}")
+            return [], [], []
+
+    def _read_verts_from_mesh(mesh_data, matrix_world):
+        """Return (positions, widths, velocities) from an evaluated Blender mesh."""
+        mw = matrix_world
+        rad_attr = mesh_data.attributes.get('radius')
+        vel_attr = mesh_data.attributes.get('velocity')
+        pos, wid, vel = [], [], []
+        for i, v in enumerate(mesh_data.vertices):
+            wp = mw @ v.co
+            pos.append((wp.x, wp.y, wp.z))
+            r = 0.05
+            if rad_attr and i < len(rad_attr.data):
+                r = max(rad_attr.data[i].value, 0.001)
+            wid.append(r * 2.0)
+            if vel_attr and i < len(vel_attr.data):
+                vv = vel_attr.data[i].vector
+                vel.append((vv[0], vv[1], vv[2]))
+            else:
+                vel.append((0.0, 0.0, 0.0))
+        return pos, wid, vel
+
+    gn_emitters = [
+        obj for obj in bpy.context.scene.objects
+        if not obj.hide_render
+        and any(m.type == 'NODES' for m in obj.modifiers)
+    ]
+    for obj in gn_emitters:
+        positions, widths, velocities = [], [], []
+
+        # --- Strategy 0: read on-disk GN bake cache (most reliable) -------------
+        positions, widths, velocities = _read_gn_bake(obj, current_frame)
+
+        if not positions:
+            # --- Strategy 1: duplicate + convert to mesh ------------------------
+            # Works for non-simulation GN setups (Instance on Points, etc.)
+            try:
+                bpy.ops.object.select_all(action='DESELECT')
+                obj.select_set(True)
+                bpy.context.view_layer.objects.active = obj
+                bpy.ops.object.duplicate(linked=False)
+                dup = bpy.context.active_object
+                bpy.ops.object.convert(target='MESH')
+                vcount = len(dup.data.vertices)
+                log(f"  [halo] GN '{obj.name}': convert→mesh gave {vcount} verts.")
+                if vcount > 0:
+                    positions, widths, velocities = _read_verts_from_mesh(
+                        dup.data, obj.matrix_world)
+                bpy.data.objects.remove(dup, do_unlink=True)
+            except Exception as e:
+                log(f"  [halo] GN '{obj.name}': convert strategy failed: {e}")
+                try:
+                    if 'dup' in dir() and dup.name in bpy.data.objects:
+                        bpy.data.objects.remove(dup, do_unlink=True)
+                except Exception:
+                    pass
+
+        if not positions:
+            # --- Strategy 2: auto-bake then re-read via bake cache --------------
+            # simulation_nodes_cache_bake works from operator context (no VIEW_3D
+            # override needed — confirmed from Scripting workspace).
+            try:
+                log(f"  [halo] GN '{obj.name}': no bake found — baking now...")
+                bpy.ops.object.select_all(action='DESELECT')
+                obj.select_set(True)
+                bpy.context.view_layer.objects.active = obj
+                result = bpy.ops.object.simulation_nodes_cache_bake(selected=False)
+                log(f"  [halo] GN '{obj.name}': bake result={result}")
+                if 'FINISHED' in result:
+                    positions, widths, velocities = _read_gn_bake(obj, current_frame)
+            except Exception as e:
+                log(f"  [halo] GN '{obj.name}': auto-bake failed: {e}")
+
+        # --- Strategy 3: PointCloud / depsgraph instances (non-simulation GN) ---
+        if not positions:
+            eval_obj = obj.evaluated_get(depsgraph)
+            if eval_obj.type == 'POINTCLOUD':
+                pc = eval_obj.data
+                pos_attr = pc.attributes.get('position')
+                rad_attr = pc.attributes.get('radius')
+                log(f"  [halo] GN '{obj.name}': PointCloud {len(pc.points)} pts.")
+                if pos_attr:
+                    mw = obj.matrix_world
+                    for i, item in enumerate(pos_attr.data):
+                        wp = mw @ mathutils.Vector(item.vector)
+                        positions.append((wp.x, wp.y, wp.z))
+                        r = 0.05
+                        if rad_attr and i < len(rad_attr.data):
+                            r = max(rad_attr.data[i].value, 0.001)
+                        widths.append(r * 2.0)
+                        velocities.append((0.0, 0.0, 0.0))
+            else:
+                inst_pts = []
+                for inst in depsgraph.object_instances:
+                    if not inst.is_instance or inst.parent is None:
+                        continue
+                    if inst.parent.original is not obj:
+                        continue
+                    mx  = inst.matrix_world
+                    pos = mx.translation
+                    sx, sy, sz = mx.to_scale()
+                    avg_scale = (abs(sx) + abs(sy) + abs(sz)) / 3.0
+                    vel = getattr(inst, 'velocity', None)
+                    inst_pts.append((
+                        (pos.x, pos.y, pos.z),
+                        avg_scale,
+                        (vel.x, vel.y, vel.z) if vel else (0.0, 0.0, 0.0),
+                    ))
+                if inst_pts:
+                    log(f"  [halo] GN '{obj.name}': {len(inst_pts)} instances.")
+                    positions  = [p[0] for p in inst_pts]
+                    widths     = [max(p[1], 0.01) * 2.0 for p in inst_pts]
+                    velocities = [p[2] for p in inst_pts]
+
+        if positions:
+            _halo_particle_stash.append({
+                'name':       f"{obj.name}_gn_particles",
+                'positions':  positions,
+                'widths':     widths,
+                'velocities': velocities,
+                'color':      _extract_color_from_material(obj),
+                'frame':      current_frame,
+            })
+            total += len(positions)
+            log(f"  [halo] GN '{obj.name}': {len(positions)} particles.")
+        else:
+            log(f"  [halo] GN '{obj.name}': no particles found — bake the simulation "
+                f"first (Object → Geometry Nodes Caches → Bake All Simulations).")
 
     if total:
         log(f"  [halo] Total collected: {total} particles across {len(_halo_particle_stash)} emitter(s).")
@@ -313,6 +541,23 @@ def realize_gn_instances() -> Tuple[int, List[str]]:
     hidden: List[str] = []
 
     for obj in gn_objects:
+        # GN particle emitters (type MESH with no polygons, only vertices) are
+        # handled by collect_halo_particles() — skip them here to avoid the
+        # "no mesh and no instances found" warning and unnecessary work.
+        try:
+            eval_obj_check = obj.evaluated_get(depsgraph)
+            check_mesh = bpy.data.meshes.new_from_object(eval_obj_check, depsgraph=depsgraph)
+            is_particle_emitter = (check_mesh is not None
+                                   and len(check_mesh.polygons) == 0
+                                   and len(check_mesh.vertices) > 0)
+            if check_mesh:
+                bpy.data.meshes.remove(check_mesh)
+            if is_particle_emitter:
+                log(f"  [gn] '{obj.name}' — particle emitter (vertices only), handled by halo collector.")
+                continue
+        except Exception:
+            pass
+
         # --- Strategy 1: realized mesh output ----------------------------------
         try:
             eval_obj = obj.evaluated_get(depsgraph)
@@ -495,6 +740,16 @@ def apply_modifiers() -> Tuple[int, List[str]]:
             mod_label = safe_name(mod.name)
             # Skip modifiers that are disabled (unchecked in the stack)
             if not mod.show_render:
+                continue
+            # Particle systems (legacy) — handled by realize_particle_instances /
+            # collect_halo_particles.  Applying destroys the simulation.
+            if mod.type == 'PARTICLE_SYSTEM':
+                continue
+            # GN modifiers — already handled by realize_gn_instances() which
+            # creates a separate _gn_realized object.  Blender 4.x GN-based
+            # particles also appear as NODES modifiers; applying them fails and
+            # the exception handler would then remove the modifier entirely.
+            if mod.type == 'NODES':
                 continue
             try:
                 bpy.ops.object.modifier_apply(modifier=mod.name)
@@ -1449,11 +1704,19 @@ def remove_render_hidden() -> Tuple[int, List[str]]:
             children_of.setdefault(obj.parent.name, []).append(obj.name)
 
     for obj in list(bpy.context.scene.objects):
-        if obj.hide_render and not children_of.get(obj.name):
+        if not obj.hide_render:
+            continue
+        # Never remove particle emitters — they are often hidden from render
+        # intentionally (only the particles should appear) but must stay in
+        # the scene so the particle system survives export.
+        if obj.particle_systems:
+            kept.append(obj.name)
+            continue
+        if not children_of.get(obj.name):
             log(f"Removing render-hidden object '{obj.name}' ({obj.type}).")
             bpy.data.objects.remove(obj, do_unlink=True)
             removed += 1
-        elif obj.hide_render:
+        else:
             kept.append(obj.name)
 
     return removed, kept
@@ -4836,29 +5099,34 @@ def _inject_halo_particles(usd_path):
 
     root = stage.GetDefaultPrim() or stage.GetPseudoRoot()
 
+    fps = bpy.context.scene.render.fps if hasattr(bpy.context.scene.render, 'fps') else 24
+
     for entry in _halo_particle_stash:
         prim_path = root.GetPath().AppendPath(
             entry['name'].replace(' ', '_').replace('.', '_').replace('/', '_'))
         pts_prim = UsdGeom.Points.Define(stage, prim_path)
 
+        # Write at the correct time code so the renderer samples it correctly.
+        time = Usd.TimeCode(entry['frame'])
+
         positions = entry['positions']
         pts_prim.GetPointsAttr().Set(
-            Vt.Vec3fArray([Gf.Vec3f(*p) for p in positions]))
+            Vt.Vec3fArray([Gf.Vec3f(*p) for p in positions]), time)
 
         pts_prim.GetWidthsAttr().Set(
-            Vt.FloatArray(entry['widths']))
+            Vt.FloatArray(entry['widths']), time)
 
         if entry['velocities']:
             pts_prim.GetVelocitiesAttr().Set(
-                Vt.Vec3fArray([Gf.Vec3f(*v) for v in entry['velocities']]))
+                Vt.Vec3fArray([Gf.Vec3f(*v) for v in entry['velocities']]), time)
 
         r, g, b = entry['color']
         pts_prim.GetPrim().CreateAttribute(
             'primvars:displayColor',
             Sdf.ValueTypeNames.Color3fArray, False
-        ).Set(Vt.Vec3fArray([Gf.Vec3f(r, g, b)]))
+        ).Set(Vt.Vec3fArray([Gf.Vec3f(r, g, b)]), time)
 
-        print(f"  [halo] Injected '{prim_path}': {len(positions)} particles.")
+        print(f"  [halo] Injected '{prim_path}': {len(positions)} particles at frame {entry['frame']}.")
 
     stage.Save()
     _halo_particle_stash = []

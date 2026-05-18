@@ -238,9 +238,11 @@ def export_hair_abc(abc_path, context, shutter_open=0.0, shutter_close=0.0):
     s = _state()
     s.setdefault("cached_shutter_close", None)
 
-    # Invalidate hair cache when the frame or shutter settings change.
+    # Invalidate caches when the frame changes — particles, animation, and hair
+    # are all frame-dependent.
     frame = context.scene.frame_current
     if s["cached_frame"] != frame:
+        s["dirty_scene"]  = True
         s["dirty_hair"]   = True
         s["cached_frame"] = frame
     if s["cached_shutter_close"] != shutter_close:

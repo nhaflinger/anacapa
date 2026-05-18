@@ -526,7 +526,34 @@ class ANACAPA_OT_export_scene(bpy.types.Operator):
         return {'FINISHED'}
 
 
-_classes = [ANACAPA_OT_launch_viewer, ANACAPA_OT_render, ANACAPA_OT_export_scene]
+class ANACAPA_OT_bake_particles(bpy.types.Operator):
+    """Bake all GN simulation particle caches in the scene to disk."""
+    bl_idname = "anacapa.bake_particles"
+    bl_label  = "Bake Particles"
+
+    def execute(self, context):
+        baked = 0
+        for obj in context.scene.objects:
+            if obj.hide_render:
+                continue
+            if not any(m.type == 'NODES' for m in obj.modifiers):
+                continue
+            context.view_layer.objects.active = obj
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            result = bpy.ops.object.simulation_nodes_cache_bake(selected=False)
+            if 'FINISHED' in result:
+                baked += 1
+                self.report({'INFO'}, f"Baked '{obj.name}'")
+            else:
+                self.report({'WARNING'}, f"'{obj.name}' bake returned {result} — check modifier settings")
+        if baked == 0:
+            self.report({'WARNING'}, "No GN simulation objects found to bake.")
+        return {'FINISHED'}
+
+
+_classes = [ANACAPA_OT_launch_viewer, ANACAPA_OT_render, ANACAPA_OT_export_scene,
+            ANACAPA_OT_bake_particles]
 
 
 def register():

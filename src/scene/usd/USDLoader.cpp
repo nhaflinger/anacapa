@@ -1716,11 +1716,75 @@ LoadedScene loadUSD(const std::string& path,
             UsdGeomPointInstancer instancer(prim);
             GfMatrix4d instancerToWorld = xformCache.GetLocalToWorldTransform(prim);
 
+            // Material resolve helper — shared by both mesh-instance and halo paths.
+            auto resolveMaterialIdx = [&](const UsdShadeMaterial& mat) -> uint32_t {
+                if (!mat) return kDefaultMatIdx;
+                std::string matPath = mat.GetPath().GetString();
+                auto it = matPathToIdx.find(matPath);
+                if (it != matPathToIdx.end()) return it->second;
+                uint32_t idx = static_cast<uint32_t>(result.materials.size());
+                result.materials.push_back(resolveMaterial(mat, stageDir));
+                matPathToIdx[matPath] = idx;
+                return idx;
+            };
+
+            // Halo-disc fallback: used when prototypes are missing/cyclic or
+            // load 0 meshes (common with Blender 4.x GN simulation exports).
+            auto tryHaloFallback = [&]() {
+                VtArray<GfVec3f> rawPositions;
+                instancer.GetPositionsAttr().Get(&rawPositions, tcOpen);
+                if (rawPositions.empty()) {
+                    spdlog::warn("USDLoader: instancer '{}' — no positions, skipped",
+                                 prim.GetPath().GetString());
+                    return;
+                }
+                VtArray<GfVec3f> rawScales;
+                instancer.GetScalesAttr().Get(&rawScales, tcOpen);
+
+                VtArray<GfVec3f> colors;
+                UsdGeomPrimvarsAPI pvAPI(prim);
+                auto dcPv = pvAPI.GetPrimvar(TfToken("displayColor"));
+                if (dcPv) dcPv.ComputeFlattened(&colors, tcOpen);
+
+                UsdShadeMaterialBindingAPI instBindAPI(prim);
+                uint32_t instMatIdx =
+                    resolveMaterialIdx(instBindAPI.ComputeBoundMaterial());
+
+                int haloCount = 0;
+                for (size_t ii = 0; ii < rawPositions.size(); ++ii) {
+                    HaloDesc h;
+                    GfVec3d pt3 = instancerToWorld.Transform(GfVec3d(rawPositions[ii]));
+                    GfVec3f wpt((float)pt3[0], (float)pt3[1], (float)pt3[2]);
+                    h.center = zUp ? Vec3f{wpt[0], wpt[2], -wpt[1]}
+                                   : Vec3f{wpt[0], wpt[1],  wpt[2]};
+                    float r = 0.05f;
+                    if (ii < rawScales.size()) {
+                        float s = std::max({rawScales[ii][0],
+                                            rawScales[ii][1],
+                                            rawScales[ii][2]});
+                        r = std::max(s * 0.5f, 0.001f);
+                    }
+                    h.radius = r;
+                    if (!colors.empty()) {
+                        const GfVec3f& c = colors.size() == 1 ? colors[0]
+                                         : ii < colors.size()  ? colors[ii]
+                                         : colors.back();
+                        h.color = {c[0], c[1], c[2]};
+                    }
+                    h.matIdx = instMatIdx;
+                    result.haloPool.addHalo(h);
+                    ++haloCount;
+                }
+                spdlog::info(
+                    "USDLoader: instancer '{}' → {} halo discs (no prototype geometry)",
+                    prim.GetPath().GetString(), haloCount);
+            };
+
             SdfPathVector protoPaths;
             instancer.GetPrototypesRel().GetTargets(&protoPaths);
             if (protoPaths.empty()) {
-                spdlog::warn("USDLoader: instancer '{}' has no prototypes",
-                             prim.GetPath().GetString());
+                // Cycle or missing reference — prototype resolution failed.
+                tryHaloFallback();
                 continue;
             }
 
@@ -1742,6 +1806,7 @@ LoadedScene loadUSD(const std::string& path,
                     UsdGeomPointInstancer::IncludeProtoXform)) {
                 spdlog::warn("USDLoader: instancer '{}' — failed to compute transforms",
                              prim.GetPath().GetString());
+                tryHaloFallback();
                 continue;
             }
             if (instanceXforms.size() != protoIndices.size()) continue;
@@ -1763,18 +1828,6 @@ LoadedScene loadUSD(const std::string& path,
                         {UsdGeomMesh(child), protoRootWorldInv * childWorld});
                 }
             }
-
-            // Material resolve helper — same caching pattern as the mesh branch.
-            auto resolveMaterialIdx = [&](const UsdShadeMaterial& mat) -> uint32_t {
-                if (!mat) return kDefaultMatIdx;
-                std::string matPath = mat.GetPath().GetString();
-                auto it = matPathToIdx.find(matPath);
-                if (it != matPathToIdx.end()) return it->second;
-                uint32_t idx = static_cast<uint32_t>(result.materials.size());
-                result.materials.push_back(resolveMaterial(mat, stageDir));
-                matPathToIdx[matPath] = idx;
-                return idx;
-            };
 
             int loadedCount = 0;
             for (size_t ii = 0; ii < instanceXforms.size(); ++ii) {
@@ -1800,11 +1853,15 @@ LoadedScene loadUSD(const std::string& path,
                 }
             }
 
-            spdlog::info(
-                "USDLoader: instancer '{}' → {} mesh copies "
-                "({} instances, {} prototype(s))",
-                prim.GetPath().GetString(), loadedCount,
-                instanceXforms.size(), protoPaths.size());
+            if (loadedCount > 0) {
+                spdlog::info(
+                    "USDLoader: instancer '{}' → {} mesh copies "
+                    "({} instances, {} prototype(s))",
+                    prim.GetPath().GetString(), loadedCount,
+                    instanceXforms.size(), protoPaths.size());
+            } else {
+                tryHaloFallback();
+            }
         }
 
         // ---- Points (camera-facing halo disc particles) ----
