@@ -139,8 +139,6 @@ class ANACAPA_PT_particles(bpy.types.Panel):
         layout.operator("anacapa.bake_particles", icon='PHYSICS')
         layout.label(text="Bake GN simulations before rendering.", icon='INFO')
 
-        layout.separator()
-        layout.prop(s, "particles_path")
 
 
 # ---------------------------------------------------------------------------

@@ -210,15 +210,6 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
                     "Leave empty to use the first camera found.",
     )
 
-    # Particles
-    particles_path: bpy.props.StringProperty(
-        name="Particles Alembic",
-        description="Alembic .abc file containing an IPoints particle point cloud. "
-                    "Supports per-frame animation — evaluated at the current render frame. "
-                    "Use the Bake Particles button to write a cache from a GN simulation, "
-                    "then export it to Alembic via File > Export > Alembic.",
-        subtype='FILE_PATH',
-    )
 
 
 def register():

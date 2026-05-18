@@ -958,8 +958,7 @@ def export_usd(usd_path, context, run_prep=True, shutter_close=0.0):
 
 
 def build_command(executable, usd_path, settings, width, height, output_path,
-                  curves_path=None, matassign_paths=None, frame=None,
-                  particles_path=None):
+                  curves_path=None, matassign_paths=None, frame=None):
     cmd = [
         executable,
         "--scene",  usd_path,
@@ -1046,8 +1045,6 @@ def build_command(executable, usd_path, settings, width, height, output_path,
     if curves_path:
         cmd += ["--curves", curves_path]
 
-    if particles_path:
-        cmd += ["--particles", particles_path]
 
     if matassign_paths:
         paths = [matassign_paths] if isinstance(matassign_paths, str) else matassign_paths
