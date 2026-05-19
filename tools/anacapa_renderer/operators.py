@@ -187,7 +187,12 @@ class ANACAPA_OT_render(bpy.types.Operator):
                                  else _shutter / 2.0
 
         self.report({'INFO'}, "Exporting USD…")
-        export_mod._state()["suppress_dirty"] = True
+        s = export_mod._state()
+        # Always mark transforms dirty before export so camera/object moves are
+        # captured even if the depsgraph event fired after suppress_dirty was set
+        # on a previous frame or during a previous render's grace period.
+        s["dirty_transform"] = True
+        s["suppress_dirty"]  = True
         try:
             export_usd(usd_path, context, shutter_close=_shutter_close)
         except Exception as e:

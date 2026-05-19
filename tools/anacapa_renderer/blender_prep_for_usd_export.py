@@ -5075,24 +5075,32 @@ def _extract_materialx_sidecar(usd_path):
         elif translucent_shader is not None:
             # Bare ND_translucent_bsdf — synthesize an OpenPBR entry with full
             # transmission so the renderer handles it rather than falling back to black.
-            color = [0.8, 0.8, 0.8]
+            # Read color and strength directly from the shader node.
+            color    = [0.8, 0.8, 0.8]
+            strength = 0.5
             sh = UsdShade.Shader(translucent_shader)
             color_inp = sh.GetInput("color")
             if color_inp and not color_inp.HasConnectedSource():
                 val = _get_shader_input_value(color_inp)
                 if isinstance(val, list) and len(val) >= 3:
                     color = val[:3]
+            strength_inp = sh.GetInput("strength")
+            if strength_inp and not strength_inp.HasConnectedSource():
+                val = _get_shader_input_value(strength_inp)
+                if isinstance(val, (int, float)):
+                    strength = float(val)
             synth_path = mat_path + "/synth_translucent"
             synth_node = {
                 "path": synth_path,
                 "id": OPEN_PBR_ID,
                 "inputs": {
-                    "base_color":         color,
-                    "base_weight":        1.0,
+                    "base_color":          color,
+                    "base_weight":         1.0,
                     "transmission_weight": 1.0,
-                    "geometry_opacity":   1.0,
-                    "specular_roughness": 0.0,
-                    "specular_ior":       1.5,
+                    "geometry_opacity":    1.0,
+                    "specular_roughness":  0.0,
+                    "specular_ior":        1.5,
+                    "translucency_strength": strength,
                 },
                 "connected_nodes": {},
             }
