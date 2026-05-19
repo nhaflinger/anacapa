@@ -1009,27 +1009,27 @@ _MATERIALX_HANDLED_TYPES = {
     'VALTORGB', 'INVERT', 'MIX_RGB', 'MIX', 'HUE_SAT', 'BRIGHTCONTRAST',
     'GAMMA', 'CURVE_RGB', 'RGBTOBW', 'BLACKBODY', 'WAVELENGTH', 'LIGHT_FALLOFF',
     # Math / Converter
-    'MATH', 'CLAMP', 'MAP_RANGE', 'FLOAT_CURVE',
+    'MATH', 'CLAMP', 'MAP_RANGE', 'CURVE_FLOAT',
     # Texture
     'TEX_NOISE', 'TEX_WAVE', 'TEX_VORONOI', 'TEX_MUSGRAVE', 'TEX_GRADIENT',
     'TEX_CHECKER', 'TEX_BRICK', 'TEX_ENVIRONMENT', 'TEX_MAGIC', 'TEX_GABOR',
     'TEX_WHITE_NOISE', 'TEX_SKY', 'TEX_IES',
     # Vector
     'BUMP', 'NORMAL_MAP', 'DISPLACEMENT', 'VECTOR_DISPLACEMENT',
-    'VECTOR_MATH', 'VECTOR_ROTATE', 'VECTOR_TRANSFORM', 'CURVE_VEC', 'NORMAL',
+    'VECT_MATH', 'VECTOR_ROTATE', 'VECT_TRANSFORM', 'CURVE_VEC', 'NORMAL',
     'TANGENT',
     # Shader
     'BSDF_DIFFUSE', 'BSDF_GLOSSY', 'BSDF_METALLIC', 'BSDF_GLASS',
     'BSDF_REFRACTION', 'BSDF_TRANSPARENT', 'BSDF_TRANSLUCENT', 'BSDF_TOON',
     'BSDF_SHEEN', 'BSDF_HAIR', 'BSDF_HAIR_PRINCIPLED', 'BSDF_RAY_PORTAL',
     'EMISSION', 'BACKGROUND', 'SUBSURFACE_SCATTERING', 'HOLDOUT',
-    'MIX_SHADER', 'ADD_SHADER', 'EEVEE_SPECULAR', 'SHADER_TO_RGB',
-    'VOLUME_PRINCIPLED', 'VOLUME_ABSORPTION', 'VOLUME_SCATTER', 'VOLUME_COEFFICIENTS',
+    'MIX_SHADER', 'ADD_SHADER', 'EEVEE_SPECULAR', 'SHADERTORGB',
+    'PRINCIPLED_VOLUME', 'VOLUME_ABSORPTION', 'VOLUME_SCATTER', 'VOLUME_COEFFICIENTS',
     # Input
     'RGB', 'VALUE', 'VERTEX_COLOR', 'ATTRIBUTE', 'FRESNEL', 'LAYER_WEIGHT',
     'AMBIENT_OCCLUSION', 'NEW_GEOMETRY', 'GEOMETRY', 'OBJECT_INFO',
     'CAMERA', 'LIGHT_PATH', 'HAIR_INFO', 'PARTICLE_INFO', 'POINT_INFO',
-    'VOLUME_INFO', 'WIREFRAME', 'BEVEL', 'RAYCAST', 'UV_ALONG_STROKE',
+    'VOLUME_INFO', 'WIREFRAME', 'BEVEL', 'MATERIAL_RAYCAST', 'UVALONGSTROKE',
     # Separate / Combine
     'SEPXYZ', 'SEPRGB', 'SEPARATE_XYZ', 'SEPARATE_COLOR',
     'COMBXYZ', 'COMBRGB', 'COMBINE_XYZ', 'COMBINE_COLOR',
@@ -2332,7 +2332,7 @@ class _MtlxBuilder:
             out = self._tx_mix_shader(bl_node)
         elif t == 'ADD_SHADER':
             out = self._tx_add_shader(bl_node)
-        elif t in ('EEVEE_SPECULAR', 'SHADER_TO_RGB'):
+        elif t in ('EEVEE_SPECULAR', 'SHADERTORGB'):
             # Eevee-only — fall back to diffuse approximation
             out = self._tx_bsdf_diffuse(bl_node)
         # ── Texture ────────────────────────────────────────────────────
@@ -2394,11 +2394,11 @@ class _MtlxBuilder:
             out = self._tx_vector_displacement(bl_node)
         elif t == 'MAPPING':
             out = self._tx_mapping(bl_node)
-        elif t == 'VECTOR_MATH':
+        elif t == 'VECT_MATH':
             out = self._tx_vector_math(bl_node)
         elif t == 'VECTOR_ROTATE':
             out = self._tx_vector_rotate(bl_node)
-        elif t in ('VECTOR_TRANSFORM',):
+        elif t in ('VECT_TRANSFORM',):
             out = self._tx_vector_transform(bl_node)
         elif t == 'CURVE_VEC':
             out = self._tx_curve_vec(bl_node)
@@ -2413,7 +2413,7 @@ class _MtlxBuilder:
             out = self._tx_clamp(bl_node)
         elif t == 'MAP_RANGE':
             out = self._tx_map_range(bl_node)
-        elif t == 'FLOAT_CURVE':
+        elif t == 'CURVE_FLOAT':
             out = self._tx_curve_rgb(bl_node)        # same approximation
         # ── Input ──────────────────────────────────────────────────────
         elif t in ('UVMAP', 'TEX_COORD'):
@@ -2438,7 +2438,7 @@ class _MtlxBuilder:
             out = self._const_color3(0.5, 0.5, 0.5) # object-level, not shadeable
         elif t in ('CAMERA', 'LIGHT_PATH', 'HAIR_INFO', 'PARTICLE_INFO',
                    'POINT_INFO', 'VOLUME_INFO', 'WIREFRAME', 'BEVEL',
-                   'RAYCAST', 'UV_ALONG_STROKE'):
+                   'MATERIAL_RAYCAST', 'UVALONGSTROKE'):
             # Runtime-only render state — emit neutral constants
             out = self._const_float(0.0)
         # ── Separate / Combine ─────────────────────────────────────────
@@ -2447,7 +2447,7 @@ class _MtlxBuilder:
         elif t in ('COMBXYZ', 'COMBRGB', 'COMBINE_XYZ', 'COMBINE_COLOR'):
             out = self._tx_combine(bl_node)
         # ── Volume ─────────────────────────────────────────────────────
-        elif t in ('VOLUME_PRINCIPLED', 'VOLUME_ABSORPTION', 'VOLUME_SCATTER',
+        elif t in ('PRINCIPLED_VOLUME', 'VOLUME_ABSORPTION', 'VOLUME_SCATTER',
                    'VOLUME_COEFFICIENTS'):
             # Volumes need separate handling outside surface shaders
             out = self._const_color3(0.0, 0.0, 0.0)
