@@ -4,6 +4,7 @@
 #include "CudaContext.h"
 #include "CudaBuffer.h"
 #include "CudaAccelStructure.h"
+#include "../../accel/HaloAccel.h"
 #include "shaders/SharedTypes.h"
 #include "shaders/LaunchParams.h"
 
@@ -17,6 +18,7 @@
 #include "../../shading/StandardSurface.h"
 #include "../../shading/MarschnerHair.h"
 #include "../../shading/ChiangHair.h"
+#include "../../shading/SoftParticle.h"
 #include "../../shading/lights/AreaLight.h"
 #include "../../shading/lights/DirectionalLight.h"
 #include "../../shading/lights/DomeLight.h"
@@ -30,7 +32,9 @@
 #endif
 
 #include <algorithm>
+#include <cstring>
 #include <random>
+#include <spdlog/spdlog.h>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -80,6 +84,21 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
     gm.causticGenerator = 0u;
     if (!mat) return gm;
     gm.causticGenerator = mat->isCausticGenerator() ? 1u : 0u;
+
+    // SoftParticleMaterial — halo disc particles.  Always classified as
+    // emissive, with opacity stored in roughness for the halo-drain loop
+    // (see Shade.cu __raygen__wf_bounce).  Handled before the generic
+    // emissive branch so opacity is always propagated, even when the
+    // per-particle strength is zero ("use hd.color at render time").
+    if (auto* spm = dynamic_cast<const SoftParticleMaterial*>(mat)) {
+        SurfaceInteraction si; si.n = si.ng = {0,0,1};
+        ShadingContext ctx(si, {0,0,-1});
+        Spectrum Le  = spm->Le(ctx, {0,0,1});
+        gm.type      = kMatEmissive;
+        gm.emissive  = {Le.x, Le.y, Le.z};
+        gm.roughness = spm->opacity();
+        return gm;
+    }
 
     // Sample emission and reflectance up front for every material — UsdPreview-
     // Surface lights load as StandardSurfaceMaterial with emissive_color set, not
@@ -307,6 +326,13 @@ struct CudaPathIntegrator::Impl {
     // accel->hairMeshBaseID()).  hairMeshBaseID == 0xFFFFFFFF means no hair.
     CudaBuffer<GpuHairMaterial> d_hairMats;
     uint32_t                    hairMeshBaseID = 0xFFFFFFFFu;
+
+    // Halo disc particles — software BVH walked inline in wf_bounce.
+    // Mirrors CPU HaloAccel.  Empty when scene has no UsdGeomPoints halos.
+    CudaBuffer<GpuHaloDesc>     d_halos;
+    CudaBuffer<GpuHaloNode>     d_haloNodes;
+    CudaBuffer<uint32_t>        d_haloPrimIdx;
+    uint32_t                    numHalos = 0;
 
     // Caustic photon map — GPU trace + CPU hash grid build + GPU query.
     CudaBuffer<GpuPhoton>       d_photons;
@@ -1208,6 +1234,47 @@ void CudaPathIntegrator::prepare(const SceneView& scene) {
         m_impl->d_hairMats.upload(hairMats);
     }
 
+    // Halo disc particles — software BVH built CPU-side, mirrored to device.
+    m_impl->numHalos = 0;
+    m_impl->d_halos        = CudaBuffer<GpuHaloDesc>{};
+    m_impl->d_haloNodes    = CudaBuffer<GpuHaloNode>{};
+    m_impl->d_haloPrimIdx  = CudaBuffer<uint32_t>{};
+    if (scene.haloAccel && !scene.haloAccel->pool().halos().empty()) {
+        const auto& halos   = scene.haloAccel->pool().halos();
+        const auto& nodes   = scene.haloAccel->nodes();
+        const auto& primIdx = scene.haloAccel->primIdx();
+
+        std::vector<GpuHaloDesc> gpuHalos;
+        gpuHalos.reserve(halos.size());
+        for (const auto& h : halos) {
+            GpuHaloDesc gd{};
+            gd.center      = {h.center.x,      h.center.y,      h.center.z};
+            gd.radius      = h.radius;
+            gd.centerClose = {h.centerClose.x, h.centerClose.y, h.centerClose.z};
+            gd.matIdx      = h.matIdx;
+            gd.color       = {h.color.x,       h.color.y,       h.color.z};
+            gpuHalos.push_back(gd);
+        }
+        m_impl->d_halos = CudaBuffer<GpuHaloDesc>(gpuHalos.size());
+        m_impl->d_halos.upload(gpuHalos);
+        m_impl->numHalos = static_cast<uint32_t>(gpuHalos.size());
+
+        if (!nodes.empty()) {
+            // GpuHaloNode matches HaloNode memory layout exactly — direct copy.
+            std::vector<GpuHaloNode> gpuNodes(nodes.size());
+            std::memcpy(gpuNodes.data(), nodes.data(),
+                        nodes.size() * sizeof(GpuHaloNode));
+            m_impl->d_haloNodes = CudaBuffer<GpuHaloNode>(gpuNodes.size());
+            m_impl->d_haloNodes.upload(gpuNodes);
+        }
+        if (!primIdx.empty()) {
+            m_impl->d_haloPrimIdx = CudaBuffer<uint32_t>(primIdx.size());
+            m_impl->d_haloPrimIdx.upload(primIdx);
+        }
+        spdlog::info("CudaPathIntegrator: uploaded {} halo particles ({} BVH nodes)",
+                     gpuHalos.size(), nodes.size());
+    }
+
     // Lights
     std::vector<GpuLight> gpuLights;
     for (const ILight* l : scene.lights)
@@ -1381,6 +1448,7 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.cam.envMapHeight  = envCdfHeight;
     p.cam.fireflyClamp  = fireflyClamp;
     p.cam.hairMeshBaseID = hairMeshBaseID;
+    p.cam.numHalos       = numHalos;
     p.specAlbedoLUT     = d_specAlbedoLUT.isValid()    ? d_specAlbedoLUT.ptr()    : nullptr;
     p.specAvgAlbedoLUT  = d_specAvgAlbedoLUT.isValid() ? d_specAvgAlbedoLUT.ptr() : nullptr;
     p.specLUTCosBins    = specLUTCosBins;
@@ -1391,6 +1459,9 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.pixelFilterRadius = pixelFilterRadius;
     p.hairTris          = reinterpret_cast<const GpuHairTri*>(accel->hairTriBuffer());
     p.hairMats          = d_hairMats.isValid() ? d_hairMats.ptr() : nullptr;
+    p.halos             = d_halos.isValid()       ? d_halos.ptr()       : nullptr;
+    p.haloNodes         = d_haloNodes.isValid()   ? d_haloNodes.ptr()   : nullptr;
+    p.haloPrimIdx       = d_haloPrimIdx.isValid() ? d_haloPrimIdx.ptr() : nullptr;
     // Caustic photon map — gated on having actual valid photons so a
     // configured-but-empty map (e.g. no glass in the scene) doesn't query.
     // d_photons holds the cell-sorted compacted photons after buildPhotonMap;

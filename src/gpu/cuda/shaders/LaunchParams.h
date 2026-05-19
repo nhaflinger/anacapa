@@ -54,6 +54,15 @@ struct LaunchParams {
     const GpuHairTri*        hairTris;
     const GpuHairMaterial*   hairMats;
 
+    // Halo disc particles — software BVH walked inline in wf_bounce.
+    // halos      : numHalos GpuHaloDesc entries
+    // haloNodes  : binary BVH over halos
+    // haloPrimIdx: leaf-payload indices into halos[]
+    // All nullptr when scene.haloAccel is absent or empty.
+    const GpuHaloDesc*       halos;
+    const GpuHaloNode*       haloNodes;
+    const uint32_t*          haloPrimIdx;
+
     // Caustic photon map — populated when cam.photonMapEnabled != 0.
     //   photons          : numPhotons GpuPhoton entries written by the
     //                      photon-trace raygen; read by the shade raygen

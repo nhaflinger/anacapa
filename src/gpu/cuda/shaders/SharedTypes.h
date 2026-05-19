@@ -116,6 +116,35 @@ struct GpuHairTri {
 };
 
 // ---------------------------------------------------------------------------
+// GpuHaloDesc — one camera-facing disc particle (matches CPU HaloDesc).
+// center/centerClose are motion-blur endpoints; radius is disc radius.
+// color is the per-particle tint (used as emission when matIdx has no Le).
+// matIdx indexes into materials[] for Le / opacity lookup.
+// ---------------------------------------------------------------------------
+struct GpuHaloDesc {
+    GpuFloat3 center;
+    float     radius;
+    GpuFloat3 centerClose;
+    uint32_t  matIdx;
+    GpuFloat3 color;
+    float     _pad;
+};
+
+// ---------------------------------------------------------------------------
+// GpuHaloNode — binary SAH BVH node over halo disc particles.
+// Interior: left_or_prim = left child, right_or_count = right child.
+// Leaf:     left_or_prim = first index in haloPrimIdx,
+//           right_or_count = count | 0x80000000.
+// Matches CPU HaloNode memory layout exactly.
+// ---------------------------------------------------------------------------
+struct GpuHaloNode {
+    float    bmin[3];
+    float    bmax[3];
+    uint32_t left_or_prim;
+    uint32_t right_or_count;
+};
+
+// ---------------------------------------------------------------------------
 // GpuLight
 // ---------------------------------------------------------------------------
 enum GpuLightType : uint32_t {
@@ -176,6 +205,11 @@ struct GpuCameraParams {
     // 0xFFFFFFFF when the scene contains no hair.  In raygen this is compared
     // against optixGetInstanceId() to route hits into the Marschner shader.
     uint32_t  hairMeshBaseID;
+
+    // Halo disc particles (UsdGeomPoints).  Software BVH walked inline in
+    // wf_bounce — halos are drained per-bounce in front of the mesh hit
+    // without consuming the bounce budget.  0 = no halos.
+    uint32_t  numHalos;
 
     // Camera motion blur — close-state image plane (= open-state when hasMotion=0).
     // The primary raygen lerps between open and close at rayTime before shooting.

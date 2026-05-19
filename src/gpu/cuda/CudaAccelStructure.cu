@@ -285,7 +285,98 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
     m_impl->numMeshes_ = numMeshes;
 
     if (numMeshes == 0) {
-        fprintf(stderr, "[error] CudaAccelStructure: empty geometry pool\n");
+        // Particles-only scene — no triangle geometry at all.  Build a single
+        // dummy GAS (one degenerate triangle far from the scene) so the IAS is
+        // valid.  The shader will never intersect this triangle, but the
+        // wavefront raygen needs a non-null traversable to call optixTrace on.
+        printf("[info]  CudaAccelStructure: no mesh geometry — building dummy GAS for particles-only scene\n");
+
+        const float    dv[9]   = {1e20f, 0.f, 0.f,  0.f, 1e20f, 0.f,  0.f, 0.f, 1e20f};
+        const uint32_t di[3]   = {0u, 1u, 2u};
+
+        m_impl->posBuffer = CudaByteBuffer(sizeof(dv));
+        m_impl->posBuffer.upload(reinterpret_cast<const uint8_t*>(dv), sizeof(dv));
+        m_impl->posBufferClose = CudaByteBuffer(sizeof(dv));
+        m_impl->posBufferClose.upload(reinterpret_cast<const uint8_t*>(dv), sizeof(dv));
+
+        m_impl->normals = CudaBuffer<GpuFloat3>(1);
+        std::vector<GpuFloat3> dummyN{ GpuFloat3{0.f, 1.f, 0.f} };
+        m_impl->normals.upload(dummyN);
+
+        m_impl->indices = CudaBuffer<uint32_t>(3);
+        m_impl->indices.upload(std::vector<uint32_t>(di, di + 3));
+
+        m_impl->triMeshIDs = CudaBuffer<uint32_t>(1);
+        m_impl->triMeshIDs.upload(std::vector<uint32_t>{0u});
+
+        m_impl->meshVertexOffsets = CudaBuffer<uint32_t>(1);
+        m_impl->meshVertexOffsets.upload(std::vector<uint32_t>{0u});
+
+        m_impl->meshIndexOffsets = CudaBuffer<uint32_t>(1);
+        m_impl->meshIndexOffsets.upload(std::vector<uint32_t>{0u});
+
+        m_impl->totalVertices  = 3;
+        m_impl->totalTriangles = 1;
+
+#ifdef ANACAPA_ENABLE_OPTIX
+        OptixDeviceContext optixCtx =
+            static_cast<OptixDeviceContext>(ctx.optixContext());
+        if (optixCtx) {
+            CUstream stream = static_cast<CUstream>(ctx.cuStream());
+
+            if (!buildTriangleGAS(optixCtx, stream,
+                                  static_cast<CUdeviceptr>(m_impl->posBuffer.devPtr()),
+                                  static_cast<CUdeviceptr>(m_impl->posBufferClose.devPtr()),
+                                  false, 3,
+                                  static_cast<CUdeviceptr>(m_impl->indices.devPtr()),
+                                  1,
+                                  m_impl->meshAsBuffer, m_impl->meshGasHandle)) {
+                fprintf(stderr, "[error] CudaAccelStructure: dummy GAS build failed\n");
+                return;
+            }
+
+            OptixInstance inst{};
+            inst.transform[0]  = 1.f; inst.transform[5]  = 1.f; inst.transform[10] = 1.f;
+            inst.instanceId        = 0;
+            inst.sbtOffset         = 0;
+            inst.visibilityMask    = 0xFF;
+            inst.flags             = OPTIX_INSTANCE_FLAG_NONE;
+            inst.traversableHandle = m_impl->meshGasHandle;
+
+            m_impl->iasInstanceBuf = CudaByteBuffer(sizeof(OptixInstance));
+            m_impl->iasInstanceBuf.upload(
+                reinterpret_cast<const uint8_t*>(&inst), sizeof(OptixInstance));
+
+            OptixBuildInput iasInput{};
+            iasInput.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
+            iasInput.instanceArray.instances    =
+                static_cast<CUdeviceptr>(m_impl->iasInstanceBuf.devPtr());
+            iasInput.instanceArray.numInstances = 1;
+
+            OptixAccelBuildOptions iasOpts{};
+            iasOpts.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+            iasOpts.operation  = OPTIX_BUILD_OPERATION_BUILD;
+            iasOpts.motionOptions.numKeys = 1;
+
+            OptixAccelBufferSizes iasSizes{};
+            OPTIX_CHECK(optixAccelComputeMemoryUsage(
+                optixCtx, &iasOpts, &iasInput, 1, &iasSizes));
+
+            CudaByteBuffer iasTempBuf(iasSizes.tempSizeInBytes);
+            m_impl->iasBuffer = CudaByteBuffer(iasSizes.outputSizeInBytes);
+            OPTIX_CHECK(optixAccelBuild(
+                optixCtx, stream, &iasOpts, &iasInput, 1,
+                static_cast<CUdeviceptr>(iasTempBuf.devPtr()), iasSizes.tempSizeInBytes,
+                static_cast<CUdeviceptr>(m_impl->iasBuffer.devPtr()),
+                iasSizes.outputSizeInBytes,
+                &m_impl->iasHandle, nullptr, 0));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+
+            printf("[info]  CudaAccelStructure: dummy GAS+IAS built for particles-only scene\n");
+        }
+#endif
+
+        m_impl->valid = true;
         return;
     }
 

@@ -1105,6 +1105,105 @@ float3 querySSSPhotonMap(float3 p, float3 n, float3 subsurfaceColor, float d)
     return subsurfaceColor * (Laccum * ds);
 }
 
+// ---------------------------------------------------------------------------
+// Halo disc particle traversal — software BVH matching CPU HaloAccel and the
+// Metal port (Shade.metal traverseHaloBVH).  Halos are camera-facing discs:
+// the disc normal is recomputed per-ray as N = normalize(rayOrig - center),
+// so each disc always faces its hit ray's origin.  Motion blur: center is
+// lerped between open/close at rayTime.
+// ---------------------------------------------------------------------------
+
+static __forceinline__ __device__
+bool intersectHaloDisc(const GpuHaloDesc& h,
+                       float3 rayOrig, float3 rayDir,
+                       float tMin, float tMax, float rayTime,
+                       float& outT)
+{
+    float3 c0 = make3(h.center);
+    float3 c1 = make3(h.centerClose);
+    float3 center = make_float3(c0.x + (c1.x - c0.x) * rayTime,
+                                c0.y + (c1.y - c0.y) * rayTime,
+                                c0.z + (c1.z - c0.z) * rayTime);
+
+    float3 toOrig = rayOrig - center;
+    float  lenSq  = dot(toOrig, toOrig);
+    if (lenSq < 1e-12f) return false;
+    float3 N = toOrig * rsqrtf(lenSq);
+
+    float denom = dot(N, rayDir);
+    if (fabsf(denom) < 1e-6f) return false;
+
+    float t = dot(N, center - rayOrig) / denom;
+    if (t < tMin || t >= tMax) return false;
+
+    float3 hitPt = rayOrig + rayDir * t;
+    float3 delta = hitPt - center;
+    if (dot(delta, delta) > h.radius * h.radius) return false;
+
+    outT = t;
+    return true;
+}
+
+// Stack-based BVH traversal.  Returns the hit halo's index (into halos[]),
+// or -1 if no hit; outT receives the closest hit distance.
+static __forceinline__ __device__
+int traverseHaloBVH(float3 rayOrig, float3 rayDir,
+                    float tMin, float tMax, float rayTime,
+                    const GpuHaloDesc* halos,
+                    const GpuHaloNode* nodes,
+                    const uint32_t*    primIdx,
+                    float&             outT)
+{
+    outT = tMax;
+    int bestIdx = -1;
+
+    float3 safe = make_float3(
+        fabsf(rayDir.x) > 1e-9f ? rayDir.x : 1e-9f,
+        fabsf(rayDir.y) > 1e-9f ? rayDir.y : 1e-9f,
+        fabsf(rayDir.z) > 1e-9f ? rayDir.z : 1e-9f);
+    float3 invDir = make_float3(1.0f / safe.x, 1.0f / safe.y, 1.0f / safe.z);
+
+    uint32_t stack[64];
+    int top = 0;
+    stack[top++] = 0u;
+
+    while (top > 0) {
+        uint32_t ni = stack[--top];
+        GpuHaloNode node = nodes[ni];
+
+        float3 bmin = make_float3(node.bmin[0], node.bmin[1], node.bmin[2]);
+        float3 bmax = make_float3(node.bmax[0], node.bmax[1], node.bmax[2]);
+        float3 t0 = make_float3((bmin.x - rayOrig.x) * invDir.x,
+                                (bmin.y - rayOrig.y) * invDir.y,
+                                (bmin.z - rayOrig.z) * invDir.z);
+        float3 t1 = make_float3((bmax.x - rayOrig.x) * invDir.x,
+                                (bmax.y - rayOrig.y) * invDir.y,
+                                (bmax.z - rayOrig.z) * invDir.z);
+        float tn = fmaxf(fmaxf(fminf(t0.x, t1.x), fminf(t0.y, t1.y)), fminf(t0.z, t1.z));
+        float tf = fminf(fminf(fmaxf(t0.x, t1.x), fmaxf(t0.y, t1.y)), fmaxf(t0.z, t1.z));
+        tn = fmaxf(tn, tMin);
+        if (tn > tf || tn >= outT) continue;
+
+        if (node.right_or_count & 0x80000000u) {
+            uint32_t first = node.left_or_prim;
+            uint32_t count = node.right_or_count & 0x7FFFFFFFu;
+            for (uint32_t j = 0; j < count; ++j) {
+                uint32_t idx = primIdx[first + j];
+                float t;
+                if (intersectHaloDisc(halos[idx], rayOrig, rayDir,
+                                      tMin, outT, rayTime, t)) {
+                    outT    = t;
+                    bestIdx = int(idx);
+                }
+            }
+        } else {
+            stack[top++] = node.right_or_count;
+            stack[top++] = node.left_or_prim;
+        }
+    }
+    return bestIdx;
+}
+
 // ===========================================================================
 // OptiX programs — shared closesthit / miss + photon and wavefront raygens.
 // ===========================================================================
@@ -1416,6 +1515,46 @@ extern "C" __global__ void __raygen__wf_bounce()
     float3      emissive;
     while (true) {
     hit = trace(rayOrig, rayDir, 1e-4f, 1e10f, rayTime);
+
+    // ---- Halo disc particle drain (mirrors Shade.metal) --------------------
+    // Walk the halo BVH up to 256 times, adding Le and dimming throughput for
+    // every halo in front of the mesh hit.  No bounce budget consumed.
+    if (params.cam.numHalos > 0u
+        && params.halos       != nullptr
+        && params.haloNodes   != nullptr
+        && params.haloPrimIdx != nullptr)
+    {
+        float meshT = hit.valid ? hit.t : 1e10f;
+        for (uint32_t hPass = 0u; hPass < 256u; ++hPass) {
+            float haloT;
+            int haloIdx = traverseHaloBVH(rayOrig, rayDir, 1e-4f, meshT, rayTime,
+                                          params.halos, params.haloNodes,
+                                          params.haloPrimIdx, haloT);
+            if (haloIdx < 0) break;
+
+            GpuHaloDesc hd = params.halos[haloIdx];
+            float3 particleColor = make3(hd.color);
+            float3 Le      = particleColor;
+            float  opacity = 1.0f;
+            uint32_t hMatIdx = hd.matIdx;
+            if (hMatIdx < params.numMaterials) {
+                float3 emis = make3(params.materials[hMatIdx].emissive);
+                if (emis.x > 0.f || emis.y > 0.f || emis.z > 0.f)
+                    Le = emis * particleColor;
+                opacity = params.materials[hMatIdx].roughness;
+            }
+            L          += throughput * Le;
+            throughput *= (1.0f - opacity);
+
+            float3 hitPt = rayOrig + rayDir * haloT;
+            rayOrig      = hitPt + rayDir * 1e-4f;
+            prevN        = make_float3(0.f, 0.f, 0.f);
+            prevWasDelta = true;
+
+            if (throughput.x < 1e-4f && throughput.y < 1e-4f && throughput.z < 1e-4f)
+                break;
+        }
+    }
 
     // ---- Miss ---------------------------------------------------------------
     if (!hit.valid) {
