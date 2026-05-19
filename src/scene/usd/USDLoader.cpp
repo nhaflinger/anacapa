@@ -626,9 +626,9 @@ static FloatTOV resolveFloatTOVWithFallback(const FloatTOV& primary,
 // ---------------------------------------------------------------------------
 static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                                                     const std::string& stageDir) {
-    // ND_translucent_bsdf — pure translucent BSDF. Checked before OSL so that
-    // materials with a compiled .osl that wraps ND_translucent_bsdf still get the
-    // built-in translucency lobe rather than falling through to the OSL evaluator.
+    // ND_translucent_bsdf — checked before OSL so the StandardSurface path
+    // (which supports the scatter width parameter) handles it even when an
+    // OSL shader file exists for the same material.
     {
         UsdShadeShader transSh = findDirectTranslucentBsdf(mat);
         if (transSh) {
@@ -638,13 +638,14 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                 GfVec3f v;
                 if (colorIn.GetAttr().Get(&v)) color = {v[0], v[1], v[2]};
             }
-            float scatter = 0.5f;  // default: moderate scatter (~29° half-angle)
+            float scatter = 0.5f;
             UsdShadeInput strengthIn = transSh.GetInput(TfToken("strength"));
             if (strengthIn) {
                 float s;
                 if (strengthIn.GetAttr().Get(&s)) scatter = std::max(0.f, std::min(1.f, s));
             }
-            spdlog::info("USDLoader: material '{}' → translucent (color=({:.2f},{:.2f},{:.2f}) scatter={:.2f})",
+            spdlog::info("USDLoader: material '{}' → translucent "
+                         "(color=({:.2f},{:.2f},{:.2f}) scatter={:.2f})",
                          mat.GetPath().GetString(), color.x, color.y, color.z, scatter);
             StandardSurfaceMaterial::Params p;
             p.base               = 0.f;

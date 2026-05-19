@@ -1035,24 +1035,47 @@ static BSDFSample sampleDiffuseLobe(const OslLobe& lobe, Vec3f /*wo*/, Vec2f u) 
 // translucent_bsdf: diffuse transmission — samples the LOWER hemisphere.
 // wo is in the upper hemisphere (wo.z > 0); wi goes through the surface (wi.z < 0).
 static BSDFEval evalDiffuseTransLobe(const OslLobe& lobe, Vec3f wo, Vec3f wi) {
-    if (wo.z <= 0.f || wi.z >= 0.f) return {};
-    float absCosWi = -wi.z;
-    float pdf = absCosWi * kSS_InvPi;
+    // wo and wi must be in opposite hemispheres (transmission across surface).
+    // Works for both front-face (wo.z>0, wi.z<0) and back-face (wo.z<0, wi.z>0).
+    if (wo.z * wi.z >= 0.f) return {};
+    // Through direction is -wo; cosine weight against it.
+    Vec3f tDir = { -wo.x, -wo.y, -wo.z };
+    float cosAlpha = std::max(0.f, wi.x*tDir.x + wi.y*tDir.y + wi.z*tDir.z);
+    float pdf = cosAlpha * kSS_InvPi;
     Spectrum f = lobe.albedo * kSS_InvPi;
     return { f, pdf, pdf };
 }
 
-static BSDFSample sampleDiffuseTransLobe(const OslLobe& lobe, Vec3f /*wo*/, Vec2f u) {
-    // Cosine-weighted sampling of the lower hemisphere (wi.z < 0)
-    float phi = 2.f * kSS_Pi * u.x;
-    float r   = std::sqrt(u.y);
-    float cosWi = std::sqrt(std::max(0.f, 1.f - u.y));
-    Vec3f wi  = { r * std::cos(phi), r * std::sin(phi), -cosWi };
-    float pdf = cosWi * kSS_InvPi;
-    Spectrum f = lobe.albedo * kSS_InvPi;
+static BSDFSample sampleDiffuseTransLobe(const OslLobe& lobe, Vec3f wo, Vec2f u) {
+    // Cosine-weighted sampling around the through direction (-wo).
+    // Works at both front and back face without assuming a fixed hemisphere.
+    Vec3f tDir = { -wo.x, -wo.y, -wo.z };
+    // Build ONB around tDir (Gram-Schmidt, pick least-aligned axis).
+    Vec3f bx;
+    if (std::abs(tDir.x) <= std::abs(tDir.y) && std::abs(tDir.x) <= std::abs(tDir.z))
+        bx = { 0.f, -tDir.z, tDir.y };
+    else if (std::abs(tDir.y) <= std::abs(tDir.z))
+        bx = { -tDir.z, 0.f, tDir.x };
+    else
+        bx = { tDir.y, -tDir.x, 0.f };
+    float lenBx = std::sqrt(bx.x*bx.x + bx.y*bx.y + bx.z*bx.z);
+    if (lenBx < 1e-6f) return {};
+    bx = { bx.x/lenBx, bx.y/lenBx, bx.z/lenBx };
+    Vec3f by = { tDir.y*bx.z - tDir.z*bx.y,
+                 tDir.z*bx.x - tDir.x*bx.z,
+                 tDir.x*bx.y - tDir.y*bx.x };
+    // Cosine-weighted hemisphere around tDir.
+    float phi      = 2.f * kSS_Pi * u.x;
+    float r        = std::sqrt(u.y);
+    float cosAlpha = std::sqrt(std::max(0.f, 1.f - u.y));
+    float cphi = std::cos(phi), sphi = std::sin(phi);
+    Vec3f wi = { bx.x*(r*cphi) + by.x*(r*sphi) + tDir.x*cosAlpha,
+                 bx.y*(r*cphi) + by.y*(r*sphi) + tDir.y*cosAlpha,
+                 bx.z*(r*cphi) + by.z*(r*sphi) + tDir.z*cosAlpha };
+    float pdf = cosAlpha * kSS_InvPi;
     BSDFSample s;
     s.wi     = wi;
-    s.f      = f * cosWi;
+    s.f      = lobe.albedo * (kSS_InvPi * cosAlpha);
     s.pdf    = pdf;
     s.pdfRev = pdf;
     s.eta    = 1.f;
@@ -1211,13 +1234,26 @@ public:
                     break;
                 }
             }
+            // DiffuseTrans (translucent_bsdf) also needs shadow transmittance.
+            if (isBlack(m_transmittanceTint)) {
+                for (auto& l : lobes) {
+                    if (l.kind == OslLobe::Kind::DiffuseTrans && !isBlack(l.albedo)) {
+                        m_transmittanceTint = {
+                            std::min(1.f, l.albedo.x),
+                            std::min(1.f, l.albedo.y),
+                            std::min(1.f, l.albedo.z) };
+                        break;
+                    }
+                }
+            }
             // Cache the diffuse lobe weight as the base color for GPU/Metal preview.
             // Only use the diffuse lobe — GGX specular is handled separately by the
             // GPU shader and summing both would exceed 1.0 and make the scene too bright.
             // Fall back to 0.5 grey for pure-specular / glass materials.
             Spectrum diffuseColor{};
             for (auto& l : lobes) {
-                if (l.kind == OslLobe::Kind::Diffuse) {
+                if (l.kind == OslLobe::Kind::Diffuse ||
+                    l.kind == OslLobe::Kind::DiffuseTrans) {
                     diffuseColor = diffuseColor + l.weight;
                 }
             }
