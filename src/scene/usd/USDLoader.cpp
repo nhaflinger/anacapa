@@ -2485,21 +2485,19 @@ LoadedScene loadUSD(const std::string& path,
             const IMaterial* imat = result.sceneView.materials[mid];
             if (!imat) continue;
 
-            // Determine proxy Le: check StandardSurface first, then OslMaterial probe.
-            Spectrum Le = {};
-            if (const auto* smat = dynamic_cast<const StandardSurfaceMaterial*>(imat)) {
-                const StandardSurfaceMaterial::Params& sp = smat->params();
-                if (sp.emission <= 0.f) continue;
-                Le = sp.emission_color.value * sp.emission;
-                if (isBlack(Le)) {
-                    if (!sp.emission_color.path.empty())
-                        Le = {sp.emission * 1.f, sp.emission * 0.7f, sp.emission * 0.3f};
-                    else
-                        continue;
-                }
-            } else {
-                Le = imat->probeEmission();
-                if (isBlack(Le)) continue;
+            // Only StandardSurface materials can be analytically detected as emissive
+            // at load time.  OSL emitters contribute via Le() during path tracing and
+            // do not need explicit NEE registration here.
+            const auto* smat = dynamic_cast<const StandardSurfaceMaterial*>(imat);
+            if (!smat) continue;
+            const StandardSurfaceMaterial::Params& sp = smat->params();
+            if (sp.emission <= 0.f) continue;
+            Spectrum Le = sp.emission_color.value * sp.emission;
+            if (isBlack(Le)) {
+                if (!sp.emission_color.path.empty())
+                    Le = {sp.emission * 1.f, sp.emission * 0.7f, sp.emission * 0.3f};
+                else
+                    continue;
             }
 
             // Compute tight AABB of this mesh in world space

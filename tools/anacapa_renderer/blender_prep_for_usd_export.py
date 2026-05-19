@@ -4996,8 +4996,9 @@ def _extract_materialx_sidecar(usd_path):
         mat = UsdShade.Material(prim)
         mat_path = str(prim.GetPath())
 
-        # Find any ND_open_pbr_surface_surfaceshader descendant
+        # Find ND_open_pbr_surface_surfaceshader, or fall back to ND_translucent_bsdf.
         openpbr_shader = None
+        translucent_shader = None
         for desc in Usd.PrimRange(prim):
             if not desc.IsA(UsdShade.Shader):
                 continue
@@ -5009,33 +5010,68 @@ def _extract_materialx_sidecar(usd_path):
             if node_id == OPEN_PBR_ID:
                 openpbr_shader = desc
                 break
+            elif node_id == "ND_translucent_bsdf":
+                translucent_shader = desc
 
-        if openpbr_shader is None:
-            continue
+        if openpbr_shader is not None:
+            root_node = _collect_node(openpbr_shader, visited_nodes)
 
-        root_node = _collect_node(openpbr_shader, visited_nodes)
+            # Blender exports glass materials with Alpha=0 → geometry_opacity=0 (the
+            # UsdPreviewSurface glass convention).  In OpenPBR, geometry_opacity=0 means
+            # cutout (surface invisible), not glass — transmission_weight carries glass.
+            # Fix: if a material is transmissive, geometry_opacity must be 1.
+            inp = root_node["inputs"]
+            if inp.get("geometry_opacity", 1.0) == 0.0 and inp.get("transmission_weight", 0.0) > 0.0:
+                inp["geometry_opacity"] = 1.0
 
-        # Collect all nodes reachable from this material's root
-        # (visited_nodes already has them; gather the unique subtree)
-        def _gather_subtree(node, acc):
-            p = node["path"]
-            if p in acc:
-                return
-            acc[p] = node
-            for child_path in node["connected_nodes"].values():
-                if child_path in visited_nodes:
-                    _gather_subtree(visited_nodes[child_path], acc)
+            def _gather_subtree(node, acc):
+                p = node["path"]
+                if p in acc:
+                    return
+                acc[p] = node
+                for child_path in node["connected_nodes"].values():
+                    if child_path in visited_nodes:
+                        _gather_subtree(visited_nodes[child_path], acc)
 
-        subtree = {}
-        _gather_subtree(root_node, subtree)
+            subtree = {}
+            _gather_subtree(root_node, subtree)
 
-        materials_data[mat_path] = {
-            "root": root_node["path"],
-            "nodes": subtree,
-        }
+            materials_data[mat_path] = {
+                "root": root_node["path"],
+                "nodes": subtree,
+            }
+
+        elif translucent_shader is not None:
+            # Bare ND_translucent_bsdf — synthesize an OpenPBR entry with full
+            # transmission so the renderer handles it rather than falling back to black.
+            color = [0.8, 0.8, 0.8]
+            sh = UsdShade.Shader(translucent_shader)
+            color_inp = sh.GetInput("color")
+            if color_inp and not color_inp.HasConnectedSource():
+                val = _get_shader_input_value(color_inp)
+                if isinstance(val, list) and len(val) >= 3:
+                    color = val[:3]
+            synth_path = mat_path + "/synth_translucent"
+            synth_node = {
+                "path": synth_path,
+                "id": OPEN_PBR_ID,
+                "inputs": {
+                    "base_color":         color,
+                    "base_weight":        1.0,
+                    "transmission_weight": 1.0,
+                    "geometry_opacity":   1.0,
+                    "specular_roughness": 0.0,
+                    "specular_ior":       1.5,
+                },
+                "connected_nodes": {},
+            }
+            materials_data[mat_path] = {
+                "root": synth_path,
+                "nodes": {synth_path: synth_node},
+            }
 
     if not materials_data:
-        print("  [MaterialX sidecar] No ND_open_pbr_surface_surfaceshader materials found.")
+        print("  [MaterialX sidecar] No supported MaterialX materials found.")
         return
 
     sidecar_path = usd_path + ".materials.json"

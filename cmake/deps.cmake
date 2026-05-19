@@ -113,6 +113,10 @@ if(ANACAPA_ENABLE_OSL)
         endif()
         set(OSL_INCLUDE_DIR "${osl_headers_SOURCE_DIR}/src/include"
             CACHE PATH "Path to OSL headers" FORCE)
+        # Copy pre-generated headers (oslconfig.h, oslversion.h) that OSL's own
+        # cmake would normally produce — avoids requiring a full OSL build.
+        file(COPY "${CMAKE_SOURCE_DIR}/cmake/osl_generated/OSL/"
+             DESTINATION "${OSL_INCLUDE_DIR}/OSL")
     endif()
     message(STATUS "OSL headers: ${OSL_INCLUDE_DIR}")
 

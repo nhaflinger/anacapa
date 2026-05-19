@@ -9,7 +9,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "ANACAPA_ENABLE_OIDN": "ON"
+        "ANACAPA_ENABLE_OIDN": "ON",
+        "ANACAPA_ENABLE_OSL": "ON"
       }
     },
     {

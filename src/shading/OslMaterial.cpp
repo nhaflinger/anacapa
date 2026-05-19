@@ -23,7 +23,6 @@
 #include "StandardSurface.h"
 #include <anacapa/shading/ShadingContext.h>
 
-#include <atomic>
 #include <cassert>
 #include <cmath>
 #include <fstream>
@@ -645,7 +644,8 @@ private:
 // ===========================================================================
 struct OslLobe {
     enum class Kind {
-        Diffuse,       // Lambertian
+        Diffuse,       // Lambertian (upper hemisphere)
+        DiffuseTrans,  // translucent_bsdf — Lambertian through the surface (lower hemisphere)
         GGXRefl,       // GGX reflection only
         GGXTrans,      // GGX transmission only
         GGXBoth,       // GGX reflection + transmission (dielectric)
@@ -754,13 +754,21 @@ static void collectLobes(const OSL::ClosureColor* c,
             break;
         }
         // ---- Lambertian diffuse ----
-        case OSL_CID_DIFFUSE:
-        case OSL_CID_TRANSLUCENT: {
+        case OSL_CID_DIFFUSE: {
             const auto* p = cur->as_comp()->as<OslDiffuseParams>();
             OslLobe lobe;
             lobe.kind   = OslLobe::Kind::Diffuse;
             lobe.weight = w;
-            lobe.albedo = w;  // weight already carries spectral tint
+            lobe.albedo = w;
+            out.push_back(lobe);
+            break;
+        }
+        case OSL_CID_TRANSLUCENT: {
+            const auto* p = cur->as_comp()->as<OslDiffuseParams>();
+            OslLobe lobe;
+            lobe.kind   = OslLobe::Kind::DiffuseTrans;
+            lobe.weight = w;
+            lobe.albedo = w;
             out.push_back(lobe);
             break;
         }
@@ -773,11 +781,20 @@ static void collectLobes(const OSL::ClosureColor* c,
             break;
         }
         case OSL_CID_MX_OND:
-        case OSL_CID_MX_BURLEY:
-        case OSL_CID_MX_TRANSLUCENT: {
+        case OSL_CID_MX_BURLEY: {
             const auto* p = cur->as_comp()->as<OslMxONDParams>();
             OslLobe lobe;
             lobe.kind   = OslLobe::Kind::Diffuse;
+            Spectrum alb = { p->albedo[0], p->albedo[1], p->albedo[2] };
+            lobe.albedo  = w * alb;
+            lobe.weight  = lobe.albedo;
+            out.push_back(lobe);
+            break;
+        }
+        case OSL_CID_MX_TRANSLUCENT: {
+            const auto* p = cur->as_comp()->as<OslMxONDParams>();
+            OslLobe lobe;
+            lobe.kind   = OslLobe::Kind::DiffuseTrans;
             Spectrum alb = { p->albedo[0], p->albedo[1], p->albedo[2] };
             lobe.albedo  = w * alb;
             lobe.weight  = lobe.albedo;
@@ -1012,6 +1029,34 @@ static BSDFSample sampleDiffuseLobe(const OslLobe& lobe, Vec3f /*wo*/, Vec2f u) 
     s.pdf   = pdf;
     s.pdfRev = pdf;
     s.flags = BSDFFlag_Diffuse | BSDFFlag_Reflection;
+    return s;
+}
+
+// translucent_bsdf: diffuse transmission — samples the LOWER hemisphere.
+// wo is in the upper hemisphere (wo.z > 0); wi goes through the surface (wi.z < 0).
+static BSDFEval evalDiffuseTransLobe(const OslLobe& lobe, Vec3f wo, Vec3f wi) {
+    if (wo.z <= 0.f || wi.z >= 0.f) return {};
+    float absCosWi = -wi.z;
+    float pdf = absCosWi * kSS_InvPi;
+    Spectrum f = lobe.albedo * kSS_InvPi;
+    return { f, pdf, pdf };
+}
+
+static BSDFSample sampleDiffuseTransLobe(const OslLobe& lobe, Vec3f /*wo*/, Vec2f u) {
+    // Cosine-weighted sampling of the lower hemisphere (wi.z < 0)
+    float phi = 2.f * kSS_Pi * u.x;
+    float r   = std::sqrt(u.y);
+    float cosWi = std::sqrt(std::max(0.f, 1.f - u.y));
+    Vec3f wi  = { r * std::cos(phi), r * std::sin(phi), -cosWi };
+    float pdf = cosWi * kSS_InvPi;
+    Spectrum f = lobe.albedo * kSS_InvPi;
+    BSDFSample s;
+    s.wi     = wi;
+    s.f      = f * cosWi;
+    s.pdf    = pdf;
+    s.pdfRev = pdf;
+    s.eta    = 1.f;
+    s.flags  = BSDFFlag_Diffuse | BSDFFlag_Transmission;
     return s;
 }
 
@@ -1293,9 +1338,22 @@ public:
 
         // Select lobe by luminance weight; GGXBoth handles R/T split internally
         float total = 0.f;
+        {
+            static int s_034count = 0;
+            if (m_shaderName.find("Material_034") != std::string::npos && s_034count++ < 8) {
+                fprintf(stderr, "[034 DBG] lobes=%zu wo.z=%.3f\n", lobes.size(), woLocal.z);
+                for (size_t li = 0; li < lobes.size(); ++li) {
+                    const auto& lb = lobes[li];
+                    fprintf(stderr, "  [%zu] kind=%d wt=(%.3f,%.3f,%.3f) alb=(%.3f,%.3f,%.3f)\n",
+                        li, (int)lb.kind, lb.weight.x, lb.weight.y, lb.weight.z,
+                        lb.albedo.x, lb.albedo.y, lb.albedo.z);
+                }
+            }
+        }
         for (auto& l : lobes)
             if (l.kind != OslLobe::Kind::Emission)
                 total += luminance(l.weight);
+
         if (total <= 0.f) return {};
 
         float accum     = 0.f;
@@ -1467,6 +1525,7 @@ private:
                                   float uFresnel = 0.5f) {
         switch (lobe.kind) {
         case OslLobe::Kind::Diffuse:      return sampleDiffuseLobe(lobe, wo, u);
+        case OslLobe::Kind::DiffuseTrans: return sampleDiffuseTransLobe(lobe, wo, u);
         case OslLobe::Kind::GGXRefl:      return sampleGGXReflLobe(lobe, wo, u);
         case OslLobe::Kind::GGXTrans:     return sampleGGXTransLobe(lobe, wo, u);
         case OslLobe::Kind::GGXBoth: {
@@ -1591,7 +1650,8 @@ private:
 
     static BSDFEval evalLobe(const OslLobe& lobe, Vec3f wo, Vec3f wi) {
         switch (lobe.kind) {
-        case OslLobe::Kind::Diffuse:  return evalDiffuseLobe(lobe, wo, wi);
+        case OslLobe::Kind::Diffuse:      return evalDiffuseLobe(lobe, wo, wi);
+        case OslLobe::Kind::DiffuseTrans: return evalDiffuseTransLobe(lobe, wo, wi);
         case OslLobe::Kind::GGXRefl:  return evalGGXReflLobe(lobe, wo, wi);
         case OslLobe::Kind::GGXBoth:
         case OslLobe::Kind::GGXTrans:
