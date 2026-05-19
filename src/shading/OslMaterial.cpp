@@ -1338,18 +1338,6 @@ public:
 
         // Select lobe by luminance weight; GGXBoth handles R/T split internally
         float total = 0.f;
-        {
-            static int s_034count = 0;
-            if (m_shaderName.find("Material_034") != std::string::npos && s_034count++ < 8) {
-                fprintf(stderr, "[034 DBG] lobes=%zu wo.z=%.3f\n", lobes.size(), woLocal.z);
-                for (size_t li = 0; li < lobes.size(); ++li) {
-                    const auto& lb = lobes[li];
-                    fprintf(stderr, "  [%zu] kind=%d wt=(%.3f,%.3f,%.3f) alb=(%.3f,%.3f,%.3f)\n",
-                        li, (int)lb.kind, lb.weight.x, lb.weight.y, lb.weight.z,
-                        lb.albedo.x, lb.albedo.y, lb.albedo.z);
-                }
-            }
-        }
         for (auto& l : lobes)
             if (l.kind != OslLobe::Kind::Emission)
                 total += luminance(l.weight);

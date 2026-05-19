@@ -323,6 +323,13 @@ public:
         float        subsurface_anisotropy = 0.0f;   // Henyey-Greenstein g [-1,1]
         float        subsurface_strength   = 1.0f;   // independent SSS radiance amplifier (> 1 boosts effect)
 
+        // Diffuse translucency (Blender Translucent BSDF / ND_translucent_bsdf)
+        float        translucency       = 0.0f;
+        SpectrumTOV  translucency_color = SpectrumTOV({0.8f, 0.8f, 0.8f});
+        // scatter: lobe width around straight-through direction.
+        // 1.0 = full Lambertian (max blur/attenuation), 0.0 = delta straight-through (sharp/clear).
+        float        scatter            = 1.0f;
+
         // Emission
         float        emission       = 0.0f;
         SpectrumTOV  emission_color = SpectrumTOV({0.f, 0.f, 0.f});
@@ -393,7 +400,8 @@ public:
 
     uint32_t flags() const override {
         uint32_t f = BSDFFlag_Reflection;
-        if (m_p.transmission > 0.001f) f |= BSDFFlag_Transmission;
+        if (m_p.transmission > 0.001f || m_p.translucency > 0.001f)
+            f |= BSDFFlag_Transmission;
         if (m_p.roughness.value < 0.001f)  f |= BSDFFlag_Specular;
         else if (m_p.roughness.value < 0.3f) f |= BSDFFlag_Glossy;
         else                          f |= BSDFFlag_Diffuse;
@@ -438,6 +446,10 @@ public:
             if (t <= 0.f) return {};           // fully opaque
             return {t, t, t};                  // partial transmittance at edges
         }
+        // Diffuse translucency: let shadow rays pass through, tinted by translucency_color.
+        if (m_p.translucency > 0.001f)
+            return evalTOV(m_p.translucency_color, ctx.uv) * m_p.translucency;
+
         if (m_p.transmission < 0.001f) return {};
         float metal = evalTOV(m_p.metalness, ctx.uv);
         if (metal > 0.001f) return {};
@@ -594,13 +606,17 @@ public:
                      * (1.f - spec * specE) * (1.f - wCoat)
                      * (1.f - m_p.subsurface); // SSS absorbs the diffuse layer
 
-        float wSum = wCoat + wMetal + wSpec + wDiff;
+        // Diffuse translucency (ND_translucent_bsdf) — lower hemisphere
+        float wTrans = m_p.translucency;
+
+        float wSum = wCoat + wMetal + wSpec + wDiff + wTrans;
         if (wSum <= 0.f) return {};
         float invW = 1.f / wSum;
         wCoat  *= invW;
         wMetal *= invW;
         wSpec  *= invW;
         wDiff  *= invW;
+        wTrans *= invW;
 
         // Choose component
         BSDFSample result;
@@ -615,9 +631,69 @@ public:
             // Dielectric specular: F0 = specular * specular_color * f0_from_IOR
             Spectrum f0 = m_p.specular_color * (spec * m_f0Dielectric);
             result = sampleGGX(sctx, woLocal, u, alpha, alpha2, f0, false);
-        } else {
+        } else if (uComponent < wCoat + wMetal + wSpec + wDiff) {
             // Diffuse
             result = sampleDiffuse(sctx, woLocal, u, base_color);
+        } else {
+            // Power-cosine lobe around the straight-through direction (-wo).
+            // scatter=1 → Lambertian (max blur), scatter→0 → delta straight-through (sharp).
+            // The lobe width controls both blur and attenuation: a tighter lobe puts
+            // less energy toward off-axis directions, naturally dimming distant objects.
+            // Returns directly: evalCombined only handles the upper hemisphere.
+            Spectrum tColor = evalTOV(m_p.translucency_color, ctx.uv);
+            float scatter = m_p.scatter;
+
+            // Through direction in local shading space.
+            Vec3f tLocal = { -woLocal.x, -woLocal.y, -woLocal.z };
+
+            // True delta at scatter=0: straight-through with no spread.
+            if (scatter < 0.01f) {
+                BSDFSample ts;
+                ts.wi     = sctx.toWorld(tLocal);
+                ts.f      = tColor;
+                ts.pdf    = 1.f;
+                ts.pdfRev = 1.f;
+                ts.eta    = 1.f;
+                ts.flags  = BSDFFlag_Diffuse | BSDFFlag_Transmission;
+                return ts;
+            }
+
+            // Lobe exponent n: scatter=1 → n=1 (Lambertian), scatter→0 → n→large.
+            // Quadratic mapping gives better perceptual linearity across the range.
+            float n = 1.f / (scatter * scatter);
+
+            // Build ONB around tLocal (Gram-Schmidt, pick least-aligned axis).
+            Vec3f bx;
+            if (std::abs(tLocal.x) <= std::abs(tLocal.y) && std::abs(tLocal.x) <= std::abs(tLocal.z))
+                bx = { 0.f, -tLocal.z,  tLocal.y };
+            else if (std::abs(tLocal.y) <= std::abs(tLocal.z))
+                bx = { -tLocal.z, 0.f,  tLocal.x };
+            else
+                bx = {  tLocal.y, -tLocal.x, 0.f };
+            bx = safeNormalize(bx);
+            Vec3f by = { tLocal.y*bx.z - tLocal.z*bx.y,
+                         tLocal.z*bx.x - tLocal.x*bx.z,
+                         tLocal.x*bx.y - tLocal.y*bx.x };
+
+            // Importance-sample pdf = (n+1)/(2π) · cosα^n  where cosα = dot(wi, tLocal).
+            float phi      = 2.f * kSS_Pi * u.x;
+            float cosAlpha = std::pow(u.y, 1.f / (n + 1.f));
+            float sinAlpha = std::sqrt(std::max(0.f, 1.f - cosAlpha * cosAlpha));
+            Vec3f wiLocal  = bx * (sinAlpha * std::cos(phi))
+                           + by * (sinAlpha * std::sin(phi))
+                           + tLocal * cosAlpha;
+
+            // f = tColor · pdf  →  f/pdf = tColor (energy-conserving, no grazing singularity).
+            float pdfVal = (n + 1.f) * 0.5f * kSS_InvPi * std::pow(cosAlpha, n);
+
+            BSDFSample ts;
+            ts.wi     = sctx.toWorld(wiLocal);
+            ts.f      = tColor * pdfVal;
+            ts.pdf    = pdfVal;
+            ts.pdfRev = pdfVal;
+            ts.eta    = 1.f;
+            ts.flags  = BSDFFlag_Diffuse | BSDFFlag_Transmission;
+            return ts;
         }
 
         if (!result.isValid()) return {};
@@ -645,8 +721,26 @@ public:
         Vec3f woLocal = ctx.toLocal(wo);
         Vec3f wiLocal = ctx.toLocal(wi);
 
-        // Rough dielectric transmission: wi is in the opposite hemisphere.
+        // Opposite hemisphere: translucency or rough dielectric transmission.
         if (!sameHemisphere(woLocal, wiLocal)) {
+            if (m_p.translucency > 0.001f && woLocal.z > 0.f && wiLocal.z < 0.f) {
+                Spectrum tColor = evalTOV(m_p.translucency_color, ctx.uv);
+                float scatter = m_p.scatter;
+                // Delta at scatter=0: no area contribution to NEE.
+                if (scatter < 0.01f) return {};
+                float n = 1.f / (scatter * scatter);
+                Vec3f tLocal   = { -woLocal.x, -woLocal.y, -woLocal.z };
+                float cosAlpha = std::max(0.f, dot(wiLocal, tLocal));
+                if (cosAlpha <= 0.f) return {};
+                float absZ   = std::max(std::abs(wiLocal.z), 1e-4f);
+                float pdfVal = (n + 1.f) * 0.5f * kSS_InvPi * std::pow(cosAlpha, n);
+                // f = tColor * pdfVal / absZ so that f * cosI = tColor * pdfVal (bounded).
+                BSDFEval e;
+                e.f      = tColor * (pdfVal / absZ);
+                e.pdf    = pdfVal;
+                e.pdfRev = pdfVal;
+                return e;
+            }
             if (m_p.transmission < 0.001f) return {};
             float rough = evalTOV(m_p.roughness, ctx.uv);
             if (rough < 0.001f) return {};  // smooth glass is delta, no area PDF
@@ -724,7 +818,8 @@ public:
                      * (1.f - spec * specE) * (1.f - wCoat)
                      * (1.f - m_p.subsurface); // SSS absorbs the diffuse layer
 
-        float wSum = wCoat + wMetal + wSpec + wDiff;
+        float wTrans = m_p.translucency;  // translucency takes probability from reflection pool
+        float wSum = wCoat + wMetal + wSpec + wDiff + wTrans;
         if (wSum <= 0.f) return {};
         float invW = 1.f / wSum;
         wCoat  *= invW; wMetal *= invW; wSpec *= invW; wDiff *= invW;

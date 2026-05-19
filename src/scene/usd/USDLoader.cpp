@@ -425,6 +425,54 @@ static UsdShadeShader findOpenPBRShader(const UsdShadeMaterial& mat) {
     return UsdShadeShader();
 }
 
+// findDirectTranslucentBsdf — return the ND_translucent_bsdf shader only when
+// it is the DIRECT bsdf input to the top-level ND_surface node (possibly through
+// a single NodeGraph passthrough).  This avoids falsely matching materials where
+// ND_translucent_bsdf appears as one input to a Mix Shader.
+static UsdShadeShader findDirectTranslucentBsdf(const UsdShadeMaterial& mat) {
+    UsdStageWeakPtr stage = mat.GetPrim().GetStage();
+
+    // Find any ND_surface node inside the material prim tree.
+    for (const UsdPrim& child : mat.GetPrim().GetAllDescendants()) {
+        if (!child.IsA<UsdShadeShader>()) continue;
+        UsdShadeShader sh(child);
+        TfToken id;
+        sh.GetShaderId(&id);
+        if (id != TfToken("ND_surface")) continue;
+
+        UsdShadeInput bsdfIn = sh.GetInput(TfToken("bsdf"));
+        if (!bsdfIn) continue;
+        UsdShadeSourceInfoVector sources = bsdfIn.GetConnectedSources();
+        for (const auto& src : sources) {
+            UsdPrim srcPrim = src.source.GetPrim();
+
+            // Direct shader connection
+            if (srcPrim.IsA<UsdShadeShader>()) {
+                UsdShadeShader srcSh(srcPrim);
+                TfToken srcId;
+                srcSh.GetShaderId(&srcId);
+                if (srcId == TfToken("ND_translucent_bsdf")) return srcSh;
+                continue;
+            }
+
+            // NodeGraph passthrough: follow the named output to its source shader.
+            UsdAttribute outAttr = srcPrim.GetAttribute(
+                TfToken("outputs:" + src.sourceName.GetString()));
+            if (!outAttr) continue;
+            SdfPathVector targets;
+            outAttr.GetConnections(&targets);
+            if (targets.empty()) continue;
+            UsdPrim targetPrim = stage->GetPrimAtPath(targets[0].GetPrimPath());
+            if (!targetPrim.IsA<UsdShadeShader>()) continue;
+            UsdShadeShader targetSh(targetPrim);
+            TfToken targetId;
+            targetSh.GetShaderId(&targetId);
+            if (targetId == TfToken("ND_translucent_bsdf")) return targetSh;
+        }
+    }
+    return UsdShadeShader();
+}
+
 // resolveOpenPBRParams — extract StandardSurfaceMaterial::Params from an
 // ND_open_pbr_surface_surfaceshader node. OpenPBR is a superset of
 // UsdPreviewSurface with better physical parameterisation.
@@ -578,6 +626,37 @@ static FloatTOV resolveFloatTOVWithFallback(const FloatTOV& primary,
 // ---------------------------------------------------------------------------
 static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                                                     const std::string& stageDir) {
+    // ND_translucent_bsdf — pure translucent BSDF. Checked before OSL so that
+    // materials with a compiled .osl that wraps ND_translucent_bsdf still get the
+    // built-in translucency lobe rather than falling through to the OSL evaluator.
+    {
+        UsdShadeShader transSh = findDirectTranslucentBsdf(mat);
+        if (transSh) {
+            Spectrum color = {0.8f, 0.8f, 0.8f};
+            UsdShadeInput colorIn = transSh.GetInput(TfToken("color"));
+            if (colorIn) {
+                GfVec3f v;
+                if (colorIn.GetAttr().Get(&v)) color = {v[0], v[1], v[2]};
+            }
+            float scatter = 0.5f;  // default: moderate scatter (~29° half-angle)
+            UsdShadeInput strengthIn = transSh.GetInput(TfToken("strength"));
+            if (strengthIn) {
+                float s;
+                if (strengthIn.GetAttr().Get(&s)) scatter = std::max(0.f, std::min(1.f, s));
+            }
+            spdlog::info("USDLoader: material '{}' → translucent (color=({:.2f},{:.2f},{:.2f}) scatter={:.2f})",
+                         mat.GetPath().GetString(), color.x, color.y, color.z, scatter);
+            StandardSurfaceMaterial::Params p;
+            p.base               = 0.f;
+            p.translucency       = 1.f;
+            p.translucency_color = SpectrumTOV(color);
+            p.scatter            = scatter;
+            p.roughness          = FloatTOV(1.f);
+            p.specular           = FloatTOV(0.f);
+            return std::make_unique<StandardSurfaceMaterial>(p);
+        }
+    }
+
 #ifdef ANACAPA_ENABLE_OSL
     // If a matching .osl/.oso file exists in <stageDir>/materials/, prefer
     // OslMaterial — it evaluates the full procedural MaterialX graph.
@@ -723,11 +802,7 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
             // addon post-processor — read it here if OpenPBR didn't have it.
             if (p.subsurface <= 0.f) {
                 UsdShadeInput sssIn = preview.GetInput(TfToken("subsurface_weight"));
-                spdlog::info("USDLoader SSS debug: preview={} sssIn={}",
-                             preview.GetPath().GetString(),
-                             sssIn ? sssIn.GetAttr().GetPath().GetString() : "<not found>");
                 float sssWeight = resolveFloatTOV(sssIn, 0.0f, stageDir).value;
-                spdlog::info("USDLoader SSS debug: subsurface_weight={:.4f}", sssWeight);
                 if (sssWeight <= 0.f)
                     sssWeight = resolveFloatTOV(
                         preview.GetInput(TfToken("subsurface")), 0.0f, stageDir).value;
@@ -776,6 +851,7 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
         }
         return std::make_unique<StandardSurfaceMaterial>(p);
     }
+
 
     UsdShadeShader surface = mat.ComputeSurfaceSource();
     if (!surface) {
