@@ -2228,7 +2228,16 @@ class _MtlxBuilder:
         mat = self.mat
         nodes = mat.node_tree.nodes
 
-        bsdf = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
+        # Follow Material Output → Surface input to find the terminal node.
+        # This handles non-Principled roots (e.g. pure BSDF_TRANSLUCENT materials).
+        output_node = next((n for n in nodes if n.type == 'OUTPUT_MATERIAL'), None)
+        bsdf = None
+        if output_node:
+            surf_sock = output_node.inputs.get('Surface')
+            if surf_sock and surf_sock.is_linked:
+                bsdf = surf_sock.links[0].from_node
+        if bsdf is None:
+            bsdf = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
         if bsdf is None:
             return  # nothing to export
 
@@ -2299,8 +2308,10 @@ class _MtlxBuilder:
             out = self._tx_bsdf_glass(bl_node)
         elif t == 'BSDF_REFRACTION':
             out = self._tx_bsdf_refraction(bl_node)
-        elif t in ('BSDF_TRANSPARENT', 'BSDF_TRANSLUCENT'):
+        elif t == 'BSDF_TRANSPARENT':
             out = self._tx_bsdf_transparent(bl_node)
+        elif t == 'BSDF_TRANSLUCENT':
+            out = self._tx_bsdf_translucent(bl_node)
         elif t in ('BSDF_TOON', 'BSDF_SHEEN'):
             out = self._tx_bsdf_diffuse(bl_node)    # rough approximation
         elif t == 'BSDF_HAIR_PRINCIPLED':
@@ -3683,6 +3694,20 @@ class _MtlxBuilder:
         node.addInput('base_weight', 'float').setValue(0.0)
         node.addInput('specular_weight', 'float').setValue(0.0)
         return node.addOutput('out', 'surfaceshader')
+
+    def _tx_bsdf_translucent(self, n):
+        """Translucent BSDF → ND_translucent_bsdf wrapped in a surface node.
+        Produces a diffuse-transmission closure (lower hemisphere), not glass."""
+        col_out, col_c = self._socket_color3(n.inputs.get('Color'), (0.8, 0.8, 0.8))
+        trans = self._ng.addNode('translucent_bsdf', self._uid('trans_bsdf'), 'BSDF')
+        ci = trans.addInput('color', 'color3')
+        if col_out:
+            self._connect(ci, col_out)
+        else:
+            ci.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
+        surf = self._ng.addNode('surface', self._uid('surface'), 'surfaceshader')
+        surf.addInput('bsdf', 'BSDF').setNodeName(trans.getName())
+        return surf.addOutput('out', 'surfaceshader')
 
     def _tx_emission(self, n):
         """Emission / Background → open_pbr_surface (emissive only)."""
