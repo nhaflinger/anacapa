@@ -3697,7 +3697,10 @@ class _MtlxBuilder:
 
     def _tx_bsdf_translucent(self, n):
         """Translucent BSDF → ND_translucent_bsdf wrapped in a surface node.
-        Produces a diffuse-transmission closure (lower hemisphere), not glass."""
+        Produces a diffuse-transmission closure (lower hemisphere), not glass.
+        The 'strength' input (range 0-1) controls scatter lobe width: 0=delta
+        straight-through, 1=full Lambertian spread. Default 0.5 (moderate scatter).
+        """
         col_out, col_c = self._socket_color3(n.inputs.get('Color'), (0.8, 0.8, 0.8))
         trans = self._ng.addNode('translucent_bsdf', self._uid('trans_bsdf'), 'BSDF')
         ci = trans.addInput('color', 'color3')
@@ -3705,6 +3708,9 @@ class _MtlxBuilder:
             self._connect(ci, col_out)
         else:
             ci.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
+        # strength: scatter lobe width read by USDLoader as the 'scatter' param.
+        # Blender's Translucent BSDF has no native strength slider, so default to 0.5.
+        trans.addInput('strength', 'float').setValue(0.5)
         surf = self._ng.addNode('surface', self._uid('surface'), 'surfaceshader')
         surf.addInput('bsdf', 'BSDF').setNodeName(trans.getName())
         return surf.addOutput('out', 'surfaceshader')

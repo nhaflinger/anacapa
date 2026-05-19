@@ -63,6 +63,7 @@ enum GpuMaterialType : uint32_t {
     kMatEmissive    = 2,
     kMatGlass       = 3,   // smooth dielectric — delta Fresnel + Snell refraction
     kMatHair        = 4,   // Marschner cylindrical fiber BSDF (handled via hairTris/hairMats buffers)
+    kMatTranslucent = 5,   // diffuse transmission — power-cosine lobe around straight-through direction
 };
 
 struct GpuMaterial {
@@ -86,7 +87,8 @@ struct GpuMaterial {
     GpuFloat3       subsurfaceColor;    // scatter tint
     float           subsurfaceRadius;   // effective d = radius * scale (precomputed by host)
     float           subsurfaceStrength; // independent amplifier (> 1 boosts SSS contribution)
-    float           _sss_pad[3];        // keep struct 16-byte aligned
+    float           scatter;            // translucent lobe width: 0=delta straight-through, 1=Lambertian
+    float           _sss_pad[2];        // keep struct 16-byte aligned
 };
 
 // ---------------------------------------------------------------------------

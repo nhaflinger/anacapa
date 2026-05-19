@@ -593,6 +593,15 @@ static float3 shadowTransmittance(
             if (remaining <= 1e-4f) break;
             stepRay.origin       = stepRay.origin + dir * (res.distance + 1e-4f);
             stepRay.max_distance = remaining - 1e-4f;
+        } else if (mat.type == kMatTranslucent) {
+            // Translucent surfaces partially pass shadow rays (attenuated by tint color).
+            T *= float3(mat.baseColor.x, mat.baseColor.y, mat.baseColor.z);
+            if (max(T.x, max(T.y, T.z)) < 1e-4f) return float3(0);
+
+            float remaining = stepRay.max_distance - res.distance;
+            if (remaining <= 1e-4f) break;
+            stepRay.origin       = stepRay.origin + dir * (res.distance + 1e-4f);
+            stepRay.max_distance = remaining - 1e-4f;
         } else {
             // Opaque surface blocks the light
             return float3(0);
@@ -1478,9 +1487,10 @@ kernel void shade(
             break;
         }
 
-        // Direct lighting (skip for delta glass — no area-light PDF)
+        // Direct lighting (skip for delta glass and translucent — path continuation
+        // gathers illumination through the scatter lobe for translucent surfaces)
         float3 wo = -r.direction;
-        if (mat.type != kMatGlass) {
+        if (mat.type != kMatGlass && mat.type != kMatTranslucent) {
             float3 Ldirect = sampleDirect(hitPos, n, wo,
                                           mat.type, baseColor,
                                           mat.roughness, mat.metalness, mat.specular,
@@ -1542,7 +1552,54 @@ kernel void shade(
         float  bsdfPdf;
         float3 bsdfF;
 
-        if (mat.type == kMatGlass) {
+        if (mat.type == kMatTranslucent) {
+            // Power-cosine scatter lobe centered on the straight-through direction (-wo).
+            // scatter=0 → delta passthrough; scatter=1 → Lambertian spread.
+            float3 tDir = -wo;
+            float  sc   = mat.scatter;
+            float3 tColor = float3(mat.baseColor.x, mat.baseColor.y, mat.baseColor.z);
+
+            float3 wi_t;
+            if (sc < 0.01f) {
+                wi_t = tDir;
+            } else {
+                float nPow = 1.0f / (sc * sc);
+
+                // Build orthonormal frame around tDir
+                float3 bx;
+                if (abs(tDir.x) <= abs(tDir.y) && abs(tDir.x) <= abs(tDir.z))
+                    bx = float3(0.0f, -tDir.z, tDir.y);
+                else if (abs(tDir.y) <= abs(tDir.z))
+                    bx = float3(-tDir.z, 0.0f, tDir.x);
+                else
+                    bx = float3(tDir.y, -tDir.x, 0.0f);
+                bx = normalize(bx);
+                float3 by = cross(tDir, bx);
+
+                float2 uv2     = rand2(rng);
+                float  phi     = 2.0f * M_PI_F * uv2.x;
+                float  cosA    = pow(uv2.y, 1.0f / (nPow + 1.0f));
+                float  sinA    = sqrt(max(0.0f, 1.0f - cosA * cosA));
+                wi_t = normalize(bx * (sinA * cos(phi)) + by * (sinA * sin(phi)) + tDir * cosA);
+            }
+
+            // Throughput: f/pdf = tColor (cosI cancels in the power-cosine derivation)
+            throughput *= tColor;
+
+            // Spawn ray through the surface (offset opposite to shading normal)
+            r.origin       = hitPos - n * 1e-4f;
+            r.direction    = wi_t;
+            r.min_distance = 1e-4f;
+            r.max_distance = 1e10f;
+
+            // Treat as a delta-like bounce for MIS (no NEE was attempted above)
+            prevPos      = hitPos;
+            prevN        = n;
+            prevBsdfPdf  = 1.0f;
+            prevWasDelta = true;
+            continue;
+
+        } else if (mat.type == kMatGlass) {
             // Use geomN (unflipped) to detect entry vs exit — n was already flipped
             // to face the ray so it cannot distinguish entry from exit.
             bool entering = dot(r.direction, geomN) < 0.0f;  // ray opposes outward normal → entering
