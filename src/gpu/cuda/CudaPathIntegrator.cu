@@ -121,6 +121,21 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
         gm.type = kMatEmissive;
         return gm;
     }
+    // Translucent detection — must run before glass: transmittanceColor() is non-black
+    // for translucency too, which would otherwise cause misclassification as kMatGlass.
+    {
+        const StandardSurfaceMaterial* ssm = dynamic_cast<const StandardSurfaceMaterial*>(mat);
+        if (ssm && ssm->params().translucency > 0.001f && ssm->params().transmission < 0.001f) {
+            gm.type = kMatTranslucent;
+            SurfaceInteraction si; si.n = si.ng = {0,0,1};
+            ShadingContext ctx(si, {0,0,-1});
+            Spectrum tint = mat->transmittanceColor(ctx);
+            gm.baseColor = {tint.x, tint.y, tint.z};
+            gm.scatter   = ssm->params().scatter;
+            return gm;
+        }
+    }
+
     {
         SurfaceInteraction si; si.n = si.ng = {0,0,1};
         ShadingContext ctx(si, {0,0,1});

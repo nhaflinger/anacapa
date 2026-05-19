@@ -370,6 +370,13 @@ float3 shadowTransmittance(float3 origin, float3 dir, float tMax, float rayTime)
             remaining -= hit.t + 1e-4f;
             if (remaining <= 0.0f) break;
             orig = orig + dir * (hit.t + 1e-4f);
+        } else if (mat.type == kMatTranslucent) {
+            // Translucent surfaces partially pass shadow rays, attenuated by tint.
+            T = T * make3(mat.baseColor);
+            if (compmax(T) < 1e-4f) return make_float3(0.0f, 0.0f, 0.0f);
+            remaining -= hit.t + 1e-4f;
+            if (remaining <= 0.0f) break;
+            orig = orig + dir * (hit.t + 1e-4f);
         } else {
             return make_float3(0.0f, 0.0f, 0.0f);
         }
@@ -1793,6 +1800,51 @@ extern "C" __global__ void __raygen__wf_bounce()
         st.glassDepth = glassDepth;
         params.wfRays[flatIdx] = st;
         return;
+    }
+
+    // ---- Translucent: diffuse transmission inline, loop back to trace ------
+    // Power-cosine lobe centered on the straight-through direction (-wo).
+    // scatter=0 → delta passthrough; scatter=1 → Lambertian spread.
+    // Throughput: f/pdf = baseColor (cosI cancels in the power-cosine derivation).
+    if (mat.type == kMatTranslucent) {
+        float3 tDir   = -1.0f * rayDir;
+        float  sc     = mat.scatter;
+        float3 tColor = make3(mat.baseColor);
+
+        float3 wi_t;
+        if (sc < 0.01f) {
+            wi_t = tDir;
+        } else {
+            float nPow = 1.0f / (sc * sc);
+
+            // Build orthonormal frame around tDir
+            float3 bx;
+            if (fabsf(tDir.x) <= fabsf(tDir.y) && fabsf(tDir.x) <= fabsf(tDir.z))
+                bx = make_float3(0.0f, -tDir.z, tDir.y);
+            else if (fabsf(tDir.y) <= fabsf(tDir.z))
+                bx = make_float3(-tDir.z, 0.0f, tDir.x);
+            else
+                bx = make_float3(tDir.y, -tDir.x, 0.0f);
+            bx = normalize(bx);
+            float3 by = cross(tDir, bx);
+
+            float2 uv2  = rand2(rng);
+            float  phi  = 2.0f * 3.14159265358979323846f * uv2.x;
+            float  cosA = powf(uv2.y, 1.0f / (nPow + 1.0f));
+            float  sinA = sqrtf(fmaxf(0.0f, 1.0f - cosA * cosA));
+            wi_t = normalize(bx * (sinA * cosf(phi))
+                           + by * (sinA * sinf(phi))
+                           + tDir * cosA);
+        }
+
+        throughput = throughput * tColor;
+
+        rayOrig      = hitPos - n * 1e-4f;
+        rayDir       = wi_t;
+        prevN        = n;
+        prevBsdfPdf  = 1.0f;
+        prevWasDelta = true;
+        continue;
     }
 
     // ---- Glass: refract/reflect inline, loop back to trace -----------------
