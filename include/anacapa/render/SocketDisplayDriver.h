@@ -32,11 +32,14 @@ public:
 
     bool isConnected() const { return m_fd >= 0; }
 
+    // Signal that tiles will carry an alpha channel (call before imageOpen).
+    void setHasAlpha(bool v) { m_hasAlpha = v; }
+
     // IDisplayDriver
     void imageOpen(uint32_t width, uint32_t height) override;
     void writeTile(uint32_t x0, uint32_t y0,
                    uint32_t w,  uint32_t h,
-                   const float* rgb) override;
+                   const float* rgba) override;
     void imageClose() override;
     void pollCommands() override;
 
@@ -55,8 +58,9 @@ private:
     std::string m_sockPath;
     int         m_fd = -1;
     std::mutex  m_sendMtx;
-    uint32_t    m_width  = 0;
-    uint32_t    m_height = 0;
+    uint32_t    m_width    = 0;
+    uint32_t    m_height   = 0;
+    bool        m_hasAlpha = false;
 
     // Partial receive buffer for inbound command messages.
     // Protected by m_pollMtx — pollCommands() can be called from worker threads.

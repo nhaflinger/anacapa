@@ -22,15 +22,20 @@ class IDisplayDriver {
 public:
     virtual ~IDisplayDriver() = default;
 
+    // Called once before imageOpen() to signal whether tile data will include
+    // a valid alpha channel.  Default: no-op (alpha=1.0 for all pixels).
+    virtual void setHasAlpha(bool /*v*/) {}
+
     // Called once before rendering begins.
     virtual void imageOpen(uint32_t width, uint32_t height) = 0;
 
     // Called after each tile is merged into the film.
-    // rgb: row-major RGB float data, w*h*3 elements, linear scene-linear.
+    // rgba: row-major RGBA float data, w*h*4 elements, linear scene-linear.
+    // Alpha is 1.0 for opaque hits; 0.0 for transparent-bg sky pixels.
     // Thread-safe — may arrive from any worker thread.
     virtual void writeTile(uint32_t x0, uint32_t y0,
                            uint32_t w,  uint32_t h,
-                           const float* rgb) = 0;
+                           const float* rgba) = 0;
 
     // Called once after all tiles are complete (before final EXR write).
     virtual void imageClose() = 0;

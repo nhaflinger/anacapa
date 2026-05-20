@@ -196,8 +196,10 @@ public:
 
     // Resolve a rectangular region into a caller-supplied RGB float buffer.
     // out must hold at least w*h*3 floats (row-major, R G B per pixel).
-    // Pixels with no samples yet resolve to (0,0,0).
-    // Thread-safe — uses relaxed atomic loads, same as getPixel().
+    // Reads w*h*4 floats (RGBA) into out, row-major.
+    // Alpha is resolved from the alpha accumulator when hasAlpha() is true,
+    // otherwise 1.0.  Pixels with no samples yet resolve to (0,0,0,0).
+    // Thread-safe — uses relaxed atomic loads.
     void readTile(uint32_t x0, uint32_t y0,
                   uint32_t w,  uint32_t h,
                   float* out) const;

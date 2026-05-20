@@ -207,7 +207,7 @@ class ANACAPA_OT_render(bpy.types.Operator):
 
         # --- Build command ---
         output_path  = os.path.join(tmp_dir, "render.exr")
-        preview_path = os.path.join(tmp_dir, "preview.png")
+        preview_path = os.path.join(tmp_dir, "preview.exr")
         executable   = get_executable(context)
         cmd          = build_command(executable, usd_path, settings,
                                      width, height, output_path,
@@ -237,10 +237,11 @@ class ANACAPA_OT_render(bpy.types.Operator):
                                 "Viewer not reachable — rendering without live display")
                     use_viewer = False
 
-        # Progressive PNG preview — only when not using the viewer
-        # (the viewer shows live tiles; Blender just loads the EXR at the end)
+        # Progressive EXR preview — linear float with alpha, tone-mapped by the viewer.
+        # Written when not using the socket viewer so Blender's Image Editor can show
+        # progressive updates with correct colour and alpha channel.
         if not use_viewer:
-            cmd += ["--png", preview_path]
+            cmd += ["--preview-exr", preview_path]
 
         # --- Launch Anacapa ---
         import shlex
@@ -347,6 +348,7 @@ class ANACAPA_OT_render(bpy.types.Operator):
                 bpy.data.images.remove(existing)
             img = bpy.data.images.load(preview_path, check_existing=False)
             img.name = "Anacapa Preview"
+            img.alpha_mode = 'STRAIGHT'
             ANACAPA_OT_render._preview_img = img
 
             for area in context.screen.areas:

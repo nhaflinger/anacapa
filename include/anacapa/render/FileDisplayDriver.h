@@ -39,7 +39,7 @@ public:
     void imageOpen(uint32_t width, uint32_t height) override;
     void writeTile(uint32_t x0, uint32_t y0,
                    uint32_t w,  uint32_t h,
-                   const float* rgb) override;
+                   const float* rgba) override;
     void imageClose() override;
 
 private:

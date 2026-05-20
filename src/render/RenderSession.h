@@ -73,6 +73,7 @@ struct RenderSettings {
     bool           overrideLights    = false; // Replace scene lights with a simple white directional
     bool           overrideMaterials = false; // Replace all scene materials with white Lambertian
     std::string    pngPath;                   // If set, write sRGB-encoded PNG alongside EXR (no tone mapping)
+    std::string    previewExrPath;            // If set, write progressive linear EXR preview to this path
     float          exposure          = 0.f;   // EV adjustment for PNG output
     DenoiseOptions denoise;
 

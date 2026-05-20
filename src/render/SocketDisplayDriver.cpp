@@ -65,17 +65,17 @@ void SocketDisplayDriver::imageOpen(uint32_t width, uint32_t height) {
     if (m_fd < 0) return;
 
     std::vector<uint8_t> buf;
-    proto::encodeImageOpen(buf, width, height, 0);
+    proto::encodeImageOpen(buf, width, height, 0, m_hasAlpha ? 1u : 0u);
     std::lock_guard<std::mutex> lk(m_sendMtx);
     sendAll(buf.data(), buf.size());
 }
 
 void SocketDisplayDriver::writeTile(uint32_t x0, uint32_t y0,
                                     uint32_t w,  uint32_t h,
-                                    const float* rgb) {
+                                    const float* rgba) {
     if (m_fd < 0) return;
     std::vector<uint8_t> buf;
-    proto::encodeTile(buf, x0, y0, w, h, rgb);
+    proto::encodeTile(buf, x0, y0, w, h, rgba);
     std::lock_guard<std::mutex> lk(m_sendMtx);
     sendAll(buf.data(), buf.size());
 }

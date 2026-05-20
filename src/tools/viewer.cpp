@@ -129,6 +129,7 @@ struct LiveState {
     std::atomic<uint64_t> pixelsFilled{0};
     uint32_t totalPixels = 0;  // set from IMAGE_OPEN width*height
     uint32_t imageSpp    = 0;  // set from IMAGE_OPEN spp field
+    bool     hasAlpha    = false; // set from IMAGE_OPEN hasAlpha field
 } g_live;
 
 // Send a command message to the connected renderer (viewer→renderer direction)
@@ -255,14 +256,17 @@ void main() {
     c = (c - 0.5) * (1.0 + uContrast) + 0.5;
     c = max(c, 0.0);  // clamp negatives before display transform
 
+    vec3 display;
     if (uUseLut) {
         // OCIO display transform — output is already display-encoded
-        fragColor = vec4(%OCIO_FUNC%(vec4(c, 1.0)).rgb, 1.0);
+        display = %OCIO_FUNC%(vec4(c, 1.0)).rgb;
     } else if (uTonemap) {
-        fragColor = vec4(linearToSrgb(filmic(c)), 1.0);
+        display = linearToSrgb(filmic(c));
     } else {
-        fragColor = vec4(linearToSrgb(clamp(c, 0.0, 1.0)), 1.0);
+        display = linearToSrgb(clamp(c, 0.0, 1.0));
     }
+
+    fragColor = vec4(display, 1.0);
 }
 )glsl";
 
@@ -595,6 +599,7 @@ struct SlotState {
     GLuint   srcTex     = 0;
     int      texW       = 0, texH = 0;
     bool     isHdr      = false;  // float HDR source (skip sRGB decode)
+    bool     hasAlpha   = false;  // source has a valid alpha channel
     uint64_t lastMod    = 0;
     float    exposure   = 0.f;
     float    saturation = 1.f;
@@ -720,9 +725,10 @@ static bool uploadTextureToSlot(const char* path, SlotState& s)
                 if (readOk) {
                     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0,
                                   GL_RGBA, GL_FLOAT, buf.data());
-                    s.texW  = w;
-                    s.texH  = h;
-                    s.isHdr = true;
+                    s.texW    = w;
+                    s.texH    = h;
+                    s.isHdr   = true;
+                    s.hasAlpha = (nc >= 4);
                     ok = true;
                 }
             }
@@ -820,11 +826,14 @@ static void socketReaderThread(int clientFd) {
         switch (static_cast<MsgType>(hdr.type)) {
         case IMAGE_OPEN: {
             if (hdr.payloadLen < 12) break;
-            uint32_t w, h, spp = 0;
-            std::memcpy(&w,   payload.data() + 0, 4);
-            std::memcpy(&h,   payload.data() + 4, 4);
-            std::memcpy(&spp, payload.data() + 8, 4);
-            g_live.imageSpp = spp;
+            uint32_t w, h, spp = 0, hasAlpha = 0;
+            std::memcpy(&w,        payload.data() + 0,  4);
+            std::memcpy(&h,        payload.data() + 4,  4);
+            std::memcpy(&spp,      payload.data() + 8,  4);
+            if (hdr.payloadLen >= 16)
+                std::memcpy(&hasAlpha, payload.data() + 12, 4);
+            g_live.imageSpp  = spp;
+            g_live.hasAlpha  = (hasAlpha != 0);
             g_live.tilesReceived.store(0);
             g_live.pixelsFilled.store(0);
             // If a pre-launch normalized crop was drawn, convert to pixels
@@ -900,18 +909,18 @@ static void socketReaderThread(int clientFd) {
             std::memcpy(&tu.y0, payload.data() + 4,  4);
             std::memcpy(&tu.w,  payload.data() + 8,  4);
             std::memcpy(&tu.h,  payload.data() + 12, 4);
-            uint32_t nFloats = tu.w * tu.h * 3;
+            uint32_t nFloats = tu.w * tu.h * 4;  // always RGBA
             if (hdr.payloadLen < 16 + nFloats * 4) break;
-            // Convert RGB float → RGBA float (alpha=1, flip row to GL convention)
+            // Flip rows to GL bottom-left convention; copy RGBA as-is
             const float* src = reinterpret_cast<const float*>(payload.data() + 16);
             tu.rgba.resize(tu.w * tu.h * 4);
             for (uint32_t row = 0; row < tu.h; ++row) {
-                uint32_t srcRow = row;               // top-left in wire format
-                uint32_t dstRow = tu.h - 1 - row;   // flip for GL bottom-left
+                uint32_t srcRow = row;
+                uint32_t dstRow = tu.h - 1 - row;
                 for (uint32_t col = 0; col < tu.w; ++col) {
-                    const float* s = src + (srcRow * tu.w + col) * 3;
+                    const float* s = src + (srcRow * tu.w + col) * 4;
                     float*       d = tu.rgba.data() + (dstRow * tu.w + col) * 4;
-                    d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 1.f;
+                    d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
                 }
             }
             g_live.tilesReceived.fetch_add(1);
@@ -1219,10 +1228,11 @@ int main(int argc, char** argv)
                         g_live.cropNormIsPanel = false;
                     }
                     // Mirror into destSlot so color-grading pipeline sees it
-                    slots[destSlot].srcTex = g_live.liveTex;
-                    slots[destSlot].texW   = static_cast<int>(w);
-                    slots[destSlot].texH   = static_cast<int>(h);
-                    slots[destSlot].isHdr  = true;
+                    slots[destSlot].srcTex   = g_live.liveTex;
+                    slots[destSlot].texW     = static_cast<int>(w);
+                    slots[destSlot].texH     = static_cast<int>(h);
+                    slots[destSlot].isHdr    = true;
+                    slots[destSlot].hasAlpha = g_live.hasAlpha;
                     SDL_SetWindowTitle(window, "Anacapa Viewer — rendering…");
                 } else {
                     // TILE — subimage update

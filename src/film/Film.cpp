@@ -86,11 +86,23 @@ void Film::readTile(uint32_t x0, uint32_t y0,
         uint32_t fy = y0 + row;
         for (uint32_t col = 0; col < w; ++col) {
             uint32_t fx = x0 + col;
-            Spectrum s = inBounds(static_cast<int>(fx), static_cast<int>(fy))
-                       ? m_pixels[fy * m_width + fx].resolve()
-                       : Spectrum{};
-            float* p = out + (row * w + col) * 3;
-            p[0] = s.x; p[1] = s.y; p[2] = s.z;
+            float* p = out + (row * w + col) * 4;
+            if (inBounds(static_cast<int>(fx), static_cast<int>(fy))) {
+                const auto& px = m_pixels[fy * m_width + fx];
+                Spectrum s = px.resolve();
+                p[0] = s.x; p[1] = s.y; p[2] = s.z;
+                if (m_hasAlpha) {
+                    float wt = px.weight.load(std::memory_order_relaxed);
+                    float a  = (wt > 0.f)
+                        ? px.alpha.load(std::memory_order_relaxed) / wt
+                        : 0.f;
+                    p[3] = std::max(0.f, std::min(1.f, a));
+                } else {
+                    p[3] = 1.f;
+                }
+            } else {
+                p[0] = p[1] = p[2] = p[3] = 0.f;
+            }
         }
     }
 }
@@ -316,19 +328,29 @@ bool Film::writePNG(const std::string& path, float exposure) const {
 bool Film::writeEXRPreview(const std::string& path) const {
     using namespace OIIO;
     const uint32_t N = m_width * m_height;
+    const int nCh = m_hasAlpha ? 4 : 3;
 
-    std::vector<float> pixels(N * 3);
+    std::vector<float> pixels(N * nCh);
     for (uint32_t i = 0; i < N; ++i) {
+        float* p = pixels.data() + i * nCh;
         Spectrum c = m_pixels[i].resolve();
-        pixels[i*3+0] = c.x;
-        pixels[i*3+1] = c.y;
-        pixels[i*3+2] = c.z;
+        p[0] = c.x;
+        p[1] = c.y;
+        p[2] = c.z;
+        if (m_hasAlpha) {
+            float w = m_pixels[i].weight.load(std::memory_order_relaxed);
+            float a = (w > 0.f)
+                ? m_pixels[i].alpha.load(std::memory_order_relaxed) / w
+                : 0.f;
+            p[3] = std::max(0.f, std::min(1.f, a));
+        }
     }
 
     ImageSpec spec(static_cast<int>(m_width), static_cast<int>(m_height),
-                   3, TypeDesc::FLOAT);
+                   nCh, TypeDesc::FLOAT);
     spec.attribute("compression", "none");  // fastest for progressive preview
-    spec.channelnames = {"R", "G", "B"};
+    spec.channelnames = m_hasAlpha ? std::vector<std::string>{"R", "G", "B", "A"}
+                                   : std::vector<std::string>{"R", "G", "B"};
 
     const std::string tmp = path + ".writing.exr";
     auto out = ImageOutput::create(tmp);

@@ -859,8 +859,11 @@ void RenderSession::render() {
 
     // Display driver — use the caller-supplied driver if set, otherwise create
     // the default FileDisplayDriver (same preview-thread behaviour as before).
-    const bool hasPng = !m_settings.pngPath.empty();
-    const bool hasExrOut = [&] {
+    const bool hasPng        = !m_settings.pngPath.empty();
+    const bool hasPreviewExr = !m_settings.previewExrPath.empty();
+    // Fall back to writing progressive previews to the output EXR when no
+    // explicit --preview-exr path is given (legacy behaviour).
+    const bool hasExrOut = !hasPreviewExr && [&] {
         const auto& p = m_settings.outputPath;
         if (p.size() < 4) return false;
         std::string ext = p.substr(p.size() - 4);
@@ -870,13 +873,16 @@ void RenderSession::render() {
     std::unique_ptr<FileDisplayDriver> ownedDriver;
     IDisplayDriver* displayDriver = m_displayDriver;
     if (!displayDriver) {
+        std::string previewExr = hasPreviewExr ? m_settings.previewExrPath
+                                               : (hasExrOut ? m_settings.outputPath : std::string{});
         ownedDriver = std::make_unique<FileDisplayDriver>(
             *m_film,
-            hasPng    ? m_settings.pngPath    : std::string{},
-            hasExrOut ? m_settings.outputPath : std::string{},
+            hasPng ? m_settings.pngPath : std::string{},
+            previewExr,
             m_settings.exposure);
         displayDriver = ownedDriver.get();
     }
+    displayDriver->setHasAlpha(m_film->hasAlpha());
     displayDriver->imageOpen(m_settings.imageWidth, m_settings.imageHeight);
 
     // Dedicated command-poll thread — runs at 100 ms intervals throughout the
@@ -950,9 +956,9 @@ void RenderSession::render() {
             m_film->mergeTile(localTile);
 
             if (displayDriver) {
-                std::vector<float> rgb(tile.width * tile.height * 3);
-                m_film->readTile(tile.x0, tile.y0, tile.width, tile.height, rgb.data());
-                displayDriver->writeTile(tile.x0, tile.y0, tile.width, tile.height, rgb.data());
+                std::vector<float> rgba(tile.width * tile.height * 4);
+                m_film->readTile(tile.x0, tile.y0, tile.width, tile.height, rgba.data());
+                displayDriver->writeTile(tile.x0, tile.y0, tile.width, tile.height, rgba.data());
             }
 
             uint32_t done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -972,9 +978,9 @@ void RenderSession::render() {
     auto pushFrame = [&]() -> bool {
         if (!displayDriver) return !m_cancelRequested.load();
         uint32_t W = m_settings.imageWidth, H = m_settings.imageHeight;
-        std::vector<float> rgb(W * H * 3);
-        m_film->readTile(0, 0, W, H, rgb.data());
-        displayDriver->writeTile(0, 0, W, H, rgb.data());
+        std::vector<float> rgba(W * H * 4);
+        m_film->readTile(0, 0, W, H, rgba.data());
+        displayDriver->writeTile(0, 0, W, H, rgba.data());
         waitIfPaused();
         return !m_cancelRequested.load();
     };

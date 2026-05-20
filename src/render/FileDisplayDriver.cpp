@@ -43,7 +43,7 @@ void FileDisplayDriver::imageOpen(uint32_t /*width*/, uint32_t /*height*/) {
 
 void FileDisplayDriver::writeTile(uint32_t /*x0*/, uint32_t /*y0*/,
                                   uint32_t /*w*/,  uint32_t /*h*/,
-                                  const float* /*rgb*/) {
+                                  const float* /*rgba*/) {
     // The film is already updated by the time this is called (mergeTile
     // happens before writeTile).  The preview thread picks up m_film.isDirty().
     // Nothing to do here — file writes are timer-driven.

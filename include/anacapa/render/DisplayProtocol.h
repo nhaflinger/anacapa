@@ -11,8 +11,8 @@
 //   [uint32_t type][uint32_t payloadLen][payloadLen bytes]
 //
 // Renderer → Viewer:
-//   IMAGE_OPEN  payload: uint32_t width, height, spp
-//   TILE        payload: uint32_t x0, y0, w, h  then w*h*3 floats (linear RGB)
+//   IMAGE_OPEN  payload: uint32_t width, height, spp, hasAlpha
+//   TILE        payload: uint32_t x0, y0, w, h  then w*h*4 floats (linear RGBA)
 //   IMAGE_CLOSE payload: (empty)
 //
 // Viewer → Renderer:
@@ -54,13 +54,15 @@ struct MsgHeader {
 // ---------------------------------------------------------------------------
 
 inline void encodeImageOpen(std::vector<uint8_t>& buf,
-                             uint32_t w, uint32_t h, uint32_t spp) {
-    MsgHeader hdr{ IMAGE_OPEN, 12 };
-    buf.resize(sizeof(hdr) + 12);
+                             uint32_t w, uint32_t h, uint32_t spp,
+                             uint32_t hasAlpha = 0) {
+    MsgHeader hdr{ IMAGE_OPEN, 16 };
+    buf.resize(sizeof(hdr) + 16);
     std::memcpy(buf.data(), &hdr, sizeof(hdr));
-    std::memcpy(buf.data() + sizeof(hdr) + 0,  &w,   4);
-    std::memcpy(buf.data() + sizeof(hdr) + 4,  &h,   4);
-    std::memcpy(buf.data() + sizeof(hdr) + 8,  &spp, 4);
+    std::memcpy(buf.data() + sizeof(hdr) + 0,  &w,        4);
+    std::memcpy(buf.data() + sizeof(hdr) + 4,  &h,        4);
+    std::memcpy(buf.data() + sizeof(hdr) + 8,  &spp,      4);
+    std::memcpy(buf.data() + sizeof(hdr) + 12, &hasAlpha, 4);
 }
 
 inline void encodeImageClose(std::vector<uint8_t>& buf) {
@@ -71,8 +73,8 @@ inline void encodeImageClose(std::vector<uint8_t>& buf) {
 
 inline void encodeTile(std::vector<uint8_t>& buf,
                        uint32_t x0, uint32_t y0, uint32_t w, uint32_t h,
-                       const float* rgb) {
-    uint32_t pixBytes = w * h * 3 * sizeof(float);
+                       const float* rgba) {
+    uint32_t pixBytes = w * h * 4 * sizeof(float);
     uint32_t payLen   = 16 + pixBytes;
     buf.resize(sizeof(MsgHeader) + payLen);
     uint8_t* p = buf.data();
@@ -82,7 +84,7 @@ inline void encodeTile(std::vector<uint8_t>& buf,
     std::memcpy(p, &y0, 4); p += 4;
     std::memcpy(p, &w,  4); p += 4;
     std::memcpy(p, &h,  4); p += 4;
-    std::memcpy(p, rgb, pixBytes);
+    std::memcpy(p, rgba, pixBytes);
 }
 
 inline void encodeCrop(std::vector<uint8_t>& buf,

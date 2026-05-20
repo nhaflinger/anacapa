@@ -122,6 +122,9 @@ int main(int argc, char** argv) {
     app.add_option("--png", settings.pngPath,
                    "Write an sRGB-encoded PNG for easy comparison (exposure + sRGB "
                    "gamma only, no tone mapping; e.g. out.png)");
+    app.add_option("--preview-exr", settings.previewExrPath,
+                   "Write progressive linear EXR previews to this path during rendering "
+                   "(includes alpha when transparent-bg is enabled; e.g. preview.exr)");
     app.add_option("--exposure", settings.exposure,
                    "EV exposure adjustment for --png output (default 0)")
        ->default_val(0.f);
