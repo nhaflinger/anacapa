@@ -36,6 +36,7 @@ file(GLOB_RECURSE ANACAPA_SOURCES
     src/film/*.cpp
     src/render/*.cpp
     src/scene/*.cpp
+    src/sky/*.cpp
 )
 
 add_library(anacapa_lib STATIC ${ANACAPA_SOURCES})
@@ -48,7 +49,7 @@ target_include_directories(anacapa_lib
 target_link_libraries(anacapa_lib
     PUBLIC
         OpenImageIO::OpenImageIO
-        spdlog::spdlog
+        spdlog::spdlog_header_only
         nlohmann_json::nlohmann_json
 )
 

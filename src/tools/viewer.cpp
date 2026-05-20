@@ -200,11 +200,17 @@ uniform int   uChannelMode;   // 0=RGB, 1=R, 2=G, 3=B, 4=A
 vec3 srgbToLinear(vec3 c) { return pow(max(c, 0.0), vec3(2.2)); }
 vec3 linearToSrgb(vec3 c) { return pow(max(c, 0.0), vec3(1.0/2.2)); }
 
-// ACES RRT+ODT approximation (Narkowicz 2016) — fallback when OCIO unavailable
-vec3 aces(vec3 x) {
-    x *= 0.6;
-    const float a = 2.51, b = 0.03, c2 = 2.43, d = 0.59, e = 0.14;
-    return clamp((x*(a*x+b))/(x*(c2*x+d)+e), 0.0, 1.0);
+// Log-based filmic tone mapping, matching Blender Cycles "Filmic" dynamic range.
+// 16-stop log2 range centred on 18% grey; smoothstep S-curve in log space.
+// Sky values of 5–20 (sunIntensity=10) remain distinctly coloured, not white.
+float filmicChan(float x) {
+    if (x <= 0.0) return 0.0;
+    float lx = log2(max(x, 1e-10) / 0.18) / 16.0 + 0.5;
+    lx = clamp(lx, 0.0, 1.0);
+    return lx * lx * (3.0 - 2.0 * lx);
+}
+vec3 filmic(vec3 x) {
+    return vec3(filmicChan(x.r), filmicChan(x.g), filmicChan(x.b));
 }
 
 vec3 applyTemperature(vec3 c, float t) {
@@ -253,7 +259,7 @@ void main() {
         // OCIO display transform — output is already display-encoded
         fragColor = vec4(%OCIO_FUNC%(vec4(c, 1.0)).rgb, 1.0);
     } else if (uTonemap) {
-        fragColor = vec4(linearToSrgb(aces(c)), 1.0);
+        fragColor = vec4(linearToSrgb(filmic(c)), 1.0);
     } else {
         fragColor = vec4(linearToSrgb(clamp(c, 0.0, 1.0)), 1.0);
     }
@@ -524,10 +530,23 @@ static void ocioInit()
 
         ocioRefreshViews();
 
-        // Try to select the default view
-        std::string defView = g_ocioConfig->getDefaultView(defDisp.c_str());
-        for (int i = 0; i < (int)g_ocioViews.size(); ++i) {
-            if (g_ocioViews[i] == defView) { g_ocioViewIdx = i; break; }
+        // Prefer "Filmic" as the initial view; fall back to the config default.
+        // The built-in studio config defaults to "ACES 1.0 SDR-video" which is
+        // too contrasty for HDR beauty buffers.  "Filmic" matches Blender's
+        // default and handles the 16-stop dynamic range of sky renders.
+        const std::vector<std::string> kPreferredViews = { "Filmic", "AgX" };
+        bool viewFound = false;
+        for (const auto& pref : kPreferredViews) {
+            for (int i = 0; i < (int)g_ocioViews.size(); ++i) {
+                if (g_ocioViews[i] == pref) { g_ocioViewIdx = i; viewFound = true; break; }
+            }
+            if (viewFound) break;
+        }
+        if (!viewFound) {
+            std::string defView = g_ocioConfig->getDefaultView(defDisp.c_str());
+            for (int i = 0; i < (int)g_ocioViews.size(); ++i) {
+                if (g_ocioViews[i] == defView) { g_ocioViewIdx = i; break; }
+            }
         }
 
         g_ocioStatus = "Loaded";
@@ -581,7 +600,7 @@ struct SlotState {
     float    saturation = 1.f;
     float    contrast   = 0.f;
     float    temperature= 0.f;
-    bool     toneMap    = false;  // fallback ACES (when OCIO disabled)
+    bool     toneMap    = true;   // fallback ACES (when OCIO disabled)
     int      channelMode = 0;    // 0=RGB, 1=R, 2=G, 3=B, 4=A
 };
 
@@ -1244,7 +1263,7 @@ int main(int argc, char** argv)
                             auto& s = slots[activeSlot];
                             s.exposure = 0.f; s.saturation = 1.f;
                             s.contrast = 0.f; s.temperature = 0.f;
-                            s.toneMap  = false;
+                            s.toneMap  = true;
                         }
                         if (event.key.keysym.sym == SDLK_o &&
                             (event.key.keysym.mod & KMOD_CTRL))
@@ -1490,7 +1509,7 @@ int main(int argc, char** argv)
         ImGui::SetNextItemWidth(-1);
         ImGui::SliderFloat("##con", &as.contrast,  -1.f, 1.f, "Contrast: %.2f");
 #ifndef ANACAPA_HAVE_OCIO
-        ImGui::Checkbox("ACES Filmic", &as.toneMap);
+        ImGui::Checkbox("Filmic", &as.toneMap);
 #endif
 
         ImGui::SeparatorText("Color");
@@ -1530,7 +1549,7 @@ int main(int argc, char** argv)
         if (ImGui::Button("Reset  (R)", {-1, 0})) {
             as.exposure = 0.f; as.saturation = 1.f;
             as.contrast = 0.f; as.temperature = 0.f;
-            as.toneMap  = false;
+            as.toneMap  = true;
         }
 
         ImGui::Spacing();

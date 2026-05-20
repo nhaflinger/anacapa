@@ -41,7 +41,8 @@ public:
 private:
     Spectrum Li(const Ray& ray, const SceneView& scene,
                 ISampler& sampler,
-                Spectrum& outAlbedo, Vec3f& outNormal) const;
+                Spectrum& outAlbedo, Vec3f& outNormal,
+                float& outAlpha) const;
 
     // Light sampling only — emitter Le is handled in Li via path continuation.
     Spectrum estimateDirect(const SurfaceInteraction& si,

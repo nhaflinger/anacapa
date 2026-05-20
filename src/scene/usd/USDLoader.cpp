@@ -8,6 +8,8 @@
 #include "../../shading/lights/AreaLight.h"
 #include "../../shading/lights/DirectionalLight.h"
 #include "../../shading/lights/DomeLight.h"
+#include "../../sky/SkyConfig.h"
+#include "../../sky/SkyLight.h"
 
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usd/primRange.h>
@@ -2278,10 +2280,67 @@ LoadedScene loadUSD(const std::string& path,
                          dirToLight.x, dirToLight.y, dirToLight.z, intensity);
         }
 
-        // ---- DomeLight (HDRI environment) ----
+        // ---- DomeLight or Nishita sky ----
         else if (prim.IsA<UsdLuxDomeLight>()) {
             UsdLuxDomeLight dome(prim);
             UsdLuxLightAPI lightAPI(prim);
+
+            // Check for anacapa:sky:type = "nishita" custom attribute.
+            // When present, build a SkyLight instead of loading an HDRI.
+            {
+                UsdAttribute skyTypeAttr = prim.GetAttribute(TfToken("anacapa:sky:type"));
+                std::string skyType;
+                if (skyTypeAttr && skyTypeAttr.Get(&skyType) && skyType == "nishita") {
+                    NishitaParams sp;
+
+                    // sun_elevation + sun_azimuth → sunDir
+                    float elevDeg = 45.f, azimDeg = 180.f;
+                    {
+                        UsdAttribute a = prim.GetAttribute(TfToken("anacapa:sky:sun_elevation"));
+                        if (a) a.Get(&elevDeg);
+                    }
+                    {
+                        UsdAttribute a = prim.GetAttribute(TfToken("anacapa:sky:sun_azimuth"));
+                        if (a) a.Get(&azimDeg);
+                    }
+                    constexpr float kDeg2Rad = 3.14159265f / 180.f;
+                    float elev = elevDeg * kDeg2Rad;
+                    float az   = azimDeg * kDeg2Rad;
+                    sp.sunDir = normalize(Vec3f{
+                        std::cos(elev) * std::sin(az),
+                        std::sin(elev),
+                        std::cos(elev) * std::cos(az)
+                    });
+
+                    auto readF = [&](const char* name, float& dst) {
+                        UsdAttribute a = prim.GetAttribute(TfToken(name));
+                        if (a) a.Get(&dst);
+                    };
+                    readF("anacapa:sky:sun_intensity",  sp.sunIntensity);
+                    float discDeg = 2.0f;
+                    readF("anacapa:sky:sun_disc_size",  discDeg);
+                    sp.sunDiscAngle = discDeg * kDeg2Rad;
+                    readF("anacapa:sky:altitude",       sp.altitude);
+                    readF("anacapa:sky:air_density",    sp.airDensity);
+                    readF("anacapa:sky:dust_density",   sp.dustDensity);
+                    readF("anacapa:sky:ozone_density",  sp.ozoneDensity);
+                    {
+                        UsdAttribute a = prim.GetAttribute(TfToken("anacapa:sky:transparent_bg"));
+                        int v = 0;
+                        if (a) { a.Get(&v); sp.transparentBg = (v != 0); }
+                    }
+
+                    // Bounds placeholder — updated after all meshes are loaded
+                    auto skyLight = std::make_unique<SkyLight>(sp, /*radius=*/1.f, Vec3f{});
+                    result.sceneView.envLight = skyLight.get();
+                    result.sceneView.lights.push_back(skyLight.get());
+                    result.lights.push_back(std::move(skyLight));
+
+                    spdlog::info("USDLoader: Nishita sky '{}' elev={:.1f}° az={:.1f}°",
+                                 prim.GetPath().GetString(), elevDeg, azimDeg);
+                    continue;  // skip DomeLight construction
+                }
+            }
 
             float intensity = resolveIntensity(lightAPI);
             GfVec3f color{1.f, 1.f, 1.f};
@@ -2539,6 +2598,9 @@ LoadedScene loadUSD(const std::string& path,
                 } else if (auto* dome = dynamic_cast<DomeLight*>(lightPtr.get())) {
                     dome->setSceneRadius(radius);
                     dome->setSceneCenter(center);
+                } else if (auto* sky = dynamic_cast<SkyLight*>(lightPtr.get())) {
+                    sky->setSceneRadius(radius);
+                    sky->setSceneCenter(center);
                 }
             }
             spdlog::info("USDLoader: scene bounds center=({:.1f},{:.1f},{:.1f}) radius={:.1f}",

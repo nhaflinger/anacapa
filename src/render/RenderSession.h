@@ -43,6 +43,7 @@ struct RenderSettings {
     std::vector<std::string> matassignPaths;
     std::string    envPath;                // HDRI dome light (empty = none)
     float          envIntensity    = 1.f;
+    std::string    skyConfigPath;          // Nishita sky JSON config (empty = none)
 
     // Thin lens / depth of field overrides.
     // If both are > 0 they override whatever the USD camera specifies (or add

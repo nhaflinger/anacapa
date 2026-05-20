@@ -54,6 +54,11 @@ public:
 
     // True for point/directional lights (delta position or direction)
     virtual bool isDelta() const { return false; }
+
+    // True when the environment / sky background should not appear in primary
+    // camera rays (transparent background for compositing).  Indirect bounces
+    // still evaluate the full sky radiance for correct illumination.
+    virtual bool transparentBg() const { return false; }
 };
 
 } // namespace anacapa

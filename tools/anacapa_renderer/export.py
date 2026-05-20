@@ -943,10 +943,12 @@ def export_usd(usd_path, context, run_prep=True, shutter_close=0.0):
 
         if prep is not None:
             try:
-                use_dof = getattr(
-                    getattr(bpy.context.scene, 'anacapa', None), 'use_dof', False)
+                ana = getattr(bpy.context.scene, 'anacapa', None)
+                use_dof = getattr(ana, 'use_dof', False)
+                sky = ana if (ana and getattr(ana, 'use_sky', False)) else None
                 prep.post_process_usd(usd_path, shutter_close=shutter_close,
-                                      disable_dof=not use_dof)
+                                      disable_dof=not use_dof,
+                                      sky_settings=sky)
             except Exception as e:
                 print(f"[Anacapa] USD post-process warning: {e}")
 
@@ -1013,9 +1015,12 @@ def build_command(executable, usd_path, settings, width, height, output_path,
     elif settings.adaptive_base_spp > 0:
         cmd += ["--adaptive-base-spp", str(settings.adaptive_base_spp)]
 
-    env = bpy.path.abspath(settings.env_path) if settings.env_path else ""
-    if env:
-        cmd += ["--env", env, "--env-intensity", str(settings.env_intensity)]
+    # Sky overrides the HDRI env map — attributes are already in the USD.
+    use_sky = getattr(settings, 'use_sky', False)
+    if not use_sky:
+        env = bpy.path.abspath(settings.env_path) if settings.env_path else ""
+        if env:
+            cmd += ["--env", env, "--env-intensity", str(settings.env_intensity)]
 
     if settings.light_angle > 0:
         cmd += ["--light-angle", str(settings.light_angle)]

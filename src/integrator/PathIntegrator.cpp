@@ -51,7 +51,8 @@ void PathIntegrator::renderTile(const SceneView& scene,
 
                 Spectrum albedo = {};
                 Vec3f    normal = {};
-                Spectrum sample = Li(ray, scene, sampler, albedo, normal);
+                float    alpha  = 1.f;
+                Spectrum sample = Li(ray, scene, sampler, albedo, normal, alpha);
                 if (sample.isFinite()) {
                     accum     += sample * fw;
                     weightSum += fw;
@@ -61,6 +62,7 @@ void PathIntegrator::renderTile(const SceneView& scene,
                 accumAlbedo += albedo;
                 accumNormal = accumNormal + normal;
                 ++aovCount;
+                localTile.addAlpha(tx, ty, alpha, fw);
             }
 
             // Deposit the signed-weighted estimator into the tile.  When
@@ -86,10 +88,12 @@ void PathIntegrator::renderTile(const SceneView& scene,
 
 Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
                               ISampler& sampler,
-                              Spectrum& outAlbedo, Vec3f& outNormal) const {
+                              Spectrum& outAlbedo, Vec3f& outNormal,
+                              float& outAlpha) const {
     Spectrum L    = {};
     Spectrum beta = {1.f, 1.f, 1.f};
     Ray      r    = ray;
+    outAlpha      = 1.f;  // default: opaque (set to 0 for transparent-bg sky miss)
 
     // MIS state: track the BSDF PDF of the ray that spawned the current vertex.
     // prevWasDelta=true on the first hit and after any delta bounce so emitter Le
@@ -143,6 +147,12 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
         hit = scene.accel->trace(r);
 
         if (!hit.hit) {
+            // Primary camera ray escaped to sky: check transparent background
+            if (bounce == 0 && scene.envLight && scene.envLight->transparentBg()) {
+                outAlpha = 0.f;
+                break;
+            }
+
             // Background / environment light
             Spectrum bg = scene.envLight
                 ? scene.envLight->Le({}, {}, r.direction)

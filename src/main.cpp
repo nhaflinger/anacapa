@@ -69,6 +69,9 @@ int main(int argc, char** argv) {
     app.add_option("--env-intensity", settings.envIntensity,
                    "Intensity multiplier for the environment map")
        ->default_val(1.f);
+    app.add_option("--sky", settings.skyConfigPath,
+                   "Nishita sky config JSON file. Replaces --env when specified. "
+                   "See sky JSON schema in docs.");
 
     app.add_option("--fstop", settings.fStop,
                    "Lens f-stop (e.g. 2.8). Enables depth of field when combined "

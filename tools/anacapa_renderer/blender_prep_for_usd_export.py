@@ -6017,16 +6017,70 @@ def _patch_camera_no_dof(usd_path):
         log(f"  [dof] Zeroed fStop on {patched} camera(s) — pinhole mode.")
 
 
-def post_process_usd(usd_path, sky_texture="", shutter_close=0.0, disable_dof=False):
+def _inject_sky_params(usd_path, sky_settings):
+    """
+    Write anacapa:sky:* custom attributes onto every DomeLight prim in the
+    stage.  USDLoader reads these to construct a SkyLight instead of loading
+    an HDRI image.
+
+    sky_settings — an object with attributes matching the AnacapaRenderSettings
+                   sky_* properties (sky_sun_elevation, sky_sun_azimuth, etc.).
+    """
+    try:
+        from pxr import Usd, Sdf
+    except ImportError:
+        log("  [sky] pxr not available — cannot inject sky attributes")
+        return
+
+    stage = Usd.Stage.Open(usd_path)
+    if not stage:
+        log(f"  [sky] Failed to open stage: {usd_path}")
+        return
+
+    patched = 0
+    for prim in stage.Traverse():
+        if prim.GetTypeName() != "DomeLight":
+            continue
+
+        def _set(name, val, type_name):
+            attr = prim.GetAttribute(name)
+            if not attr:
+                attr = prim.CreateAttribute(name, type_name)
+            attr.Set(val)
+
+        _set("anacapa:sky:type",          "nishita",                        Sdf.ValueTypeNames.String)
+        _set("anacapa:sky:sun_elevation",  sky_settings.sky_sun_elevation,  Sdf.ValueTypeNames.Float)
+        _set("anacapa:sky:sun_azimuth",    sky_settings.sky_sun_azimuth,    Sdf.ValueTypeNames.Float)
+        _set("anacapa:sky:sun_intensity",  sky_settings.sky_sun_intensity,  Sdf.ValueTypeNames.Float)
+        _set("anacapa:sky:sun_disc_size",  sky_settings.sky_sun_disc_size,  Sdf.ValueTypeNames.Float)
+        _set("anacapa:sky:altitude",       sky_settings.sky_altitude,       Sdf.ValueTypeNames.Float)
+        _set("anacapa:sky:air_density",    sky_settings.sky_air_density,    Sdf.ValueTypeNames.Float)
+        _set("anacapa:sky:dust_density",   sky_settings.sky_dust_density,   Sdf.ValueTypeNames.Float)
+        _set("anacapa:sky:ozone_density",  sky_settings.sky_ozone_density,  Sdf.ValueTypeNames.Float)
+        _set("anacapa:sky:transparent_bg", int(sky_settings.sky_transparent_bg), Sdf.ValueTypeNames.Int)
+        patched += 1
+
+    if patched:
+        stage.GetRootLayer().Save()
+        log(f"  [sky] Nishita sky attributes written to {patched} DomeLight prim(s).")
+    else:
+        log("  [sky] Warning: no DomeLight prim found — sky will not be active.")
+
+
+def post_process_usd(usd_path, sky_texture="", shutter_close=0.0, disable_dof=False,
+                     sky_settings=None):
     """
     Run USD post-processing steps after Blender's USD exporter has written
     the file.  Patches the DomeLight texture, injects MaterialX textures,
     exports per-material .mtlx files, and writes the JSON sidecar.
 
-    usd_path    — absolute path to the exported .usdc/.usda file.
-    sky_texture — optional path to an equirectangular HDRI to use as the
-                  DomeLight texture instead of whatever Blender exported.
-    disable_dof — when True, zero out all camera fStop values (pinhole camera).
+    usd_path     — absolute path to the exported .usdc/.usda file.
+    sky_texture  — optional path to an equirectangular HDRI to use as the
+                   DomeLight texture instead of whatever Blender exported.
+    disable_dof  — when True, zero out all camera fStop values (pinhole camera).
+    sky_settings — when set, writes anacapa:sky:* attributes to the DomeLight
+                   prim so USDLoader constructs a Nishita SkyLight instead of
+                   loading an HDRI.  Expects an AnacapaRenderSettings object.
     """
     if not os.path.exists(usd_path):
         return
@@ -6036,6 +6090,8 @@ def post_process_usd(usd_path, sky_texture="", shutter_close=0.0, disable_dof=Fa
     _patch_dome_light_texture(usd_path, out_dir, explicit_sky=sky_texture)
     if disable_dof:
         _patch_camera_no_dof(usd_path)
+    if sky_settings is not None:
+        _inject_sky_params(usd_path, sky_settings)
     _inject_materialx_textures(usd_path)
     _inject_caustic_flags(usd_path)
     _inject_sss_params(usd_path)

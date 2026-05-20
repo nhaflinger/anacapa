@@ -34,6 +34,10 @@ struct PixelAccumulator {
     std::atomic<float> sumLumSq{0.f};
     std::atomic<uint32_t> count{0};  // reserved / unused
 
+    // Alpha channel — weighted sum of per-sample alpha values.
+    // Resolved as alpha / weight.  Only written when Film::hasAlpha() is true.
+    std::atomic<float> alpha{0.f};
+
 #ifndef __CUDACC__
     void add(float fr, float fg, float fb, float w = 1.f) {
         r.fetch_add(fr * w, std::memory_order_relaxed);
@@ -70,7 +74,7 @@ struct PixelAccumulator {
 // ---------------------------------------------------------------------------
 struct TileBuffer {
     struct Sample {
-        float r = 0.f, g = 0.f, b = 0.f, weight = 0.f;
+        float r = 0.f, g = 0.f, b = 0.f, weight = 0.f, alpha = 0.f;
     };
 
     // Denoising AOV sample — clamped average, not weighted sum
@@ -102,6 +106,10 @@ struct TileBuffer {
 
     void add(uint32_t localX, uint32_t localY, Spectrum s, float w = 1.f) {
         add(localX, localY, s.x, s.y, s.z, w);
+    }
+
+    void addAlpha(uint32_t localX, uint32_t localY, float a, float w = 1.f) {
+        pixels[localY * width + localX].alpha += a * w;
     }
 
     // Record denoising AOVs (averaged, not splatted — only first hit per ray)
@@ -169,6 +177,12 @@ public:
     bool writeEXR(const std::string& path,
                   const DenoiseOptions& opts = {}) const;
 
+    // Enable alpha channel.  When set, TileBuffer::addAlpha() contributions are
+    // merged and written as the "A" channel in writeEXR().  Primary camera rays
+    // that hit transparent-background sky get alpha=0; geometry hits get alpha=1.
+    void setHasAlpha(bool v) { m_hasAlpha = v; }
+    bool hasAlpha()    const { return m_hasAlpha; }
+
     // Write a display-referred PNG/JPEG with ACES filmic tone mapping +
     // sRGB gamma. exposure: EV adjustment applied before tone mapping (0 = none).
     bool writePNG(const std::string& path, float exposure = 0.f) const;
@@ -204,6 +218,7 @@ private:
 
     // Set whenever mergeTile() completes; cleared by the preview watcher
     std::atomic<bool> m_dirty{false};
+    bool m_hasAlpha = false;
 
     bool inBounds(int x, int y) const {
         return x >= 0 && x < static_cast<int>(m_width)

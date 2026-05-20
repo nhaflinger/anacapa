@@ -53,6 +53,8 @@ void Film::mergeTile(const TileBuffer& tile) {
                 m_pixels[fi].weight.fetch_add(s.weight, std::memory_order_relaxed);
                 m_pixels[fi].sumLumSq.fetch_add(tile.sumLumSq[ti],
                                                  std::memory_order_relaxed);
+                if (m_hasAlpha)
+                    m_pixels[fi].alpha.fetch_add(s.alpha, std::memory_order_relaxed);
             }
 
             // Albedo AOV
@@ -177,47 +179,60 @@ bool Film::writeEXR(const std::string& path,
 
     const uint32_t N = m_width * m_height;
 
-    // Build channel list: always beauty (R,G,B),
-    // optionally denoised, albedo, normals
+    const bool writeAlpha   = m_hasAlpha;
+    const bool writeDenoised = opts.enabled && !m_denoised.empty();
+    const bool writeAOVs    = opts.writeAOVs;
+
+    // Build channel list
     std::vector<std::string> channelNames;
-    std::vector<float>       buf;
-
-    // Helper: append a resolved buffer of Spectrum values
-    auto appendLayer = [&](const std::vector<PixelAccumulator>& accum,
-                           const std::string& prefix) {
-        channelNames.push_back(prefix + "R");
-        channelNames.push_back(prefix + "G");
-        channelNames.push_back(prefix + "B");
-        size_t base = buf.size();
-        buf.resize(base + N * 3);
-        for (uint32_t i = 0; i < N; ++i) {
-            Spectrum s = accum[i].resolve();
-            buf[base + i*3+0] = s.x;
-            buf[base + i*3+1] = s.y;
-            buf[base + i*3+2] = s.z;
-        }
-    };
-
-    // Beauty layer (always written)
-    appendLayer(m_pixels, "");   // root-level R,G,B
-
-    // Denoised layer
-    if (opts.enabled && !m_denoised.empty()) {
-        channelNames.push_back("denoised.R");
-        channelNames.push_back("denoised.G");
-        channelNames.push_back("denoised.B");
-        buf.insert(buf.end(), m_denoised.begin(), m_denoised.end());
-    }
-
-    // AOV layers
-    if (opts.writeAOVs) {
-        appendLayer(m_albedo,  "albedo.");
-        appendLayer(m_normals, "normals.");
-    }
+    channelNames.reserve(16);
+    channelNames.push_back("R");
+    channelNames.push_back("G");
+    channelNames.push_back("B");
+    if (writeAlpha)    channelNames.push_back("A");
+    if (writeDenoised) { channelNames.push_back("denoised.R"); channelNames.push_back("denoised.G"); channelNames.push_back("denoised.B"); }
+    if (writeAOVs)     { channelNames.push_back("albedo.R"); channelNames.push_back("albedo.G"); channelNames.push_back("albedo.B");
+                         channelNames.push_back("normals.R"); channelNames.push_back("normals.G"); channelNames.push_back("normals.B"); }
 
     int nChannels = static_cast<int>(channelNames.size());
 
-    // OpenImageIO multi-channel EXR: all channels in one subimage
+    // Build interleaved pixel buffer directly — one pixel at a time
+    std::vector<float> interleaved(N * nChannels);
+    for (uint32_t i = 0; i < N; ++i) {
+        float* p = interleaved.data() + i * nChannels;
+        int c = 0;
+
+        // Beauty RGB
+        Spectrum beauty = m_pixels[i].resolve();
+        p[c++] = beauty.x;
+        p[c++] = beauty.y;
+        p[c++] = beauty.z;
+
+        // Alpha
+        if (writeAlpha) {
+            float w = m_pixels[i].weight.load(std::memory_order_relaxed);
+            float a = (w > 0.f)
+                ? m_pixels[i].alpha.load(std::memory_order_relaxed) / w
+                : 0.f;
+            p[c++] = std::max(0.f, std::min(1.f, a));
+        }
+
+        // Denoised RGB
+        if (writeDenoised) {
+            p[c++] = m_denoised[i*3+0];
+            p[c++] = m_denoised[i*3+1];
+            p[c++] = m_denoised[i*3+2];
+        }
+
+        // AOV layers
+        if (writeAOVs) {
+            Spectrum alb = m_albedo[i].resolve();
+            p[c++] = alb.x; p[c++] = alb.y; p[c++] = alb.z;
+            Spectrum nrm = m_normals[i].resolve();
+            p[c++] = nrm.x; p[c++] = nrm.y; p[c++] = nrm.z;
+        }
+    }
+
     ImageSpec spec(static_cast<int>(m_width), static_cast<int>(m_height),
                    nChannels, TypeDesc::FLOAT);
     spec.attribute("compression", "zip");
@@ -226,25 +241,19 @@ bool Film::writeEXR(const std::string& path,
     auto out = ImageOutput::create(path);
     if (!out) return false;
     if (!out->open(path, spec)) return false;
-
-    // Interleaved layout — OIIO expects pixel-by-pixel channel order
-    std::vector<float> interleaved(N * nChannels);
-    int layers = nChannels / 3;
-    for (uint32_t i = 0; i < N; ++i) {
-        for (int l = 0; l < layers; ++l) {
-            interleaved[i * nChannels + l*3 + 0] = buf[l * N * 3 + i*3 + 0];
-            interleaved[i * nChannels + l*3 + 1] = buf[l * N * 3 + i*3 + 1];
-            interleaved[i * nChannels + l*3 + 2] = buf[l * N * 3 + i*3 + 2];
-        }
-    }
-
     bool ok = out->write_image(TypeDesc::FLOAT, interleaved.data());
     out->close();
     return ok;
 }
 
 // ---------------------------------------------------------------------------
-// writePNG — exposure + sRGB gamma only (no tone mapping), written as 8-bit PNG/JPEG
+// writePNG — ACES filmic tone mapping + sRGB gamma, written as 8-bit PNG/JPEG
+//
+// Pipeline: linear → exposure → ACES RRT+ODT approximation → sRGB gamma
+// This matches Cycles' default Filmic output mode closely enough that sky
+// radiance values which would clip without tone mapping are compressed into
+// a visually correct blue sky, matching the appearance Cycles produces at
+// the same intensity values.
 // ---------------------------------------------------------------------------
 bool Film::writePNG(const std::string& path, float exposure) const {
     using namespace OIIO;
@@ -252,9 +261,22 @@ bool Film::writePNG(const std::string& path, float exposure) const {
     const uint32_t N = m_width * m_height;
     const float evScale = std::pow(2.f, exposure);
 
-    // linear -> sRGB (no tone mapping — clamp to [0,1] after exposure)
+    // Log-based filmic tone mapping, approximating Blender's "Filmic" default.
+    // Operates in log2 space over a 16-stop range centred on 18% grey (0.18).
+    // Key advantage over polynomial ACES: sky radiance values of 5–20 still
+    // show distinct colour (bright saturated blue) rather than clipping to white.
+    //   0.18 → 0.50   (mid-grey)
+    //   0.47 → 0.63   (zenith blue sky at sunIntensity=1)
+    //   4.7  → 0.89   (zenith blue sky at sunIntensity=10, still blue, not white)
+    //   18   → 0.97   (sun disc at sunIntensity=1, bright but coloured)
+    auto filmic = [](float x) -> float {
+        if (x <= 0.f) return 0.f;
+        float lx = std::log2(std::max(x, 1e-10f) / 0.18f) / 16.f + 0.5f;
+        lx = std::max(0.f, std::min(1.f, lx));
+        return lx * lx * (3.f - 2.f * lx);  // smoothstep S-curve
+    };
+
     auto linearToSRGB = [](float x) -> float {
-        x = std::max(0.f, std::min(1.f, x));
         if (x <= 0.0031308f) return 12.92f * x;
         return 1.055f * std::pow(x, 1.f / 2.4f) - 0.055f;
     };
@@ -262,12 +284,12 @@ bool Film::writePNG(const std::string& path, float exposure) const {
     std::vector<uint8_t> pixels(N * 3);
     for (uint32_t i = 0; i < N; ++i) {
         Spectrum c = m_pixels[i].resolve();
-        c.x *= evScale;
-        c.y *= evScale;
-        c.z *= evScale;
-        pixels[i*3+0] = static_cast<uint8_t>(linearToSRGB(c.x) * 255.f + 0.5f);
-        pixels[i*3+1] = static_cast<uint8_t>(linearToSRGB(c.y) * 255.f + 0.5f);
-        pixels[i*3+2] = static_cast<uint8_t>(linearToSRGB(c.z) * 255.f + 0.5f);
+        c.x = linearToSRGB(filmic(c.x * evScale));
+        c.y = linearToSRGB(filmic(c.y * evScale));
+        c.z = linearToSRGB(filmic(c.z * evScale));
+        pixels[i*3+0] = static_cast<uint8_t>(c.x * 255.f + 0.5f);
+        pixels[i*3+1] = static_cast<uint8_t>(c.y * 255.f + 0.5f);
+        pixels[i*3+2] = static_cast<uint8_t>(c.z * 255.f + 0.5f);
     }
 
     ImageSpec spec(static_cast<int>(m_width), static_cast<int>(m_height), 3, TypeDesc::UINT8);

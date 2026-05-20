@@ -176,6 +176,58 @@ class ANACAPA_PT_lighting(bpy.types.Panel):
 
 
 # ---------------------------------------------------------------------------
+# Sky — Nishita physical sky subpanel (child of Lighting)
+# ---------------------------------------------------------------------------
+
+class ANACAPA_PT_sky(bpy.types.Panel):
+    bl_label       = "Nishita Sky"
+    bl_space_type  = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context     = "render"
+    bl_parent_id   = 'ANACAPA_PT_lighting'
+    bl_options     = {'DEFAULT_CLOSED'}
+    COMPAT_ENGINES = {'ANACAPA'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.engine == 'ANACAPA'
+
+    def draw_header(self, context):
+        self.layout.prop(context.scene.anacapa, "use_sky", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        s = context.scene.anacapa
+        layout.use_property_split = True
+        layout.active = s.use_sky
+
+        if s.use_sky and s.env_path:
+            row = layout.row()
+            row.alert = True
+            row.label(text="Sky overrides the HDRI env map above.", icon='INFO')
+
+        col = layout.column(align=True)
+        col.prop(s, "sky_sun_elevation")
+        col.prop(s, "sky_sun_azimuth")
+
+        layout.separator()
+        col = layout.column(align=True)
+        col.prop(s, "sky_sun_intensity")
+        col.prop(s, "sky_sun_disc_size")
+        col.prop(s, "sky_altitude")
+
+        layout.separator()
+        layout.prop(s, "sky_transparent_bg")
+
+        layout.separator()
+        layout.label(text="Atmosphere:")
+        col = layout.column(align=True)
+        col.prop(s, "sky_air_density")
+        col.prop(s, "sky_dust_density")
+        col.prop(s, "sky_ozone_density")
+
+
+# ---------------------------------------------------------------------------
 # Depth of Field & Motion Blur
 # ---------------------------------------------------------------------------
 
@@ -304,6 +356,7 @@ _classes = [
     ANACAPA_PT_hair,
     ANACAPA_PT_particles,
     ANACAPA_PT_lighting,
+    ANACAPA_PT_sky,
     ANACAPA_PT_camera,
     ANACAPA_PT_output,
     ANACAPA_PT_material,

@@ -19,6 +19,8 @@
 #include "../shading/lights/AreaLight.h"
 #include "../shading/lights/DirectionalLight.h"
 #include "../shading/lights/DomeLight.h"
+#include "../sky/SkyConfig.h"
+#include "../sky/SkyLight.h"
 
 #ifdef ANACAPA_ENABLE_USD
 #  include "../scene/usd/USDLoader.h"
@@ -743,8 +745,40 @@ void RenderSession::render() {
                      m_settings.envPath, m_settings.envIntensity);
     }
 
+    // Nishita sky — overrides DomeLight (and --env) when --sky is specified.
+    if (!m_settings.skyConfigPath.empty()) {
+        SkyConfig cfg = loadSkyConfig(m_settings.skyConfigPath);
+        if (cfg.enabled) {
+            // Evict any existing envLight (USD DomeLight or --env override).
+            if (m_scene.envLight) {
+                auto* old = m_scene.envLight;
+                m_scene.lights.erase(
+                    std::remove(m_scene.lights.begin(), m_scene.lights.end(), old),
+                    m_scene.lights.end());
+                m_lights.erase(
+                    std::remove_if(m_lights.begin(), m_lights.end(),
+                        [old](const auto& p){ return p.get() == old; }),
+                    m_lights.end());
+                m_scene.envLight = nullptr;
+            }
+
+            BBox3f bounds = computeSceneBounds(m_geomPool);
+            float radius  = bounds.valid()
+                ? bounds.diagonal().length() * 0.5f * 2.f : 10.f;
+            Vec3f center  = bounds.valid() ? bounds.centroid() : Vec3f{};
+
+            auto sky = std::make_unique<SkyLight>(cfg.params, radius, center);
+            m_scene.envLight = sky.get();
+            m_scene.lights.push_back(sky.get());
+            m_lights.push_back(std::move(sky));
+        }
+    }
+
     m_film = std::make_unique<Film>(m_settings.imageWidth,
                                     m_settings.imageHeight);
+    // Enable alpha channel when the sky uses transparent background
+    if (m_scene.envLight && m_scene.envLight->transparentBg())
+        m_film->setHasAlpha(true);
 
 #ifdef ANACAPA_ENABLE_METAL
     if (m_settings.gpuAssist) {
