@@ -127,6 +127,47 @@ public:
     void setSceneRadius(float r) { m_sceneRadius = r; }
     void setSceneCenter(Vec3f c) { m_sceneCenter = c; }
 
+    // -----------------------------------------------------------------------
+    // GPU support — bake sky to an equirectangular RGBA32F texture and expose
+    // CDF tables in the same format as DomeLight (for upload to Metal / CUDA).
+    // -----------------------------------------------------------------------
+    uint32_t texWidth()  const { return static_cast<uint32_t>(kResU); }
+    uint32_t texHeight() const { return static_cast<uint32_t>(kResV); }
+
+    // Returns kResU*kResV RGBA32F pixels, row-major, theta=0 at row 0 (+Y).
+    std::vector<float> bakeRGBA() const {
+        std::vector<float> out(static_cast<size_t>(kResU) * kResV * 4);
+        for (int r = 0; r < kResV; ++r) {
+            float v     = (r + 0.5f) / static_cast<float>(kResV);
+            float theta = v * kPi;
+            float sinT  = std::sin(theta), cosT = std::cos(theta);
+            for (int c = 0; c < kResU; ++c) {
+                float uu  = (c + 0.5f) / static_cast<float>(kResU);
+                float phi = uu * k2Pi;
+                Vec3f d   = { sinT * std::sin(phi), cosT, sinT * std::cos(phi) };
+                Spectrum L = m_sky.evaluate(d);
+                size_t idx = static_cast<size_t>(r * kResU + c) * 4;
+                out[idx+0] = L.x;
+                out[idx+1] = L.y;
+                out[idx+2] = L.z;
+                out[idx+3] = 1.f;
+            }
+        }
+        return out;
+    }
+
+    // Marginal CDF: (kResV+1) floats, same format as DomeLight::marginalCdf().
+    const std::vector<float>& marginalCdf() const { return m_marginal.cdf; }
+
+    // Conditional CDFs packed row-major: kResV rows × (kResU+1) floats each.
+    std::vector<float> flatConditionalCdf() const {
+        std::vector<float> result;
+        result.reserve(static_cast<size_t>(kResV) * (kResU + 1));
+        for (const auto& d : m_conditional)
+            result.insert(result.end(), d.cdf.begin(), d.cdf.end());
+        return result;
+    }
+
 private:
     // -----------------------------------------------------------------------
     // Precomputed 2D luminance distribution (lat-long grid)

@@ -22,6 +22,7 @@
 #include "../../shading/lights/AreaLight.h"
 #include "../../shading/lights/DirectionalLight.h"
 #include "../../shading/lights/DomeLight.h"
+#include "../../sky/SkyLight.h"
 
 #include <cuda_runtime.h>
 
@@ -1044,6 +1045,7 @@ bool CudaPathIntegrator::Impl::renderFrameWavefront(
                 float w = p.weight > 0.f ? p.weight : 1.f;
                 tb.add(px, py, p.r / w, p.g / w, p.b / w, w);
                 tb.addLumSq(px, py, p.sumLumSq);
+                tb.addAlpha(px, py, p.alpha / w, w);
             }
         }
         film.mergeTile(tb);
@@ -1183,6 +1185,7 @@ void CudaPathIntegrator::Impl::renderTileWavefront(
             float w = p.weight > 0.f ? p.weight : 1.f;
             out.add(tx, ty, p.r / w, p.g / w, p.b / w, w);
             out.addLumSq(tx, ty, p.sumLumSq);
+            out.addAlpha(tx, ty, p.alpha / w, w);
         }
     }
 }
@@ -1370,6 +1373,49 @@ void CudaPathIntegrator::prepare(const SceneView& scene) {
         m_impl->envCdfHeight = static_cast<uint32_t>(eh);
 
         printf("[info]  CudaPathIntegrator: uploaded %dx%d HDRI env texture + CDF tables\n", ew, eh);
+    } else {
+        // Check for a Nishita SkyLight — bake to equirectangular RGBA32F
+        const SkyLight* skyLight = nullptr;
+        if (scene.envLight)
+            skyLight = dynamic_cast<const SkyLight*>(scene.envLight);
+        if (skyLight) {
+            uint32_t ew = skyLight->texWidth(), eh = skyLight->texHeight();
+            std::vector<float> rgba = skyLight->bakeRGBA();
+
+            cudaChannelFormatDesc fmt = cudaCreateChannelDesc<float4>();
+            CUDA_CHECK(cudaMallocArray(&m_impl->envArray, &fmt, ew, eh));
+            CUDA_CHECK(cudaMemcpy2DToArray(m_impl->envArray, 0, 0,
+                                            rgba.data(), ew * 4 * sizeof(float),
+                                            ew * 4 * sizeof(float), eh,
+                                            cudaMemcpyHostToDevice));
+            cudaResourceDesc resDesc{};
+            resDesc.resType         = cudaResourceTypeArray;
+            resDesc.res.array.array = m_impl->envArray;
+            cudaTextureDesc texDesc{};
+            texDesc.addressMode[0]   = cudaAddressModeWrap;
+            texDesc.addressMode[1]   = cudaAddressModeClamp;
+            texDesc.filterMode       = cudaFilterModeLinear;
+            texDesc.readMode         = cudaReadModeElementType;
+            texDesc.normalizedCoords = 1;
+            CUDA_CHECK(cudaCreateTextureObject(&m_impl->envTex, &resDesc, &texDesc, nullptr));
+
+            // Sky is in world space — identity rotation
+            m_impl->envRot[0]    = {1.f, 0.f, 0.f};
+            m_impl->envRot[1]    = {0.f, 1.f, 0.f};
+            m_impl->envRot[2]    = {0.f, 0.f, 1.f};
+            m_impl->envIntensity = 1.f;
+
+            const auto& margCdf = skyLight->marginalCdf();
+            const auto  condCdf = skyLight->flatConditionalCdf();
+            m_impl->d_envMarginalCdf = CudaBuffer<float>(margCdf.size());
+            m_impl->d_envMarginalCdf.upload(margCdf);
+            m_impl->d_envConditionalCdf = CudaBuffer<float>(condCdf.size());
+            m_impl->d_envConditionalCdf.upload(condCdf);
+            m_impl->envCdfWidth  = ew;
+            m_impl->envCdfHeight = eh;
+
+            printf("[info]  CudaPathIntegrator: baked %dx%d Nishita sky texture + CDF tables\n", ew, eh);
+        }
     }
 
     printf("[info]  CudaPathIntegrator::prepare - %u materials, %u lights, %zu verts, %zu tris\n",
@@ -1464,6 +1510,7 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.cam.fireflyClamp  = fireflyClamp;
     p.cam.hairMeshBaseID = hairMeshBaseID;
     p.cam.numHalos       = numHalos;
+    p.cam.transparentBg  = (scene.envLight && scene.envLight->transparentBg()) ? 1u : 0u;
     p.specAlbedoLUT     = d_specAlbedoLUT.isValid()    ? d_specAlbedoLUT.ptr()    : nullptr;
     p.specAvgAlbedoLUT  = d_specAvgAlbedoLUT.isValid() ? d_specAvgAlbedoLUT.ptr() : nullptr;
     p.specLUTCosBins    = specLUTCosBins;

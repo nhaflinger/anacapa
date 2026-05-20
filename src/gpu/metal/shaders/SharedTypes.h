@@ -259,7 +259,8 @@ struct GpuCameraParams {
     // buffers 27/28/29 hold GpuHaloDesc[], GpuHaloNode[], uint32_t[] primIdx.
     // 0 when no particles are in the scene (buffers are nil; not accessed).
     uint32_t  numHalos;
-    uint32_t  _halo_pad[3];
+    uint32_t  transparentBg;  // 1 = sky transparent at bounce 0 (compositing)
+    uint32_t  _halo_pad[2];
 };
 
 // ---------------------------------------------------------------------------
@@ -269,6 +270,8 @@ struct GpuCameraParams {
 struct GpuAccumPixel {
     float r, g, b, weight;
     float sumLumSq;  // sum(luminance(sample)^2) — needed for variance-based adaptive sampling
+    float alpha;     // sum of per-sample alpha weights (0=transparent sky, fw=opaque)
+    float _pad;
 };
 
 // ---------------------------------------------------------------------------

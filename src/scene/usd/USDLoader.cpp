@@ -2260,14 +2260,21 @@ LoadedScene loadUSD(const std::string& path,
             GfVec3f color{1.f, 1.f, 1.f};
             lightAPI.GetColorAttr().Get(&color);
 
+            // Blender exports normalize=true with intensity = energy/π (same convention
+            // as area lights).  For a directional light there is no area factor to cancel
+            // the π, so we must multiply by π to recover the irradiance (W/m²).
+            bool normalize = false;
+            lightAPI.GetNormalizeAttr().Get(&normalize);
+            float leScale = normalize ? 3.14159265f : 1.f;
+
             // DistantLight emits along -Z local; dirToLight = +Z local in world
             Vec3f lightPos  = transformPoint(xform, GfVec3d(0, 0, 0), zUp);
             Vec3f lightPosZ = transformPoint(xform, GfVec3d(0, 0, 1), zUp);
             Vec3f dirToLight = safeNormalize(lightPosZ - lightPos);
 
-            Spectrum Le = { color[0] * intensity,
-                            color[1] * intensity,
-                            color[2] * intensity };
+            Spectrum Le = { color[0] * intensity * leScale,
+                            color[1] * intensity * leScale,
+                            color[2] * intensity * leScale };
 
             // Bounds needed for disk placement — use placeholder; updated below
             auto light = std::make_unique<DirectionalLight>(
@@ -2275,9 +2282,9 @@ LoadedScene loadUSD(const std::string& path,
             result.sceneView.lights.push_back(light.get());
             result.lights.push_back(std::move(light));
 
-            spdlog::info("USDLoader: distantLight '{}' dir=({:.2f},{:.2f},{:.2f}) intensity={:.2f}",
+            spdlog::info("USDLoader: distantLight '{}' dir=({:.2f},{:.2f},{:.2f}) intensity={:.2f} normalize={}",
                          prim.GetPath().GetString(),
-                         dirToLight.x, dirToLight.y, dirToLight.z, intensity);
+                         dirToLight.x, dirToLight.y, dirToLight.z, intensity, normalize);
         }
 
         // ---- DomeLight or Nishita sky ----

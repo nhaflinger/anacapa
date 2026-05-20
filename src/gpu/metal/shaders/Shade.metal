@@ -1184,6 +1184,7 @@ kernel void shade(
     float3 batchL      = float3(0.0f);
     float  batchLumSq  = 0.0f;
     float  batchWeight = 0.0f;
+    float  batchAlpha  = 0.0f;
 
     for (uint s = 0; s < batch.batchSize; ++s) {
         uint sampleIndex = batch.sampleStart + s;
@@ -1223,6 +1224,7 @@ kernel void shade(
         float3 throughput  = float3(1.0f);
         float3 L           = float3(0.0f);
         uint   glassDepth  = 0;
+        bool   primaryMissedSky = false;
         // MIS state: track BSDF PDF of the ray that spawned the current vertex.
         // prevWasDelta=true on first hit so emitter Le gets full weight (no NEE conflict).
         float  prevBsdfPdf  = 0.0f;
@@ -1275,10 +1277,14 @@ kernel void shade(
 
         if (res.type == intersection_type::none) {
             // Background / env light — apply MIS weight against NEE dome-sampling PDF.
+            // Straight alpha: sky color always accumulates into RGB; transparentBg
+            // only controls alpha (tracked via primaryMissedSky, not RGB suppression).
             float3 envColor = float3(0.0f);
             if (cam.hasEnvLight) {
                 envColor = evalEnvmap(r.direction, cam, envTexture);
             }
+            if (cam.transparentBg && bounce == 0)
+                primaryMissedSky = true;
             if (envColor.x > 0.0f || envColor.y > 0.0f || envColor.z > 0.0f) {
                 float weight = 1.0f;
                 if (!prevWasDelta && bounce > 0) {
@@ -1726,6 +1732,7 @@ kernel void shade(
         batchWeight += fw;
         float lum = 0.2126f * L.x + 0.7152f * L.y + 0.0722f * L.z;
         batchLumSq += lum * lum;
+        batchAlpha  += primaryMissedSky ? 0.0f : fw;
 
     }  // end sample batch loop
 
@@ -1736,6 +1743,7 @@ kernel void shade(
     px_out.b        += batchL.z;
     px_out.weight   += batchWeight;
     px_out.sumLumSq += batchLumSq;
+    px_out.alpha    += batchAlpha;
 }
 
 // ---------------------------------------------------------------------------

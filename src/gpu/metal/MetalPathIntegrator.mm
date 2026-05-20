@@ -22,6 +22,7 @@
 #include "../../shading/lights/AreaLight.h"
 #include "../../shading/lights/DirectionalLight.h"
 #include "../../shading/lights/DomeLight.h"
+#include "../../sky/SkyLight.h"
 
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
@@ -889,6 +890,52 @@ void MetalPathIntegrator::prepare(const SceneView& scene) {
         }
 
         spdlog::info("MetalPathIntegrator: uploaded {}x{} HDRI env texture + CDF tables", ew, eh);
+    } else {
+        // Check for a Nishita SkyLight — bake to equirectangular RGBA32F
+        const SkyLight* skyLight = nullptr;
+        if (scene.envLight)
+            skyLight = dynamic_cast<const SkyLight*>(scene.envLight);
+        if (skyLight) {
+            uint32_t ew = skyLight->texWidth();
+            uint32_t eh = skyLight->texHeight();
+            std::vector<float> rgba = skyLight->bakeRGBA();
+
+            MTLTextureDescriptor* td = [MTLTextureDescriptor
+                texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
+                width:ew height:eh mipmapped:NO];
+            td.usage       = MTLTextureUsageShaderRead;
+            td.storageMode = MTLStorageModeShared;
+
+            id<MTLTexture> tex = [dev newTextureWithDescriptor:td];
+            [tex replaceRegion:MTLRegionMake2D(0, 0, ew, eh)
+                  mipmapLevel:0
+                    withBytes:rgba.data()
+                  bytesPerRow:ew * 4 * sizeof(float)];
+            m_impl->envTexture = tex;
+
+            // Sky is in world space — no rotation needed
+            m_impl->envRot[0]    = {1.f, 0.f, 0.f};
+            m_impl->envRot[1]    = {0.f, 1.f, 0.f};
+            m_impl->envRot[2]    = {0.f, 0.f, 1.f};
+            m_impl->envIntensity = 1.f;
+
+            // Upload importance sampling CDF tables
+            {
+                const auto& margCdf = skyLight->marginalCdf();
+                m_impl->envMarginalCdfBuf = [dev newBufferWithBytes:margCdf.data()
+                                                             length:margCdf.size() * sizeof(float)
+                                                            options:MTLResourceStorageModeShared];
+
+                auto condCdf = skyLight->flatConditionalCdf();
+                m_impl->envConditionalCdfBuf = [dev newBufferWithBytes:condCdf.data()
+                                                                length:condCdf.size() * sizeof(float)
+                                                               options:MTLResourceStorageModeShared];
+                m_impl->envCdfWidth  = ew;
+                m_impl->envCdfHeight = eh;
+            }
+
+            spdlog::info("MetalPathIntegrator: baked {}x{} Nishita sky texture + CDF tables", ew, eh);
+        }
     }
 
     // GGX energy-compensation LUTs — uploaded once, reused across renders.
@@ -1017,6 +1064,7 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     camParams.pixelFilterRadius = m_impl->pixelFilterRadius;
     camParams.hairMeshBaseID    = m_impl->hairMeshBaseID;
     camParams.numHalos          = m_impl->numHalos;
+    camParams.transparentBg     = (scene.envLight && scene.envLight->transparentBg()) ? 1u : 0u;
     camParams.photonMapEnabled  = m_impl->photonMapEnabled && (m_impl->validPhotons > 0) ? 1u : 0u;
     camParams.photonSearchRadius = m_impl->photonSearchRadius;
     camParams.hashGridOrigin    = m_impl->hashGridOrigin;
@@ -1072,6 +1120,7 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
                 float w = p.weight > 0.f ? p.weight : 1.f;
                 tb.add(px, py, p.r / w, p.g / w, p.b / w, w);
                 tb.addLumSq(px, py, p.sumLumSq);
+                tb.addAlpha(px, py, p.alpha / w, w);
             }
         }
         film.mergeTile(tb);
@@ -1233,6 +1282,7 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
     camParams.pixelFilterRadius = m_impl->pixelFilterRadius;
     camParams.hairMeshBaseID    = m_impl->hairMeshBaseID;
     camParams.numHalos          = m_impl->numHalos;
+    camParams.transparentBg     = (scene.envLight && scene.envLight->transparentBg()) ? 1u : 0u;
     camParams.photonMapEnabled  = m_impl->photonMapEnabled && (m_impl->validPhotons > 0) ? 1u : 0u;
     camParams.photonSearchRadius = m_impl->photonSearchRadius;
     camParams.hashGridOrigin    = m_impl->hashGridOrigin;
@@ -1388,6 +1438,7 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
             float w = p.weight > 0.f ? p.weight : 1.f;
             out.add(tx, ty, p.r / w, p.g / w, p.b / w, w);
             out.addLumSq(tx, ty, p.sumLumSq);
+            out.addAlpha(tx, ty, p.alpha / w, w);
         }
     }
 }

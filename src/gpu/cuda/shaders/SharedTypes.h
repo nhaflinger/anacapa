@@ -247,6 +247,8 @@ struct GpuCameraParams {
     uint32_t  sssHashDimX;
     uint32_t  sssHashDimY;
     uint32_t  sssHashDimZ;
+    uint32_t  transparentBg;  // 1 = sky transparent at bounce 0 (compositing)
+    uint32_t  _sky_pad[3];
 };
 
 // ---------------------------------------------------------------------------
@@ -255,6 +257,8 @@ struct GpuCameraParams {
 struct GpuAccumPixel {
     float r, g, b, weight;
     float sumLumSq;  // sum(luminance(sample)^2) — needed for variance-based adaptive sampling
+    float alpha;     // sum of per-sample alpha weights (0=transparent sky, fw=opaque)
+    float _pad;
 };
 
 
@@ -311,9 +315,10 @@ struct WfRayState {
 };
 
 enum : uint32_t {
-    kWfTerminated   = 1u << 0,
-    kWfPrevWasDelta = 1u << 1,
-    kWfCausticChain = 1u << 2,  // delta chain crossed a caustic-flagged surface
+    kWfTerminated    = 1u << 0,
+    kWfPrevWasDelta  = 1u << 1,
+    kWfCausticChain  = 1u << 2,  // delta chain crossed a caustic-flagged surface
+    kWfTransparentSky = 1u << 3, // bounce-0 primary ray hit transparent sky (alpha=0)
 };
 
 #endif // ANACAPA_CUDA_SHARED_TYPES_H

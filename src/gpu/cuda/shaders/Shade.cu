@@ -1565,9 +1565,13 @@ extern "C" __global__ void __raygen__wf_bounce()
 
     // ---- Miss ---------------------------------------------------------------
     if (!hit.valid) {
+        // Straight alpha: always evaluate env color for RGB; transparentBg
+        // only controls alpha (tracked via kWfTransparentSky flag).
         float3 envColor = make_float3(0.0f, 0.0f, 0.0f);
         if (params.cam.hasEnvLight && params.envTexture != 0)      envColor = evalEnvmap(rayDir);
         else if (params.cam.hasEnvLight)                            envColor = make3(params.cam.envLe);
+        if (params.cam.transparentBg && bounce == 0)
+            st.flags |= kWfTransparentSky;
         if (compmax(envColor) > 0.0f && !causticChain) {
             float weight = 1.0f;
             if (!prevWasDelta && bounce > 0) {
@@ -2048,4 +2052,6 @@ extern "C" __global__ void __raygen__wf_finalize()
     atomicAdd(&out.b,        L.z * fw);
     atomicAdd(&out.weight,   fw);
     atomicAdd(&out.sumLumSq, lum * lum);
+    float alphaContrib = (st.flags & kWfTransparentSky) ? 0.f : fw;
+    atomicAdd(&out.alpha,    alphaContrib);
 }

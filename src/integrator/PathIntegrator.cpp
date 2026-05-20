@@ -147,12 +147,6 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
         hit = scene.accel->trace(r);
 
         if (!hit.hit) {
-            // Primary camera ray escaped to sky: check transparent background
-            if (bounce == 0 && scene.envLight && scene.envLight->transparentBg()) {
-                outAlpha = 0.f;
-                break;
-            }
-
             // Background / environment light
             Spectrum bg = scene.envLight
                 ? scene.envLight->Le({}, {}, r.direction)
@@ -165,6 +159,9 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
                 }
                 L += beta * bg * weight;
             }
+            // Straight alpha: sky color stays in RGB; alpha=0 for compositing
+            if (bounce == 0 && scene.envLight && scene.envLight->transparentBg())
+                outAlpha = 0.f;
             break;
         }
 
