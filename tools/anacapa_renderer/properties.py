@@ -139,11 +139,16 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
         default=False,
     )
 
-    # Depth of field (overrides USD camera values when both are non-zero)
+    # Depth of field
+    use_dof: bpy.props.BoolProperty(
+        name="Enable DOF",
+        description="Export depth-of-field settings to Anacapa. When off, pinhole camera is used regardless of Blender camera settings",
+        default=False,
+    )
     fstop: bpy.props.FloatProperty(
-        name="F-Stop", description="0 = use USD camera value", default=0.0, min=0.0)
+        name="F-Stop", description="0 = use Blender camera value", default=0.0, min=0.0)
     focus_distance: bpy.props.FloatProperty(
-        name="Focus Distance", description="0 = use USD camera value", default=0.0, min=0.0)
+        name="Focus Distance", description="0 = use Blender camera value", default=0.0, min=0.0)
 
     # Motion blur
     use_motion_blur: bpy.props.BoolProperty(

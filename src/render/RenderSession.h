@@ -50,6 +50,7 @@ struct RenderSettings {
     // if USD also has none the camera falls back to pinhole.
     float          fStop         = 0.f;
     float          focusDistance = 0.f;
+    bool           noDof         = false;  // --no-dof: force pinhole regardless of USD camera
 
     // Frame to render (USD time code).  When frameSet=true, the USD loader
     // evaluates geometry transforms at this frame rather than the stage start.

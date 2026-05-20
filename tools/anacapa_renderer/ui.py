@@ -196,11 +196,14 @@ class ANACAPA_PT_camera(bpy.types.Panel):
         s = context.scene.anacapa
         layout.use_property_split = True
 
-        layout.label(text="Depth of Field")
-        layout.prop(s, "fstop")
+        row = layout.row()
+        row.prop(s, "use_dof", text="Depth of Field")
         col = layout.column()
-        col.active = s.fstop > 0
-        col.prop(s, "focus_distance")
+        col.active = s.use_dof
+        col.prop(s, "fstop")
+        sub = col.column()
+        sub.active = s.use_dof and s.fstop > 0
+        sub.prop(s, "focus_distance")
 
         layout.separator()
         row = layout.row()
@@ -242,8 +245,6 @@ class ANACAPA_PT_output(bpy.types.Panel):
 
         layout.separator()
         layout.operator("anacapa.export_scene", icon='EXPORT')
-        layout.separator()
-        layout.operator("anacapa.reload_addon", text="Reload Addon", icon='FILE_REFRESH')
 
 
 # ---------------------------------------------------------------------------

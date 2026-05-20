@@ -565,50 +565,8 @@ class ANACAPA_OT_bake_particles(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class ANACAPA_OT_reload_addon(bpy.types.Operator):
-    """Reload all Anacapa addon modules without reinstalling the zip"""
-    bl_idname = "anacapa.reload_addon"
-    bl_label  = "Reload Addon"
-
-    def execute(self, context):
-        import importlib
-        import sys
-        pkg = __name__.rsplit(".", 1)[0]
-
-        # Defer the actual reload — unregister() would destroy this operator's
-        # own class while it's still executing, crashing Blender.
-        def _do_reload():
-            top_mod = sys.modules.get(pkg)
-            if top_mod and hasattr(top_mod, 'unregister'):
-                try:
-                    top_mod.unregister()
-                except Exception as e:
-                    print(f"[Anacapa] Reload unregister warning: {e}")
-            for name in sorted(n for n in sys.modules if n.startswith(pkg + ".")):
-                try:
-                    importlib.reload(sys.modules[name])
-                except Exception as e:
-                    print(f"[Anacapa] Reload warning ({name}): {e}")
-            if top_mod:
-                try:
-                    importlib.reload(top_mod)
-                except Exception as e:
-                    print(f"[Anacapa] Reload warning ({pkg}): {e}")
-            top_mod = sys.modules.get(pkg)
-            if top_mod and hasattr(top_mod, 'register'):
-                try:
-                    top_mod.register()
-                except Exception as e:
-                    print(f"[Anacapa] Reload re-register warning: {e}")
-            print("[Anacapa] Addon reloaded.")
-
-        bpy.app.timers.register(_do_reload, first_interval=0.1)
-        self.report({'INFO'}, "Anacapa addon reloading…")
-        return {'FINISHED'}
-
-
 _classes = [ANACAPA_OT_launch_viewer, ANACAPA_OT_render, ANACAPA_OT_export_scene,
-            ANACAPA_OT_bake_particles, ANACAPA_OT_reload_addon]
+            ANACAPA_OT_bake_particles]
 
 
 def register():

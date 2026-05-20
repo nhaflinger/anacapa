@@ -185,24 +185,26 @@ void RenderSession::loadScene() {
         }
 
         // ---- Command-line DoF override --------------------------------------
-        // If --fstop and --focus-distance are both provided they take priority
-        // over whatever the USD camera specified. Applied after camera is set
-        // so it works for both USD cameras and the auto-camera below.
-        if (m_settings.fStop > 0.f && m_settings.focusDistance > 0.f
-                && m_scene.camera) {
+        // Applied after camera is set so it works for both USD cameras and the
+        // auto-camera below.
+        if (m_scene.camera) {
             Camera& cam = *m_scene.camera;
-            // Use the physical focal length stored on the camera (set by USDLoader
-            // from the raw USD focalLength attribute in scene units).  Fall back to
-            // a frustum-derived approximation only if the camera has no stored value
-            // (e.g. a synthetic auto-camera with no USD backing).
-            float focalLen = (cam.focalLength > 0.f)
-                             ? cam.focalLength
-                             : cam.vertical.length() * 0.5f;  // fallback: frustum half-height at unit depth
-            cam.apertureRadius = focalLen / (2.f * m_settings.fStop);
-            cam.focalDistance  = m_settings.focusDistance;
-            spdlog::info("DoF override: fStop={:.1f} focusDist={:.3f} focalLen={:.4f} apertureR={:.4f}",
-                         m_settings.fStop, m_settings.focusDistance,
-                         focalLen, cam.apertureRadius);
+            if (m_settings.noDof) {
+                // --no-dof: force pinhole regardless of USD camera settings.
+                cam.apertureRadius = 0.f;
+                cam.focalDistance  = 0.f;
+                spdlog::info("DoF disabled (--no-dof): camera forced to pinhole");
+            } else if (m_settings.fStop > 0.f && m_settings.focusDistance > 0.f) {
+                // --fstop + --focus-distance: override USD camera values.
+                float focalLen = (cam.focalLength > 0.f)
+                                 ? cam.focalLength
+                                 : cam.vertical.length() * 0.5f;
+                cam.apertureRadius = focalLen / (2.f * m_settings.fStop);
+                cam.focalDistance  = m_settings.focusDistance;
+                spdlog::info("DoF override: fStop={:.1f} focusDist={:.3f} focalLen={:.4f} apertureR={:.4f}",
+                             m_settings.fStop, m_settings.focusDistance,
+                             focalLen, cam.apertureRadius);
+            }
         }
 
         // ---- Motion blur shutter -------------------------------------------

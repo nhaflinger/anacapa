@@ -78,6 +78,8 @@ int main(int argc, char** argv) {
                    "Distance from camera to the focal plane in scene units. "
                    "Overrides the USD camera value if present.")
        ->default_val(0.f);
+    app.add_flag("--no-dof", settings.noDof,
+                 "Force pinhole camera — disables depth of field regardless of USD camera settings.");
 
     auto* frameOpt = app.add_option("--frame", settings.frameNumber,
                    "Frame to render (USD time code / Blender frame number). "

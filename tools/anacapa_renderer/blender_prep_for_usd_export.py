@@ -5995,7 +5995,29 @@ def _inject_halo_particles(usd_path, shutter_close=0.0):
     _halo_particle_stash = []
 
 
-def post_process_usd(usd_path, sky_texture="", shutter_close=0.0):
+def _patch_camera_no_dof(usd_path):
+    """Zero out fStop on all cameras in the USD file to force pinhole rendering."""
+    try:
+        from pxr import Usd, UsdGeom
+    except ImportError:
+        return
+    stage = Usd.Stage.Open(usd_path)
+    if not stage:
+        return
+    patched = 0
+    for prim in stage.Traverse():
+        if prim.GetTypeName() == "Camera":
+            cam = UsdGeom.Camera(prim)
+            fstop_attr = cam.GetFStopAttr()
+            if fstop_attr and fstop_attr.HasAuthoredValue():
+                fstop_attr.Set(0.0)
+                patched += 1
+    if patched:
+        stage.GetRootLayer().Save()
+        log(f"  [dof] Zeroed fStop on {patched} camera(s) — pinhole mode.")
+
+
+def post_process_usd(usd_path, sky_texture="", shutter_close=0.0, disable_dof=False):
     """
     Run USD post-processing steps after Blender's USD exporter has written
     the file.  Patches the DomeLight texture, injects MaterialX textures,
@@ -6004,6 +6026,7 @@ def post_process_usd(usd_path, sky_texture="", shutter_close=0.0):
     usd_path    — absolute path to the exported .usdc/.usda file.
     sky_texture — optional path to an equirectangular HDRI to use as the
                   DomeLight texture instead of whatever Blender exported.
+    disable_dof — when True, zero out all camera fStop values (pinhole camera).
     """
     if not os.path.exists(usd_path):
         return
@@ -6011,6 +6034,8 @@ def post_process_usd(usd_path, sky_texture="", shutter_close=0.0):
     out_dir = os.path.dirname(usd_path)
     _inject_halo_particles(usd_path, shutter_close=shutter_close)
     _patch_dome_light_texture(usd_path, out_dir, explicit_sky=sky_texture)
+    if disable_dof:
+        _patch_camera_no_dof(usd_path)
     _inject_materialx_textures(usd_path)
     _inject_caustic_flags(usd_path)
     _inject_sss_params(usd_path)

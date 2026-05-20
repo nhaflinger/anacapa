@@ -943,7 +943,10 @@ def export_usd(usd_path, context, run_prep=True, shutter_close=0.0):
 
         if prep is not None:
             try:
-                prep.post_process_usd(usd_path, shutter_close=shutter_close)
+                use_dof = getattr(
+                    getattr(bpy.context.scene, 'anacapa', None), 'use_dof', False)
+                prep.post_process_usd(usd_path, shutter_close=shutter_close,
+                                      disable_dof=not use_dof)
             except Exception as e:
                 print(f"[Anacapa] USD post-process warning: {e}")
 
@@ -1022,7 +1025,8 @@ def build_command(executable, usd_path, settings, width, height, output_path,
     if settings.override_materials:
         cmd.append("--override-materials")
 
-    if settings.fstop > 0 and settings.focus_distance > 0:
+    # use_dof=False: fStop already zeroed in USD by post_process_usd — nothing to pass
+    if getattr(settings, 'use_dof', False) and settings.fstop > 0 and settings.focus_distance > 0:
         cmd += ["--fstop", str(settings.fstop),
                 "--focus-distance", str(settings.focus_distance)]
 
