@@ -242,6 +242,8 @@ class ANACAPA_PT_output(bpy.types.Panel):
 
         layout.separator()
         layout.operator("anacapa.export_scene", icon='EXPORT')
+        layout.separator()
+        layout.operator("anacapa.reload_addon", text="Reload Addon", icon='FILE_REFRESH')
 
 
 # ---------------------------------------------------------------------------

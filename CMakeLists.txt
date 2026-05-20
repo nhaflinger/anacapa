@@ -242,6 +242,7 @@ set(_addon_py_files
     "${_addon_src_dir}/properties.py"
     "${_addon_src_dir}/ui.py"
     "${_addon_src_dir}/blender_prep_for_usd_export.py"
+    "${_addon_src_dir}/osl/anacapa_lib.h"
 )
 add_custom_command(
     OUTPUT  "${_addon_zip}"

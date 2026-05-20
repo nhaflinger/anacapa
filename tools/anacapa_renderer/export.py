@@ -898,21 +898,35 @@ def export_usd(usd_path, context, run_prep=True, shutter_close=0.0):
     was_suppressed = s["suppress_dirty"]
     s["suppress_dirty"] = True
     try:
+        # Always snapshot before any scene mutation — needed for both full prep
+        # and the lightweight GN realize that runs on every export.
+        scene_obj = bpy.context.scene
+        pre_objects = {
+            obj.name: (obj.hide_render, obj.hide_viewport)
+            for obj in scene_obj.objects
+        }
+
         if s["dirty_scene"] and prep is not None:
             print("[Anacapa] Running scene prep…")
             bake_dir = os.path.dirname(usd_path)
-            # Snapshot which objects exist and their render-visibility before prep
-            scene_obj = bpy.context.scene
-            pre_objects = {
-                obj.name: (obj.hide_render, obj.hide_viewport)
-                for obj in scene_obj.objects
-            }
             try:
                 prep.prepare_scene(bake_dir=bake_dir)
             except Exception as e:
                 print(f"[Anacapa] Scene prep warning: {e}")
-        elif not s["dirty_scene"] and s["dirty_transform"]:
-            print("[Anacapa] Transform-only change — skipping prep")
+        elif prep is not None:
+            # Not a full dirty render, but GN instances must still be realized
+            # on every export — _gn_realized objects are cleaned up after each
+            # render, so without this the GN generator exports as a USD
+            # PointInstancer which Anacapa cannot load.
+            if not s["dirty_scene"] and s["dirty_transform"]:
+                print("[Anacapa] Transform-only change — re-realizing GN instances")
+            else:
+                print("[Anacapa] Re-realizing GN instances for export")
+            try:
+                prep.realize_gn_instances()
+                prep.collect_halo_particles()
+            except Exception as e:
+                print(f"[Anacapa] GN realize warning: {e}")
 
         _usd_export(usd_path, context,
             export_animation=True,
@@ -927,22 +941,24 @@ def export_usd(usd_path, context, run_prep=True, shutter_close=0.0):
             overwrite_textures=False,
         )
 
-        if prep is not None and s["dirty_scene"]:
+        if prep is not None:
             try:
                 prep.post_process_usd(usd_path, shutter_close=shutter_close)
             except Exception as e:
                 print(f"[Anacapa] USD post-process warning: {e}")
 
-        # Restore scene: remove objects prep created, restore hide states
-        if s["dirty_scene"] and prep is not None:
+        # Always restore: remove objects prep/realize created, restore hide states
+        if prep is not None:
             scene_obj = bpy.context.scene
             for obj in list(scene_obj.objects):
                 if obj.name not in pre_objects:
                     bpy.data.objects.remove(obj, do_unlink=True)
                 else:
                     was_hr, was_hv = pre_objects[obj.name]
-                    if obj.hide_render != was_hr:
-                        obj.hide_render = was_hr
+                    is_gn_gen = obj.get("_anacapa_gn_hidden", False)
+                    target_hr = False if is_gn_gen else was_hr
+                    if obj.hide_render != target_hr:
+                        obj.hide_render = target_hr
                     if obj.hide_viewport != was_hv:
                         obj.hide_viewport = was_hv
             print("[Anacapa] Scene restored after export.")

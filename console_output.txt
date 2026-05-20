@@ -1,0 +1,116 @@
+Warning: One or more objects used as prototypes in 'Instance on Points' nodes either do not have 'As Instance' enabled in their 'Object Info' nodes, or the prototype is the base geometry input itself. Both cases prevent valid point instancer export. If it's the former, enable 'As Instance' to avoid incorrect self-referencing.
+Warning: One or more objects used as prototypes in 'Instance on Points' nodes either do not have 'As Instance' enabled in their 'Object Info' nodes, or the prototype is the base geometry input itself. Both cases prevent valid point instancer export. If it's the former, enable 'As Instance' to avoid incorrect self-referencing.
+  [dome patch] DomeLight '/root/env_light' has near-black texture 'color_0C0C0C.exr' (lum=0.047) — searching World shader...
+  [dome patch] No sky image found — DomeLight stays dark. Re-export with --sky-texture <path> to fix.
+
+  Injecting MaterialX texture nodes into OpenPBR subgraphs...
+  [mtlx inject] No missing texture connections found.
+============================================================
+
+  Exporting MaterialX graphs → /Users/douglascreel/Documents/Blender/materials
+  [mtlx export] Exported 9 material(s), skipped 0.
+  [osl gen] Appended 69 genosl function file(s) from /Users/douglascreel/Library/Application Support/Steam/steamapps/common/Blender/Blender.app/Contents/Resources/5.1/python/lib/python3.13/site-packages/MaterialX/libraries/stdlib/genosl
+  [osl gen] Boilerplate extracted → _mx_stdlib.h (370 lines)
+  [osl gen] Generated 9 OSL shader(s).
+============================================================
+
+  Extracting MaterialX node graphs...
+  [MaterialX sidecar] Wrote 2 material(s) → /Users/douglascreel/Documents/Blender/chocolate_donut_scene.usdc.materials.json
+============================================================
+[Anacapa] Command: /Users/douglascreel/dev/anacapa/build/Darwin/anacapa --scene /Users/douglascreel/Documents/Blender/chocolate_donut_scene.usdc --output /var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/blender_1ag1jn/anacapa_render/render.exr -W 1920 -H 1080 -s 64 -d 8 --integrator path --tile-size 64 --firefly-clamp 10.0 --frame 0 --filter mitchell --png /var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/blender_1ag1jn/anacapa_render/preview.png
+  [anacapa] [2026-05-19 18:51:29.899] [info] RenderSession: rendering frame 0 (--frame was provided)
+  [anacapa] [2026-05-19 18:51:29.903] [info] USDLoader: MaterialX sidecar loaded — 2 material(s) in '/Users/douglascreel/Documents/Blender/chocolate_donut_scene.usdc.materials.json'
+  [anacapa] [2026-05-19 18:51:29.903] [info] USDLoader: opened '/Users/douglascreel/Documents/Blender/chocolate_donut_scene.usdc' (up-axis: Z — applying Y↔Z correction)
+  [anacapa] [2026-05-19 18:51:29.906] [info] USDLoader: motion blur disabled (frame 0.0)
+  [anacapa] [2026-05-19 18:51:29.906] [info] USDLoader: compiling OSL shader '/Users/douglascreel/Documents/Blender/materials/Table.osl'
+  [anacapa] [2026-05-19 18:51:29.916] [info] USDLoader: material '/root/_materials/Table' → OslMaterial ('Table')
+  [anacapa] WARNING: Unsupported closure keyword arg "thinfilm_thickness" for dielectric_bsdf (/Users/douglascreel/Documents/Blender/materials/_mx_stdlib.h:68)
+  [anacapa] WARNING: Unsupported closure keyword arg "thinfilm_ior" for dielectric_bsdf (/Users/douglascreel/Documents/Blender/materials/_mx_stdlib.h:68)
+  [anacapa] [OslMaterial hair] shader='Table' baseColor=(0.115,0.051,0.065) sigma_a=(2.163,2.968,2.740)
+  [anacapa] [2026-05-19 18:51:29.937] [info] USDLoader: compiling OSL shader '/Users/douglascreel/Documents/Blender/materials/Disk.osl'
+  [anacapa] [2026-05-19 18:51:29.947] [info] USDLoader: material '/root/_materials/Disk' → OslMaterial ('Disk')
+  [anacapa] [OslMaterial hair] shader='Disk' baseColor=(0.047,0.026,0.009) sigma_a=(0.060,0.100,0.200)
+  [anacapa] DomeLight: colorspace=linear
+  [anacapa] DomeLight: loaded '/Users/douglascreel/Documents/Blender/textures/color_0C0C0C.exr' (1x1)
+  [anacapa] [2026-05-19 18:51:29.966] [info] USDLoader: domeLight '/root/env_light' intensity=0.00 texture='/Users/douglascreel/Documents/Blender/textures/color_0C0C0C.exr'
+  [anacapa] [2026-05-19 18:51:29.966] [info] USDLoader: 1 camera(s) found in scene:
+  [anacapa] [2026-05-19 18:51:29.966] [info]   /root/Camera/Camera
+  [anacapa] [2026-05-19 18:51:29.966] [info] USDLoader: using only camera '/root/Camera/Camera'
+  [anacapa] [2026-05-19 18:51:29.966] [info] USDLoader: camera '/root/Camera/Camera' origin=(0.16,0.36,0.64) fov=32.3° fStop=1.8 focusDist=0.564 apertureR=0.0097
+  [anacapa] [2026-05-19 18:51:29.966] [info] USDLoader: camera shutter:open=0.0000 (authored=true) shutter:close=0.0000 (authored=true)
+  [anacapa] [2026-05-19 18:51:29.968] [info] USDLoader: scene bounds center=(-1.3,0.1,-3.2) radius=7.4
+  [anacapa] [2026-05-19 18:51:29.968] [info] USDLoader: 3 meshes, 4 lights, camera=yes
+  [anacapa] [2026-05-19 18:51:30.680] [info] Pixel filter: mitchell (radius 2.00)
+  [anacapa] [2026-05-19 18:51:30.680] [info] Rendering 1920x1080 @ 64 spp — 510 tiles on 11 threads
+  [anacapa] [2026-05-19 18:51:30.680] [info] Progressive preview: writing PNG every 500 ms to '/var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/blender_1ag1jn/anacapa_render/preview.png'
+  [anacapa] [2026-05-19 18:51:30.680] [info]   Adaptive base pass: 16 spp
+  [anacapa] [2026-05-19 18:51:30.919] [info]   16/510 tiles
+  [anacapa] [2026-05-19 18:51:31.053] [info]   32/510 tiles
+  [anacapa] [2026-05-19 18:51:31.279] [info]   48/510 tiles
+  [anacapa] [2026-05-19 18:51:31.422] [info]   64/510 tiles
+  [anacapa] [2026-05-19 18:51:31.653] [info]   80/510 tiles
+  [anacapa] [2026-05-19 18:51:31.809] [info]   96/510 tiles
+  [anacapa] [2026-05-19 18:51:32.006] [info]   112/510 tiles
+  [anacapa] [2026-05-19 18:51:32.217] [info]   128/510 tiles
+  [anacapa] [2026-05-19 18:51:32.443] [info]   144/510 tiles
+  [anacapa] [2026-05-19 18:51:32.610] [info]   160/510 tiles
+  [anacapa] [2026-05-19 18:51:32.854] [info]   176/510 tiles
+  [anacapa] [2026-05-19 18:51:33.191] [info]   192/510 tiles
+  [anacapa] [2026-05-19 18:51:33.419] [info]   208/510 tiles
+  [anacapa] [2026-05-19 18:51:33.840] [info]   224/510 tiles
+  [anacapa] [2026-05-19 18:51:34.180] [info]   240/510 tiles
+  [anacapa] [2026-05-19 18:51:34.749] [info]   256/510 tiles
+  [anacapa] [2026-05-19 18:51:35.111] [info]   272/510 tiles
+  [anacapa] [2026-05-19 18:51:35.749] [info]   288/510 tiles
+  [anacapa] [2026-05-19 18:51:36.329] [info]   304/510 tiles
+  [anacapa] [2026-05-19 18:51:36.902] [info]   320/510 tiles
+  [anacapa] [2026-05-19 18:51:37.361] [info]   336/510 tiles
+  [anacapa] [2026-05-19 18:51:37.932] [info]   352/510 tiles
+  [anacapa] [2026-05-19 18:51:38.486] [info]   368/510 tiles
+  [anacapa] [2026-05-19 18:51:38.930] [info]   384/510 tiles
+  [anacapa] [2026-05-19 18:51:39.421] [info]   400/510 tiles
+  [anacapa] [2026-05-19 18:51:39.774] [info]   416/510 tiles
+  [anacapa] [2026-05-19 18:51:40.225] [info]   432/510 tiles
+  [anacapa] [2026-05-19 18:51:40.576] [info]   448/510 tiles
+  [anacapa] [2026-05-19 18:51:41.005] [info]   464/510 tiles
+  [anacapa] [2026-05-19 18:51:41.451] [info]   480/510 tiles
+  [anacapa] [2026-05-19 18:51:42.215] [info]   496/510 tiles
+  [anacapa] [2026-05-19 18:51:42.366] [info]   510/510 tiles
+  [anacapa] [2026-05-19 18:51:42.370] [info]   Adaptive pass: 510 active tiles (max 48 extra spp per tile)
+  [anacapa] [2026-05-19 18:51:42.666] [info]   512/1020 tiles
+  [anacapa] [2026-05-19 18:51:43.108] [info]   528/1020 tiles
+  [anacapa] [2026-05-19 18:51:43.812] [info]   544/1020 tiles
+  [anacapa] [2026-05-19 18:51:44.276] [info]   560/1020 tiles
+  [anacapa] [2026-05-19 18:51:44.709] [info]   576/1020 tiles
+  [anacapa] [2026-05-19 18:51:45.481] [info]   592/1020 tiles
+  [anacapa] [2026-05-19 18:51:45.959] [info]   608/1020 tiles
+  [anacapa] [2026-05-19 18:51:46.699] [info]   624/1020 tiles
+  [anacapa] [2026-05-19 18:51:47.201] [info]   640/1020 tiles
+  [anacapa] [2026-05-19 18:51:47.930] [info]   656/1020 tiles
+  [anacapa] [2026-05-19 18:51:48.450] [info]   672/1020 tiles
+  [anacapa] [2026-05-19 18:51:49.168] [info]   688/1020 tiles
+  [anacapa] [2026-05-19 18:51:49.939] [info]   704/1020 tiles
+  [anacapa] [2026-05-19 18:51:50.683] [info]   720/1020 tiles
+  [anacapa] [2026-05-19 18:51:51.677] [info]   736/1020 tiles
+  [anacapa] [2026-05-19 18:51:52.527] [info]   752/1020 tiles
+  [anacapa] [2026-05-19 18:51:53.783] [info]   768/1020 tiles
+  [anacapa] [2026-05-19 18:51:54.872] [info]   784/1020 tiles
+  [anacapa] [2026-05-19 18:51:55.890] [info]   800/1020 tiles
+  [anacapa] [2026-05-19 18:51:56.928] [info]   816/1020 tiles
+  [anacapa] [2026-05-19 18:51:58.065] [info]   832/1020 tiles
+  [anacapa] [2026-05-19 18:51:59.000] [info]   848/1020 tiles
+  [anacapa] [2026-05-19 18:52:00.185] [info]   864/1020 tiles
+  [anacapa] [2026-05-19 18:52:01.184] [info]   880/1020 tiles
+  [anacapa] [2026-05-19 18:52:02.130] [info]   896/1020 tiles
+  [anacapa] [2026-05-19 18:52:03.203] [info]   912/1020 tiles
+  [anacapa] [2026-05-19 18:52:04.029] [info]   928/1020 tiles
+  [anacapa] [2026-05-19 18:52:04.917] [info]   944/1020 tiles
+  [anacapa] [2026-05-19 18:52:05.732] [info]   960/1020 tiles
+  [anacapa] [2026-05-19 18:52:06.700] [info]   976/1020 tiles
+  [anacapa] [2026-05-19 18:52:07.817] [info]   992/1020 tiles
+  [anacapa] [2026-05-19 18:52:09.343] [info]   1008/1020 tiles
+  [anacapa] [2026-05-19 18:52:09.683] [info]   1020/1020 tiles
+  [anacapa] [2026-05-19 18:52:10.210] [info] Render complete in 39529.5 ms
+  [anacapa] [2026-05-19 18:52:10.258] [info] Written: /var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/blender_1ag1jn/anacapa_render/render.exr
+  [anacapa] [2026-05-19 18:52:10.464] [info] Written: /var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/blender_1ag1jn/anacapa_render/preview.png
+02:06.272  operator         | Render done: 1920x1080

@@ -61,7 +61,7 @@ APPLY_LOCATION = False
 
 # Remove objects that are hidden from the render AND have no children.
 # These are usually boolean cutter helpers that shouldn't appear in USD.
-REMOVE_RENDER_HIDDEN = True
+REMOVE_RENDER_HIDDEN = False
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -623,7 +623,12 @@ def collect_halo_particles() -> int:
                 if inst_pts:
                     log(f"  [halo] GN '{obj.name}': {len(inst_pts)} instances.")
                     positions  = [p[0] for p in inst_pts]
-                    widths     = [max(p[1], 0.01) * 2.0 for p in inst_pts]
+                    # avg_scale from GN "Instance on Points" is typically 1.0
+                    # (identity) and does NOT represent particle visual size.
+                    # Cap at 0.02 when scale looks like identity (>= 0.5) to
+                    # avoid rendering geometry-scale instances as giant spheres.
+                    widths     = [(max(p[1], 0.01) * 2.0 if p[1] < 0.5 else 0.02)
+                                  for p in inst_pts]
                     velocities = [p[2] for p in inst_pts]
 
         if positions:
@@ -669,12 +674,18 @@ def realize_gn_instances() -> Tuple[int, List[str]]:
 
     Returns (objects_realized, generator_names_hidden).
     """
-    depsgraph = bpy.context.evaluated_depsgraph_get()
-
     gn_objects = [
         obj for obj in bpy.context.scene.objects
         if any(m.type == 'NODES' for m in obj.modifiers)
     ]
+
+    # Tag every GN object dirty before evaluating.  hide_render toggling
+    # (done by realize/restore across renders) can leave objects excluded from
+    # the depsgraph evaluation cache; update_tag() forces a fresh evaluation.
+    for obj in gn_objects:
+        obj.update_tag()
+    bpy.context.view_layer.update()
+    depsgraph = bpy.context.evaluated_depsgraph_get()
 
     total_scene = len(list(bpy.context.scene.objects))
     log(f"  [gn] Scanning {total_scene} scene objects for NODES modifiers...")
@@ -718,10 +729,25 @@ def realize_gn_instances() -> Tuple[int, List[str]]:
             log(f"  [gn] '{obj.name}' → {len(new_mesh.polygons)} polygons (realized mesh).")
             new_obj = bpy.data.objects.new(f"{obj.name}_gn_realized", new_mesh)
             new_obj.matrix_world = obj.matrix_world.copy()
+            for slot in obj.material_slots:
+                new_obj.data.materials.append(slot.material)
+            # Copy all color attributes from the evaluated mesh that new_from_object
+            # may not have transferred (GN-computed attributes like "Color").
+            try:
+                eval_mesh = obj.evaluated_get(depsgraph).data
+                for attr in eval_mesh.color_attributes:
+                    if attr.name not in new_mesh.color_attributes:
+                        new_attr = new_mesh.color_attributes.new(
+                            attr.name, attr.data_type, attr.domain)
+                        for i, item in enumerate(attr.data):
+                            new_attr.data[i].color = item.color
+            except Exception as e:
+                log(f"  [gn] '{obj.name}' attribute copy warning: {e}")
             scene_collection.objects.link(new_obj)
             created += 1
             obj.hide_render   = True
             obj.hide_viewport = True
+            obj["_anacapa_gn_hidden"] = True  # sentinel: skip in remove_render_hidden
             hidden.append(obj.name)
             continue
 
@@ -748,6 +774,14 @@ def realize_gn_instances() -> Tuple[int, List[str]]:
                 continue
             inst_obj = bpy.data.objects.new(f"{obj.name}_gni_{inst_count:04d}", inst_mesh)
             inst_obj.matrix_world = inst.matrix_world.copy()
+            # Materials come from the instanced object, not the scatter emitter
+            src_slots = inst.object.material_slots
+            if src_slots:
+                for slot in src_slots:
+                    inst_obj.data.materials.append(slot.material)
+            else:
+                for slot in obj.material_slots:
+                    inst_obj.data.materials.append(slot.material)
             scene_collection.objects.link(inst_obj)
             created += 1
             inst_count += 1
@@ -756,6 +790,7 @@ def realize_gn_instances() -> Tuple[int, List[str]]:
             log(f"  [gn] '{obj.name}' → {inst_count} instances realized.")
             obj.hide_render   = True
             obj.hide_viewport = True
+            obj["_anacapa_gn_hidden"] = True  # sentinel: skip in remove_render_hidden
             hidden.append(obj.name)
         else:
             log(f"  [gn] '{obj.name}' — no mesh and no instances found, skipping.")
@@ -793,6 +828,9 @@ def convert_to_mesh() -> Tuple[int, List[str]]:
                 continue
             if obj not in vl_objects:
                 log(f"  Skipping '{obj_name}' — not in active View Layer.")
+                continue
+            if obj.hide_render:
+                log(f"  Skipping '{obj_name}' — render-hidden (likely a GN modifier input/guide).")
                 continue
             try:
                 # For curves/NURBS, promote preview resolution to render resolution
@@ -866,6 +904,12 @@ def apply_modifiers() -> Tuple[int, List[str]]:
         if obj not in vl_objects:
             log(f"  Skipping '{obj.name}' — not in active View Layer.")
             continue
+        # GN generators are hidden by realize_gn_instances() before this runs.
+        # Applying modifiers to them strips the subdiv/bevel stack and corrupts
+        # the GN evaluation on subsequent renders.
+        if obj.hide_render:
+            log(f"  Skipping '{obj.name}' — render-hidden (GN generator or helper).")
+            continue
 
         # Shape keys block most modifier applications — warn and skip
         if has_shape_keys(obj):
@@ -934,6 +978,10 @@ def apply_transforms() -> int:
         if obj.type != 'MESH':
             continue
         if obj not in vl_objects:
+            continue
+        # GN generators were hidden by realize_gn_instances() — skip them so
+        # their transforms are preserved for correct GN evaluation next render.
+        if obj.hide_render:
             continue
         if obj.data.users > 1:
             obj.data = obj.data.copy()
@@ -1860,6 +1908,11 @@ def remove_render_hidden() -> Tuple[int, List[str]]:
         if obj.particle_systems:
             kept.append(obj.name)
             continue
+        # Never remove GN generators hidden by realize_gn_instances() — they
+        # are restored after export by the export.py snapshot/restore mechanism.
+        if obj.get("_anacapa_gn_hidden"):
+            kept.append(obj.name)
+            continue
         if not children_of.get(obj.name):
             log(f"Removing render-hidden object '{obj.name}' ({obj.type}).")
             bpy.data.objects.remove(obj, do_unlink=True)
@@ -1892,13 +1945,16 @@ def main():
     log("Step 2: Realizing particle system instances (Object/Collection render type)...")
     n_particle_instances, particle_emitters_removed = realize_particle_instances()
 
+    # --- Step 2b: Geometry Nodes instances ---
+    # Must run before collect_halo_particles so that GN geometry instancers
+    # (scatter objects) are hidden before halo collection — otherwise they
+    # get picked up as halo emitters and render as giant spheres.
+    log("Step 2b: Realizing Geometry Nodes instances...")
+    n_gn, gn_hidden = realize_gn_instances()
+
     # --- Step 2a: Collect HALO particles (written into USD in post-process) ---
     log("Step 2a: Collecting HALO particle systems...")
     collect_halo_particles()
-
-    # --- Step 2b: Geometry Nodes instances ---
-    log("Step 2b: Realizing Geometry Nodes instances...")
-    n_gn, gn_hidden = realize_gn_instances()
 
     # --- Step 3: Convert non-mesh ---
     log("Step 3: Converting non-mesh objects to mesh...")
@@ -2241,6 +2297,17 @@ class _MtlxBuilder:
         if bsdf is None:
             return  # nothing to export
 
+        # Check for a Displacement node on the Material Output.
+        # Since we don't support geometry displacement, we remap it to bump:
+        # Height → (height - midlevel) * scale → heighttonormal.
+        disp_bl_node = None
+        if output_node:
+            disp_sock = output_node.inputs.get('Displacement')
+            if disp_sock and disp_sock.is_linked:
+                dn = disp_sock.links[0].from_node
+                if dn.type == 'DISPLACEMENT':
+                    disp_bl_node = dn
+
         doc = mx.createDocument()
         # Do NOT import the stdlib into the document — stdlib definitions are
         # implicit and loaded by the reader from its own search path.  Importing
@@ -2248,6 +2315,8 @@ class _MtlxBuilder:
         # node definitions.
 
         self._doc = doc
+        self._acl_nodedefs: dict = {}  # (kind, *params) → node-category string
+        self._disp_normal_out = None   # bump normal derived from displacement node
         safe_name = mx.createValidName(mat.name)
 
         # NodeGraph wraps the full shading network.
@@ -2255,6 +2324,32 @@ class _MtlxBuilder:
         # An output port on the NodeGraph bridges it to the document scope.
         ng = doc.addNodeGraph(f"NG_{safe_name}")
         self._ng = ng
+
+        # Build displacement → bump normal before translating the BSDF so that
+        # _tx_principled can pick it up as a fallback geometry_normal.
+        if disp_bl_node is not None:
+            ht_out,  ht_c  = self._socket_float(disp_bl_node.inputs.get('Height'),   0.5)
+            mid_out, mid_c = self._socket_float(disp_bl_node.inputs.get('Midlevel'), 0.5)
+            sc_out,  sc_c  = self._socket_float(disp_bl_node.inputs.get('Scale'),    1.0)
+
+            sub = self._ng.addNode('subtract', self._uid('dh_sub'), 'float')
+            h_i = sub.addInput('in1', 'float')
+            if ht_out:  self._connect(h_i, ht_out)
+            else:       h_i.setValue(float(ht_c))
+            m_i = sub.addInput('in2', 'float')
+            if mid_out: self._connect(m_i, mid_out)
+            else:       m_i.setValue(float(mid_c))
+
+            mul = self._ng.addNode('multiply', self._uid('dh_mul'), 'float')
+            mul.addInput('in1', 'float').setNodeName(sub.getName())
+            sc_i = mul.addInput('in2', 'float')
+            if sc_out: self._connect(sc_i, sc_out)
+            else:      sc_i.setValue(float(sc_c))
+
+            h2n = self._ng.addNode('heighttonormal', self._uid('dh2n'), 'vector3')
+            h2n.addInput('in',    'float').setNodeName(mul.getName())
+            h2n.addInput('scale', 'float').setValue(1.0)
+            self._disp_normal_out = h2n.addOutput('out', 'vector3')
 
         # Translate the BSDF node (terminal — placed inside the NodeGraph)
         surface_out = self._translate_node(bsdf)
@@ -2280,6 +2375,139 @@ class _MtlxBuilder:
         out_path = os.path.join(self.out_dir, safe_name + '.mtlx')
         mx.writeToXmlFile(doc, out_path)
         return out_path
+
+    # ------------------------------------------------------------------ #
+    #  Anacapa custom nodedef registration                                  #
+    # ------------------------------------------------------------------ #
+
+    def _acl_nodedef(self, key, nd_name, out_types, inputs_spec, impls):
+        """Lazily register a custom nodedef + genosl implementations.
+
+        key       : hashable cache key (tuple)
+        nd_name   : NodeDef name, e.g. "ND_anacapa_voronoi_F1_EUCLIDEAN"
+        out_types : list of (output_name, mx_type) pairs
+        inputs_spec: list of (input_name, mx_type, default_value_or_None)
+        impls     : list of (output_name, sourcecode_template_string)
+                    output_name=None → single-output node
+
+        Returns the node category string (nd_name without "ND_" prefix).
+        """
+        if key in self._acl_nodedefs:
+            return self._acl_nodedefs[key]
+
+        nd = self._doc.addNodeDef(nd_name,
+                                  "multioutput" if len(out_types) > 1
+                                  else out_types[0][1],
+                                  nd_name[3:])  # node category = name minus "ND_"
+        for inp_name, inp_type, inp_default in inputs_spec:
+            inp = nd.addInput(inp_name, inp_type)
+            if inp_default is not None:
+                if inp_type == 'float':
+                    inp.setValue(float(inp_default))
+                elif inp_type == 'integer':
+                    inp.setValue(int(inp_default))
+        for out_name, out_type in out_types:
+            nd.addOutput(out_name, out_type)
+
+        for out_name, sourcecode in impls:
+            impl_suffix = f"_{out_name}" if out_name else ""
+            impl = self._doc.addImplementation(
+                f"IM_{nd_name[3:]}{impl_suffix}_genosl")
+            impl.setAttribute("nodedef", nd_name)
+            impl.setAttribute("target", "genosl")
+            if out_name:
+                impl.setAttribute("output", out_name)
+            impl.setAttribute("sourcecode", sourcecode)
+
+        category = nd_name[3:]
+        self._acl_nodedefs[key] = category
+        return category
+
+    def _acl_voronoi_category(self, feature, metric):
+        """Return (node-category, outputs) for a Voronoi node variant."""
+        FEAT = {'F1': 0, 'F2': 1, 'SMOOTH_F1': 2,
+                'DISTANCE_TO_EDGE': 3, 'N_SPHERE_RADIUS': 4}
+        METR = {'EUCLIDEAN': 0, 'MANHATTAN': 1, 'CHEBYCHEV': 2, 'MINKOWSKI': 3}
+        fi = FEAT.get(feature, 0)
+        mi = METR.get(metric, 0)
+        key = ('voronoi', fi, mi)
+        nd_name = f"ND_anacapa_voronoi_{feature}_{metric}"
+        sc_f = (f"anacapa_voronoi_f({{{{pos}}}}, {{{{scale}}}}, "
+                f"{{{{randomness}}}}, {fi}, {mi}, "
+                f"{{{{exponent}}}}, {{{{smoothness}}}})")
+        sc_c = (f"anacapa_voronoi_c({{{{pos}}}}, {{{{scale}}}}, "
+                f"{{{{randomness}}}}, {fi}, {mi}, "
+                f"{{{{exponent}}}}, {{{{smoothness}}}})")
+        inputs = [
+            ('pos',        'vector3', None),
+            ('scale',      'float',   5.0),
+            ('randomness', 'float',   1.0),
+            ('exponent',   'float',   2.0),
+            ('smoothness', 'float',   1.0),
+        ]
+        out_types = [('distance', 'float'), ('color', 'color3')]
+        impls = [('distance', sc_f), ('color', sc_c)]
+        return self._acl_nodedef(key, nd_name, out_types, inputs, impls)
+
+    def _acl_magic_category(self, depth):
+        """Return node-category for a Magic texture of given depth."""
+        key = ('magic', depth)
+        nd_name = f"ND_anacapa_magic_d{depth}"
+        sc = (f"anacapa_magic({{{{pos}}}}, {{{{scale}}}}, "
+              f"{{{{distortion}}}}, {int(depth)})")
+        inputs = [
+            ('pos',        'vector3', None),
+            ('scale',      'float',   5.0),
+            ('distortion', 'float',   1.0),
+        ]
+        return self._acl_nodedef(key, nd_name,
+                                 [('out', 'color3')], inputs, [(None, sc)])
+
+    def _acl_gabor_category(self, anisotropic):
+        """Return node-category for a Gabor noise node."""
+        key = ('gabor', int(anisotropic))
+        nd_name = f"ND_anacapa_gabor_a{int(anisotropic)}"
+        sc = (f"anacapa_gabor({{{{pos}}}}, {{{{scale}}}}, "
+              f"{{{{frequency}}}}, {int(anisotropic)}, {{{{direction}}}})")
+        inputs = [
+            ('pos',       'vector3', None),
+            ('scale',     'float',   5.0),
+            ('frequency', 'float',   4.0),
+            ('direction', 'vector3', None),
+        ]
+        return self._acl_nodedef(key, nd_name,
+                                 [('out', 'float')], inputs, [(None, sc)])
+
+    def _acl_brick_category(self, offset_freq, squash_freq):
+        """Return node-category for a Brick texture variant."""
+        key = ('brick', int(offset_freq), int(squash_freq))
+        nd_name = f"ND_anacapa_brick_of{int(offset_freq)}_sf{int(squash_freq)}"
+        sc_c = (f"anacapa_brick({{{{pos}}}}, {{{{scale}}}}, "
+                f"{{{{color1}}}}, {{{{color2}}}}, {{{{mortar_color}}}}, "
+                f"{{{{mortar_size}}}}, {{{{mortar_smooth}}}}, {{{{bias}}}}, "
+                f"{{{{brick_width}}}}, {{{{row_height}}}}, {{{{row_offset}}}}, "
+                f"{int(offset_freq)}, {{{{squash}}}}, {int(squash_freq)})")
+        sc_f = (f"anacapa_brick_fac({{{{pos}}}}, {{{{scale}}}}, "
+                f"{{{{mortar_size}}}}, {{{{mortar_smooth}}}}, "
+                f"{{{{brick_width}}}}, {{{{row_height}}}}, {{{{row_offset}}}}, "
+                f"{int(offset_freq)}, {{{{squash}}}}, {int(squash_freq)})")
+        inputs = [
+            ('pos',          'vector3', None),
+            ('scale',        'float',   5.0),
+            ('color1',       'color3',  None),
+            ('color2',       'color3',  None),
+            ('mortar_color', 'color3',  None),
+            ('mortar_size',  'float',   0.02),
+            ('mortar_smooth','float',   0.1),
+            ('bias',         'float',   0.0),
+            ('brick_width',  'float',   0.5),
+            ('row_height',   'float',   0.25),
+            ('row_offset',   'float',   0.5),
+            ('squash',       'float',   1.0),
+        ]
+        out_types = [('color', 'color3'), ('fac', 'float')]
+        impls = [('color', sc_c), ('fac', sc_f)]
+        return self._acl_nodedef(key, nd_name, out_types, inputs, impls)
 
     # ------------------------------------------------------------------ #
     #  Main dispatch                                                        #
@@ -2351,11 +2579,13 @@ class _MtlxBuilder:
         elif t in ('TEX_CHECKER',):
             out = self._tx_checker(bl_node)
         elif t == 'TEX_BRICK':
-            out = self._tx_checker(bl_node)          # approximation
+            out = self._tx_brick(bl_node)
         elif t == 'TEX_ENVIRONMENT':
             out = self._tx_image(bl_node)            # treat as image lookup
-        elif t in ('TEX_MAGIC', 'TEX_GABOR'):
-            out = self._tx_noise(bl_node)            # approximate with noise
+        elif t == 'TEX_MAGIC':
+            out = self._tx_magic(bl_node)
+        elif t == 'TEX_GABOR':
+            out = self._tx_gabor(bl_node)
         elif t in ('TEX_WHITE_NOISE',):
             out = self._tx_whitenoise(bl_node)
         elif t in ('TEX_SKY', 'TEX_IES'):
@@ -2414,7 +2644,7 @@ class _MtlxBuilder:
         elif t == 'MAP_RANGE':
             out = self._tx_map_range(bl_node)
         elif t == 'CURVE_FLOAT':
-            out = self._tx_curve_rgb(bl_node)        # same approximation
+            out = self._tx_curve_float(bl_node)
         # ── Input ──────────────────────────────────────────────────────
         elif t in ('UVMAP', 'TEX_COORD'):
             out = self._tx_texcoord(bl_node)
@@ -2720,7 +2950,26 @@ class _MtlxBuilder:
         _wire('coat_roughness',      'Coat Roughness',     'float',   0.03)
         _wire('emission_luminance',  'Emission Strength',  'float',   0.0)
         _wire('emission_color',      'Emission Color',     'color3',  (1.0, 1.0, 1.0))
-        _wire('geometry_normal',     'Normal',             'vector3', (0.0, 0.0, 1.0))
+        # Subsurface — Blender 4.x uses "Subsurface Weight"; older versions used "Subsurface"
+        _wire('subsurface_weight',   'Subsurface Weight',  'float',   0.0)
+        if n.inputs.get('Subsurface Weight') is None:
+            _wire('subsurface_weight', 'Subsurface',       'float',   0.0)
+        # Blender 4.x dropped "Subsurface Color" — subsurface shares the base color.
+        if n.inputs.get('Subsurface Color') is not None:
+            _wire('subsurface_color', 'Subsurface Color',  'color3',  (0.8, 0.8, 0.8))
+        else:
+            _wire('subsurface_color', 'Base Color',        'color3',  (0.8, 0.8, 0.8))
+        _wire('subsurface_scatter_anisotropy', 'Subsurface Anisotropy', 'float', 0.0)
+        # geometry_normal: use the Normal socket if connected; otherwise fall
+        # back to a displacement-derived bump normal if one was generated.
+        norm_sock = n.inputs.get('Normal')
+        if norm_sock and norm_sock.is_linked:
+            _wire('geometry_normal', 'Normal', 'vector3', (0.0, 0.0, 1.0))
+        elif getattr(self, '_disp_normal_out', None) is not None:
+            self._connect(node.addInput('geometry_normal', 'vector3'),
+                          self._disp_normal_out)
+        else:
+            _wire('geometry_normal', 'Normal', 'vector3', (0.0, 0.0, 1.0))
 
         return node.addOutput('out', 'surfaceshader')
 
@@ -2934,24 +3183,184 @@ class _MtlxBuilder:
         return ah_n.addOutput('out', 'float')
 
     def _tx_voronoi(self, n):
-        """Voronoi Texture → ND_cellnoise3d_float."""
-        scale = float(n.inputs['Scale'].default_value) if 'Scale' in n.inputs else 5.0
+        """Voronoi Texture → anacapa_voronoi (proper F1/F2/Smooth/Edge/Sphere,
+        all four distance metrics, multi-output distance + color)."""
+        feature = getattr(n, 'feature',            'F1')
+        metric  = getattr(n, 'distance',           'EUCLIDEAN')
 
-        tc    = self._ng.addNode('position', self._uid('pos'), 'vector3')
-        tc.addInput('space', 'string').setValueString('object')
+        # Vector socket overrides default object-space position
+        vec_sock = n.inputs.get('Vector')
+        if vec_sock and vec_sock.is_linked:
+            pos_out, _ = self._socket_vector3(vec_sock)
+        else:
+            pos_n   = self._ng.addNode('position', self._uid('vpos'), 'vector3')
+            pos_n.addInput('space', 'string').setValueString('object')
+            pos_out = pos_n.addOutput('out', 'vector3')
 
-        scale_n = self._ng.addNode('multiply', self._uid('vscale'), 'vector3')
-        scale_n.addInput('in1', 'vector3').setNodeName(tc.getName())
-        scale_n.addInput('in2', 'vector3').setValueString(f'{scale}, {scale}, {scale}')
+        scale_out,      scale_c      = self._socket_float(n.inputs.get('Scale'),      5.0)
+        rand_out,       rand_c       = self._socket_float(n.inputs.get('Randomness'), 1.0)
+        smooth_out,     smooth_c     = self._socket_float(n.inputs.get('Smoothness'), 1.0)
+        exp_out,        exp_c        = self._socket_float(n.inputs.get('Exponent'),   2.0)
 
-        mx_node = self._ng.addNode('cellnoise3d', self._uid('voronoi'), 'float')
-        mx_node.addInput('position', 'vector3').setNodeName(scale_n.getName())
+        cat   = self._acl_voronoi_category(feature, metric)
+        node  = self._ng.addNode(cat, self._uid('vor'), 'multioutput')
 
-        return mx_node.addOutput('out', 'float')
+        def _wi(inp_name, mx_type, out, const):
+            inp = node.addInput(inp_name, mx_type)
+            if out:   self._connect(inp, out)
+            elif const is not None:
+                if mx_type == 'vector3':
+                    inp.setValueString(f'{const[0]}, {const[1]}, {const[2]}')
+                else:
+                    inp.setValue(float(const))
+
+        _wi('pos',        'vector3', pos_out,    None)
+        _wi('scale',      'float',   scale_out,  scale_c)
+        _wi('randomness', 'float',   rand_out,   rand_c)
+        _wi('smoothness', 'float',   smooth_out, smooth_c)
+        _wi('exponent',   'float',   exp_out,    exp_c)
+
+        # Expose both named outputs; caller selects via from_socket.name
+        node.addOutput('distance', 'float')
+        node.addOutput('color',    'color3')
+        return node.getOutput('distance')   # default
 
     def _tx_musgrave(self, n):
-        """Musgrave Texture → ND_fractal3d_float."""
+        """Musgrave Texture → ND_fractal3d_float (legacy node, Blender ≤3.6)."""
         return self._tx_noise(n)
+
+    def _tx_magic(self, n):
+        """Magic Texture → anacapa_magic (sinusoidal chaos)."""
+        depth      = int(getattr(n, 'turbulence_depth', 2))
+        dist_out, dist_c = self._socket_float(n.inputs.get('Distortion'), 1.0)
+
+        vec_sock = n.inputs.get('Vector')
+        if vec_sock and vec_sock.is_linked:
+            pos_out, _ = self._socket_vector3(vec_sock)
+        else:
+            pos_n = self._ng.addNode('position', self._uid('mpos'), 'vector3')
+            pos_n.addInput('space', 'string').setValueString('object')
+            pos_out = pos_n.addOutput('out', 'vector3')
+
+        scale_out, scale_c = self._socket_float(n.inputs.get('Scale'), 5.0)
+
+        cat  = self._acl_magic_category(depth)
+        node = self._ng.addNode(cat, self._uid('mag'), 'color3')
+
+        p_inp = node.addInput('pos', 'vector3')
+        if pos_out: self._connect(p_inp, pos_out)
+
+        sc_inp = node.addInput('scale', 'float')
+        if scale_out: self._connect(sc_inp, scale_out)
+        else:         sc_inp.setValue(float(scale_c))
+
+        di_inp = node.addInput('distortion', 'float')
+        if dist_out: self._connect(di_inp, dist_out)
+        else:        di_inp.setValue(float(dist_c))
+
+        return node.addOutput('out', 'color3')
+
+    def _tx_gabor(self, n):
+        """Gabor Texture → anacapa_gabor (windowed sinusoidal noise)."""
+        aniso = 1 if getattr(n, 'gabor_type', '2D') != '2D' \
+                     or getattr(n, 'anisotropic', False) else 0
+
+        vec_sock = n.inputs.get('Vector')
+        if vec_sock and vec_sock.is_linked:
+            pos_out, _ = self._socket_vector3(vec_sock)
+        else:
+            pos_n = self._ng.addNode('position', self._uid('gpos'), 'vector3')
+            pos_n.addInput('space', 'string').setValueString('object')
+            pos_out = pos_n.addOutput('out', 'vector3')
+
+        scale_out, scale_c = self._socket_float(n.inputs.get('Scale'),     5.0)
+        freq_out,  freq_c  = self._socket_float(n.inputs.get('Frequency'), 4.0)
+
+        dir_sock = n.inputs.get('Orientation 3D') or n.inputs.get('Orientation')
+        if dir_sock and dir_sock.is_linked:
+            dir_out, dir_c = self._socket_vector3(dir_sock, (1.0, 0.0, 0.0))
+        else:
+            dir_out, dir_c = None, (1.0, 0.0, 0.0)
+
+        cat  = self._acl_gabor_category(aniso)
+        node = self._ng.addNode(cat, self._uid('gab'), 'float')
+
+        p_inp = node.addInput('pos', 'vector3')
+        if pos_out: self._connect(p_inp, pos_out)
+
+        sc_inp = node.addInput('scale', 'float')
+        if scale_out: self._connect(sc_inp, scale_out)
+        else:         sc_inp.setValue(float(scale_c))
+
+        fr_inp = node.addInput('frequency', 'float')
+        if freq_out: self._connect(fr_inp, freq_out)
+        else:        fr_inp.setValue(float(freq_c))
+
+        d_inp = node.addInput('direction', 'vector3')
+        if dir_out: self._connect(d_inp, dir_out)
+        else: d_inp.setValueString(f'{dir_c[0]}, {dir_c[1]}, {dir_c[2]}')
+
+        return node.addOutput('out', 'float')
+
+    def _tx_brick(self, n):
+        """Brick Texture → anacapa_brick (proper mortar/squash/offset pattern)."""
+        offset_freq  = int(getattr(n, 'offset_frequency',  2))
+        squash_freq  = int(getattr(n, 'squash_frequency',  1))
+
+        vec_sock = n.inputs.get('Vector')
+        if vec_sock and vec_sock.is_linked:
+            pos_out, _ = self._socket_vector3(vec_sock)
+        else:
+            pos_n = self._ng.addNode('position', self._uid('bpos'), 'vector3')
+            pos_n.addInput('space', 'string').setValueString('object')
+            pos_out = pos_n.addOutput('out', 'vector3')
+
+        def _fs(name, default): return self._socket_float(n.inputs.get(name), default)
+        def _cs(name, default): return self._socket_color3(n.inputs.get(name), default)
+
+        scale_out,  scale_c  = _fs('Scale',        5.0)
+        ms_out,     ms_c     = _fs('Mortar Size',   0.02)
+        msm_out,    msm_c    = _fs('Mortar Smooth', 0.1)
+        bias_out,   bias_c   = _fs('Bias',          0.0)
+        bw_out,     bw_c     = _fs('Brick Width',   0.5)
+        rh_out,     rh_c     = _fs('Row Height',    0.25)
+        off_out,    off_c    = _fs('Offset',        0.5)
+        sq_out,     sq_c     = _fs('Squash',        1.0)
+
+        c1_out, c1_c = _cs('Color1',       (0.8, 0.8, 0.8))
+        c2_out, c2_c = _cs('Color2',       (0.2, 0.2, 0.2))
+        cm_out, cm_c = _cs('Mortar',       (0.0, 0.0, 0.0))
+
+        cat  = self._acl_brick_category(offset_freq, squash_freq)
+        node = self._ng.addNode(cat, self._uid('brk'), 'multioutput')
+
+        def _wi(inp_name, mx_type, out, const):
+            inp = node.addInput(inp_name, mx_type)
+            if out:   self._connect(inp, out)
+            elif const is not None:
+                if mx_type == 'color3':
+                    inp.setValueString(f'{const[0]}, {const[1]}, {const[2]}')
+                elif mx_type == 'vector3':
+                    inp.setValueString(f'{const[0]}, {const[1]}, {const[2]}')
+                else:
+                    inp.setValue(float(const))
+
+        _wi('pos',          'vector3', pos_out,  None)
+        _wi('scale',        'float',   scale_out, scale_c)
+        _wi('color1',       'color3',  c1_out,   c1_c)
+        _wi('color2',       'color3',  c2_out,   c2_c)
+        _wi('mortar_color', 'color3',  cm_out,   cm_c)
+        _wi('mortar_size',  'float',   ms_out,   ms_c)
+        _wi('mortar_smooth','float',   msm_out,  msm_c)
+        _wi('bias',         'float',   bias_out, bias_c)
+        _wi('brick_width',  'float',   bw_out,   bw_c)
+        _wi('row_height',   'float',   rh_out,   rh_c)
+        _wi('row_offset',   'float',   off_out,  off_c)
+        _wi('squash',       'float',   sq_out,   sq_c)
+
+        node.addOutput('color', 'color3')
+        node.addOutput('fac',   'float')
+        return node.getOutput('color')   # default
 
     def _tx_gradient(self, n):
         """Gradient Texture → UV-based gradient.
@@ -3542,20 +3951,157 @@ class _MtlxBuilder:
         pw.addInput('in2', 'color3').setValueString(f'{g}, {g}, {g}')
         return pw.addOutput('out', 'color3')
 
+    # ------------------------------------------------------------------ #
+    #  Curve baking helpers                                                 #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _sample_curve(mapping, ch_idx, combined_idx, n=16):
+        """Bake a CurveMapping channel to a list of n sampled output values.
+
+        Blender's curve evaluation: for input t,
+          v = curves[combined_idx].evaluate(t)
+          v = curves[ch_idx].evaluate(v)
+        combined_idx may equal ch_idx (single-curve nodes) or be None.
+        Returns a list of n floats spanning the range [0, 1].
+        """
+        try:
+            mapping.initialize()
+        except Exception:
+            pass
+        curves = mapping.curves
+        values = []
+        for i in range(n):
+            t = i / (n - 1)
+            try:
+                v = curves[combined_idx].evaluate(t) if combined_idx is not None \
+                    else t
+                v = curves[ch_idx].evaluate(v)
+            except Exception:
+                v = t  # fallback: identity
+            values.append(float(v))
+        return values
+
+    def _build_float_lut(self, in_out, in_c, sample_values):
+        """Build a piecewise mix chain that maps a float input through a LUT.
+
+        sample_values : list of N output values sampled at uniform positions
+                        across [0, 1].  N >= 2.
+        Returns a float mx Output.
+        """
+        n = len(sample_values)
+        if n < 2:
+            return self._const_float(sample_values[0] if sample_values else 0.5)
+
+        step = 1.0 / (n - 1)
+        prev_out = self._const_float(sample_values[0])
+
+        for i in range(1, n):
+            t_lo = (i - 1) * step
+            val  = sample_values[i]
+
+            sub = self._ng.addNode('subtract', self._uid('csub'), 'float')
+            s_inp = sub.addInput('in1', 'float')
+            if in_out: self._connect(s_inp, in_out)
+            else:      s_inp.setValue(float(in_c))
+            sub.addInput('in2', 'float').setValue(float(t_lo))
+
+            div = self._ng.addNode('divide', self._uid('cdiv'), 'float')
+            div.addInput('in1', 'float').setNodeName(sub.getName())
+            div.addInput('in2', 'float').setValue(float(step))
+
+            cl = self._ng.addNode('clamp', self._uid('cclamp'), 'float')
+            cl.addInput('in',   'float').setNodeName(div.getName())
+            cl.addInput('low',  'float').setValue(0.0)
+            cl.addInput('high', 'float').setValue(1.0)
+            seg_fac = cl.addOutput('out', 'float')
+
+            mix = self._ng.addNode('mix', self._uid('cmix'), 'float')
+            self._connect(mix.addInput('bg', 'float'), prev_out)
+            mix.addInput('fg',  'float').setValue(float(val))
+            self._connect(mix.addInput('mix', 'float'), seg_fac)
+            prev_out = mix.addOutput('out', 'float')
+
+        return prev_out
+
+    # ------------------------------------------------------------------ #
+
     def _tx_curve_rgb(self, n):
-        """RGB Curves — sample 8 points and build a mix chain (same as color ramp)."""
-        # Approximate by treating it as a brightness/contrast adjustment
-        col_out, col_c = self._socket_color3(n.inputs.get('Color'), (0.5,0.5,0.5))
-        # Pass through — can't faithfully evaluate the curve without pixel data
-        # Emit identity multiply
-        mul = self._ng.addNode('multiply', self._uid('curve'), 'color3')
-        c_inp = mul.addInput('in1', 'color3')
-        if col_out:
-            self._connect(c_inp, col_out)
-        else:
-            c_inp.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
-        mul.addInput('in2', 'color3').setValueString('1.0, 1.0, 1.0')
-        return mul.addOutput('out', 'color3')
+        """RGB Curves — bake each channel via CurveMap.evaluate() at export time."""
+        mapping = getattr(n, 'mapping', None)
+        col_out, col_c = self._socket_color3(n.inputs.get('Color'), (0.5, 0.5, 0.5))
+        fac_out, fac_c = self._socket_float(n.inputs.get('Fac'), 1.0)
+
+        if mapping is None:
+            # No curve data — identity pass-through
+            mul = self._ng.addNode('multiply', self._uid('curve'), 'color3')
+            c_inp = mul.addInput('in1', 'color3')
+            if col_out: self._connect(c_inp, col_out)
+            else: c_inp.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
+            mul.addInput('in2', 'color3').setValueString('1.0, 1.0, 1.0')
+            return mul.addOutput('out', 'color3')
+
+        # Extract each input channel as a float so we can run per-channel LUTs.
+        channel_outs = []
+        for ch in range(3):
+            if col_out:
+                ex = self._ng.addNode('extract', self._uid('crex'), 'float')
+                self._connect(ex.addInput('in', 'color3'), col_out)
+                ex.addInput('index', 'integer').setValue(ch)
+                ch_in_out = ex.addOutput('out', 'float')
+                ch_in_c   = None
+            else:
+                ch_in_out = None
+                ch_in_c   = col_c[ch]
+
+            lut    = self._sample_curve(mapping, ch, 3, n=16)
+            result = self._build_float_lut(ch_in_out, ch_in_c, lut)
+            channel_outs.append(result)
+
+        # Recombine R, G, B → color3
+        comb = self._ng.addNode('combine3', self._uid('crcomb'), 'color3')
+        for i, ch_out in enumerate(channel_outs):
+            self._connect(comb.addInput(f'in{i+1}', 'float'), ch_out)
+        result_col = comb.addOutput('out', 'color3')
+
+        # Mix original with curve result by Fac
+        if fac_out or (fac_c is not None and abs(float(fac_c) - 1.0) > 1e-4):
+            mix = self._ng.addNode('mix', self._uid('crfac'), 'color3')
+            bg = mix.addInput('bg', 'color3')
+            if col_out: self._connect(bg, col_out)
+            else: bg.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
+            self._connect(mix.addInput('fg', 'color3'), result_col)
+            f_inp = mix.addInput('mix', 'float')
+            if fac_out: self._connect(f_inp, fac_out)
+            else:       f_inp.setValue(float(fac_c))
+            return mix.addOutput('out', 'color3')
+
+        return result_col
+
+    def _tx_curve_float(self, n):
+        """Float Curve — bake via CurveMap.evaluate(), mix with Factor."""
+        mapping  = getattr(n, 'mapping', None)
+        val_out, val_c = self._socket_float(n.inputs.get('Value'), 0.5)
+        fac_out, fac_c = self._socket_float(n.inputs.get('Factor'), 1.0)
+
+        if mapping is None:
+            return self._build_float_lut(val_out, val_c, [i/15.0 for i in range(16)])
+
+        lut    = self._sample_curve(mapping, 0, None, n=16)
+        result = self._build_float_lut(val_out, val_c, lut)
+
+        if fac_out or (fac_c is not None and abs(float(fac_c) - 1.0) > 1e-4):
+            mix = self._ng.addNode('mix', self._uid('cffac'), 'float')
+            bg = mix.addInput('bg', 'float')
+            if val_out: self._connect(bg, val_out)
+            else:       bg.setValue(float(val_c))
+            self._connect(mix.addInput('fg', 'float'), result)
+            f_inp = mix.addInput('mix', 'float')
+            if fac_out: self._connect(f_inp, fac_out)
+            else:       f_inp.setValue(float(fac_c))
+            return mix.addOutput('out', 'float')
+
+        return result
 
     def _tx_group(self, n):
         """Group node — inline by recursively translating its internal tree."""
@@ -3912,14 +4458,52 @@ class _MtlxBuilder:
         return mx_node.addOutput('out', 'vector3')
 
     def _tx_curve_vec(self, n):
-        """Vector Curves → identity pass-through (curves need pixel-level eval)."""
+        """Vector Curves — bake each XYZ channel via CurveMap.evaluate()."""
+        mapping = getattr(n, 'mapping', None)
         vec_out, vec_c = self._socket_vector3(n.inputs.get('Vector'), (0.0, 0.0, 0.0))
-        mul = self._ng.addNode('multiply', self._uid('vcurve'), 'vector3')
-        v = mul.addInput('in1', 'vector3')
-        if vec_out: self._connect(v, vec_out)
-        else: v.setValueString(f'{vec_c[0]}, {vec_c[1]}, {vec_c[2]}')
-        mul.addInput('in2', 'vector3').setValueString('1.0, 1.0, 1.0')
-        return mul.addOutput('out', 'vector3')
+        fac_out, fac_c = self._socket_float(n.inputs.get('Fac'), 1.0)
+
+        if mapping is None:
+            mul = self._ng.addNode('multiply', self._uid('vcurve'), 'vector3')
+            v = mul.addInput('in1', 'vector3')
+            if vec_out: self._connect(v, vec_out)
+            else: v.setValueString(f'{vec_c[0]}, {vec_c[1]}, {vec_c[2]}')
+            mul.addInput('in2', 'vector3').setValueString('1.0, 1.0, 1.0')
+            return mul.addOutput('out', 'vector3')
+
+        channel_outs = []
+        for ch in range(3):
+            if vec_out:
+                ex = self._ng.addNode('extract', self._uid('vcex'), 'float')
+                self._connect(ex.addInput('in', 'vector3'), vec_out)
+                ex.addInput('index', 'integer').setValue(ch)
+                ch_in_out = ex.addOutput('out', 'float')
+                ch_in_c   = None
+            else:
+                ch_in_out = None
+                ch_in_c   = vec_c[ch]
+
+            lut    = self._sample_curve(mapping, ch, 3, n=16)
+            result = self._build_float_lut(ch_in_out, ch_in_c, lut)
+            channel_outs.append(result)
+
+        comb = self._ng.addNode('combine3', self._uid('vccomb'), 'vector3')
+        for i, ch_out in enumerate(channel_outs):
+            self._connect(comb.addInput(f'in{i+1}', 'float'), ch_out)
+        result_vec = comb.addOutput('out', 'vector3')
+
+        if fac_out or (fac_c is not None and abs(float(fac_c) - 1.0) > 1e-4):
+            mix = self._ng.addNode('mix', self._uid('vcfac'), 'vector3')
+            bg = mix.addInput('bg', 'vector3')
+            if vec_out: self._connect(bg, vec_out)
+            else: bg.setValueString(f'{vec_c[0]}, {vec_c[1]}, {vec_c[2]}')
+            self._connect(mix.addInput('fg', 'vector3'), result_vec)
+            f_inp = mix.addInput('mix', 'float')
+            if fac_out: self._connect(f_inp, fac_out)
+            else:       f_inp.setValue(float(fac_c))
+            return mix.addOutput('out', 'vector3')
+
+        return result_vec
 
     def _tx_normal_const(self, n):
         """Normal node (explicit normal input) → normalmap with constant."""
@@ -4333,12 +4917,23 @@ void NG_place2d_vector2(
 }
 """
 
+        # Read the Anacapa OSL library shipped with the addon.
+        acl_src = ''
+        acl_path = os.path.join(os.path.dirname(__file__), 'osl', 'anacapa_lib.h')
+        if os.path.isfile(acl_path):
+            with open(acl_path, 'r') as _af:
+                acl_src = '\n// ---- anacapa_lib.h ----\n' + _af.read()
+        else:
+            print(f"  [osl gen] WARNING: anacapa_lib.h not found at {acl_path}")
+
         with open(header_path, 'w') as f:
             f.write(first_boilerplate)
             if genosl_extras:
                 f.write('\n// ---- mx_*.osl function definitions ----\n')
                 f.writelines(genosl_extras)
             f.write(place2d_impl)
+            if acl_src:
+                f.write(acl_src)
         shared_header = '_mx_stdlib.h'
         print(f"  [osl gen] Boilerplate extracted → {shared_header} "
               f"({len(first_boilerplate.splitlines())} lines)")
@@ -4361,6 +4956,12 @@ void NG_place2d_vector2(
             content = osl_source
         with open(osl_path, 'w') as f:
             f.write(content)
+        # Remove stale .oso so the C++ renderer always recompiles from this fresh .osl.
+        # Without this, same-second timestamps fool the mtime check and the old
+        # compiled shader is used until the next export.
+        oso_path = osl_path[:-4] + '.oso'
+        if os.path.exists(oso_path):
+            os.remove(oso_path)
         osl_exported += 1
 
     print(f"  [osl gen] Generated {osl_exported} OSL shader(s)"
@@ -5138,8 +5739,8 @@ def prepare_scene(bake_dir="."):
 
     realize_instances()
     realize_particle_instances()
-    collect_halo_particles()
     realize_gn_instances()
+    collect_halo_particles()
     convert_to_mesh()
     apply_modifiers()
     apply_transforms()
