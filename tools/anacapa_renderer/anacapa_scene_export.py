@@ -124,6 +124,34 @@ def _collect_transforms(depsgraph, types=('MESH', 'LIGHT', 'CAMERA')):
     return result
 
 
+def _collect_instance_transforms(depsgraph):
+    """Return {(parent_name, pid_tuple): yup_matrix} for instanced mesh objects
+    whose parent has instance_type == 'COLLECTION' (i.e. regular collection instances).
+
+    The composite key (parent_name, pid) is unique per instance: different collection
+    instance objects have distinct parent names, and objects within one collection are
+    distinguished by their persistent_id index (0 for the first prototype, 1 for the
+    second, etc.).  GN/particle instances and plain object-instances are excluded."""
+    result = {}
+    for inst in depsgraph.object_instances:
+        if not inst.is_instance:
+            continue
+        obj = inst.object
+        if obj.original.hide_render:
+            continue
+        if obj.type != 'MESH':
+            continue
+        parent = inst.parent
+        if parent is None:
+            continue
+        orig_parent = parent.original if hasattr(parent, 'original') else parent
+        if getattr(orig_parent, 'instance_type', '') != 'COLLECTION':
+            continue
+        key = (parent.name, tuple(inst.persistent_id))
+        result[key] = _to_yup(inst.matrix_world)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Main export entry point
 # ---------------------------------------------------------------------------
@@ -228,6 +256,8 @@ def export_scene_binary(filepath: str, context,
                 'name':         obj.name,
                 'orig_name':    orig.name,
                 'is_instance':  inst.is_instance,
+                'inst_parent_name': inst.parent.name if inst.is_instance and inst.parent else None,
+                'inst_pid':     tuple(inst.persistent_id) if inst.is_instance else None,
                 'matrix':       mat_world,       # current-frame transform (single key fallback)
                 'positions':    positions,
                 'normals':      normals,
@@ -323,22 +353,33 @@ def export_scene_binary(filepath: str, context,
             # Collect transforms at shutter_open
             _frame_set(motion_times[0])
             dg_open = context.evaluated_depsgraph_get()
-            xf_open = _collect_transforms(dg_open)
+            xf_open      = _collect_transforms(dg_open)
+            xf_inst_open = _collect_instance_transforms(dg_open)
 
             # Collect transforms at shutter_close
             _frame_set(motion_times[1])
             dg_close = context.evaluated_depsgraph_get()
-            xf_close = _collect_transforms(dg_close)
+            xf_close      = _collect_transforms(dg_close)
+            xf_inst_close = _collect_instance_transforms(dg_close)
         finally:
             scene.frame_set(current_frame)
 
         for m in mesh_data:
             if not m['is_instance']:
+                # Non-instance: match by orig_name across frames
                 oname = m['orig_name']
                 mo = xf_open.get(oname,  m['matrix'])
                 mc = xf_close.get(oname, m['matrix'])
+            elif m['inst_parent_name'] is not None and m['inst_pid'] is not None:
+                # Collection instance: key is (parent_name, pid) — unique because
+                # each collection instancer has a distinct parent name, and objects
+                # within one collection are ordered by persistent_id.
+                # Non-collection instances (GN, particles) were excluded from
+                # xf_inst_open/close, so their lookup falls back to m['matrix'].
+                key = (m['inst_parent_name'], m['inst_pid'])
+                mo = xf_inst_open.get(key,  m['matrix'])
+                mc = xf_inst_close.get(key, m['matrix'])
             else:
-                # Instanced object: duplicate current-frame matrix for both keys
                 mo = mc = m['matrix']
             m['motion_matrices'] = [mo, mc]
             m['motion_times']    = motion_times
