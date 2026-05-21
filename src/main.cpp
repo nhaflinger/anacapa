@@ -1,4 +1,5 @@
 #include "render/RenderSession.h"
+#include "export/SceneExporter.h"
 #include <anacapa/render/SocketDisplayDriver.h>
 #include <anacapa/render/DisplayProtocol.h>
 #include <CLI/CLI.hpp>
@@ -6,6 +7,14 @@
 
 int main(int argc, char** argv) {
     CLI::App app{"anacapa — bidirectional path tracer"};
+
+    // --export-scene <blob> <usd>  — convert a binary scene blob to USD.
+    // This subcommand is invoked by the Blender addon and exits immediately.
+    std::string exportBlobPath, exportUsdPath;
+    auto* exportSub = app.add_subcommand("export-scene",
+        "Convert a binary scene blob written by the Blender addon to USD");
+    exportSub->add_option("blob", exportBlobPath, "Input binary blob path")->required();
+    exportSub->add_option("usd",  exportUsdPath,  "Output USD path")->required();
 
     anacapa::RenderSettings settings;
 
@@ -160,6 +169,11 @@ int main(int argc, char** argv) {
        ->default_val("");
 
     CLI11_PARSE(app, argc, argv);
+
+    if (*exportSub) {
+        bool ok = anacapa::exportSceneToUsd(exportBlobPath, exportUsdPath);
+        return ok ? 0 : 1;
+    }
 
     settings.frameSet = (frameOpt->count() > 0);
 

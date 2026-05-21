@@ -178,13 +178,18 @@ class ANACAPA_OT_render(bpy.types.Operator):
             self.report({'INFO'}, f"Hidden {len(hidden_for_render)} hair object(s) for render")
 
         # --- Export USD (runs prep_scene, which may convert/remove Curves) ---
+        _shutter_open = 0.0
         _shutter_close = 0.0
         if getattr(settings, 'use_motion_blur', False):
             _shutter  = getattr(settings, 'motion_blur_shutter', 0.5)
             _position = getattr(settings, 'motion_blur_position', 'CENTER')
             if _shutter > 0:
-                _shutter_close = _shutter if _position in ('START', 'END') \
-                                 else _shutter / 2.0
+                if _position == 'START':
+                    _shutter_open, _shutter_close = 0.0, _shutter
+                elif _position == 'END':
+                    _shutter_open, _shutter_close = -_shutter, 0.0
+                else:  # CENTER
+                    _shutter_open, _shutter_close = -_shutter / 2.0, _shutter / 2.0
 
         self.report({'INFO'}, "Exporting USD…")
         s = export_mod._state()
@@ -194,7 +199,8 @@ class ANACAPA_OT_render(bpy.types.Operator):
         s["dirty_transform"] = True
         s["suppress_dirty"]  = True
         try:
-            export_usd(usd_path, context, shutter_close=_shutter_close)
+            export_usd(usd_path, context,
+                       shutter_open=_shutter_open, shutter_close=_shutter_close)
         except Exception as e:
             self.report({'ERROR'}, f"USD export failed: {e}")
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -514,9 +520,22 @@ class ANACAPA_OT_export_scene(bpy.types.Operator):
                 abc_path        = None
                 matassign_paths = None
 
+        _s_open2, _s_close2 = 0.0, 0.0
+        if getattr(settings, 'use_motion_blur', False):
+            _sh2  = getattr(settings, 'motion_blur_shutter', 0.5)
+            _pos2 = getattr(settings, 'motion_blur_position', 'CENTER')
+            if _sh2 > 0:
+                if _pos2 == 'START':
+                    _s_open2, _s_close2 = 0.0, _sh2
+                elif _pos2 == 'END':
+                    _s_open2, _s_close2 = -_sh2, 0.0
+                else:
+                    _s_open2, _s_close2 = -_sh2 / 2.0, _sh2 / 2.0
+
         self.report({'INFO'}, f"Exporting USD to {usd_path}…")
         try:
-            export_usd(usd_path, context)
+            export_usd(usd_path, context,
+                       shutter_open=_s_open2, shutter_close=_s_close2)
         except Exception as e:
             self.report({'ERROR'}, f"USD export failed: {e}")
             return {'CANCELLED'}

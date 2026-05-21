@@ -594,7 +594,7 @@ sys.exit(0 if total_strands > 0 else 2)
              "--python", eval_py],
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=20,
         )
 
         for line in result.stdout.splitlines():
@@ -862,16 +862,73 @@ sys.exit(0 if total_strands > 0 else 2)
     return matassign_paths
 
 
-def _usd_export(filepath, context, **kwargs):
-    window = context.window_manager.windows[0]
-    with context.temp_override(window=window):
-        bpy.ops.wm.usd_export(filepath=filepath, **kwargs)
+def _load_scene_export_module():
+    if _load_scene_export_module._mod is not None:
+        return _load_scene_export_module._mod
+    path = os.path.join(os.path.dirname(__file__), "anacapa_scene_export.py")
+    if not os.path.exists(path):
+        return None
+    spec = importlib.util.spec_from_file_location("anacapa_scene_export", path)
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _load_scene_export_module._mod = mod
+    return mod
+
+_load_scene_export_module._mod = None
 
 
-def export_usd(usd_path, context, run_prep=True, shutter_close=0.0):
+def _anacapa_export_scene(usd_path, context, executable,
+                          shutter_open=0.0, shutter_close=0.0):
+    """
+    New scene export pipeline — reads from the depsgraph without touching the
+    live scene, writes a binary blob, invokes the C++ exporter to produce USD,
+    then writes .mtlx/.osl material files alongside it.
+    """
+    import subprocess
+
+    scene_mod = _load_scene_export_module()
+    if scene_mod is None:
+        raise RuntimeError("anacapa_scene_export.py not found")
+
+    blob_path = usd_path + ".blob.bin"
+
+    # 1. Write binary blob from depsgraph (motion blur keys sampled when enabled)
+    scene_mod.export_scene_binary(blob_path, context,
+                                  shutter_open=shutter_open,
+                                  shutter_close=shutter_close)
+
+    # 2. C++ converts blob → USD
+    result = subprocess.run(
+        [executable, "export-scene", blob_path, usd_path],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(result.stdout)
+        print(result.stderr)
+        raise RuntimeError(f"anacapa export-scene failed (code {result.returncode})")
+    if result.stdout:
+        print(result.stdout, end="")
+
+    # 3. Write MaterialX / OSL material files
+    prep = _load_prep_module()
+    if prep is not None:
+        mtlx_dir = os.path.join(os.path.dirname(usd_path), "materials")
+        try:
+            prep._export_materialx_graphs(mtlx_dir)
+        except Exception as e:
+            print(f"[Anacapa] MaterialX export warning: {e}")
+
+    # Blob is a temp artefact
+    try:
+        os.remove(blob_path)
+    except OSError:
+        pass
+
+
+def export_usd(usd_path, context, run_prep=True,
+               shutter_open=0.0, shutter_close=0.0):
     """
     Export the scene to a single USD file.
-    Skips prep when only transforms changed.
     Skips export entirely when nothing changed.
     """
     s = _state()
@@ -891,89 +948,33 @@ def export_usd(usd_path, context, run_prep=True, shutter_close=0.0):
         print("[Anacapa] Scene unchanged — reusing cached USD")
         return
 
-    prep = _load_prep_module() if run_prep else None
+    executable = get_executable(context)
 
-    # suppress_dirty should already be set by the caller (operator).
-    # We set it here too as a safety net in case export_usd is called directly.
     was_suppressed = s["suppress_dirty"]
     s["suppress_dirty"] = True
     try:
-        # Always snapshot before any scene mutation — needed for both full prep
-        # and the lightweight GN realize that runs on every export.
-        scene_obj = bpy.context.scene
-        pre_objects = {
-            obj.name: (obj.hide_render, obj.hide_viewport)
-            for obj in scene_obj.objects
-        }
+        _anacapa_export_scene(usd_path, context, executable,
+                              shutter_open=shutter_open,
+                              shutter_close=shutter_close)
 
-        if s["dirty_scene"] and prep is not None:
-            print("[Anacapa] Running scene prep…")
-            bake_dir = os.path.dirname(usd_path)
-            try:
-                prep.prepare_scene(bake_dir=bake_dir)
-            except Exception as e:
-                print(f"[Anacapa] Scene prep warning: {e}")
-        elif prep is not None:
-            # Not a full dirty render, but GN instances must still be realized
-            # on every export — _gn_realized objects are cleaned up after each
-            # render, so without this the GN generator exports as a USD
-            # PointInstancer which Anacapa cannot load.
-            if not s["dirty_scene"] and s["dirty_transform"]:
-                print("[Anacapa] Transform-only change — re-realizing GN instances")
-            else:
-                print("[Anacapa] Re-realizing GN instances for export")
-            try:
-                prep.realize_gn_instances()
-                prep.collect_halo_particles()
-            except Exception as e:
-                print(f"[Anacapa] GN realize warning: {e}")
-
-        _usd_export(usd_path, context,
-            export_animation=True,
-            export_hair=False,
-            export_uvmaps=True,
-            export_normals=True,
-            export_materials=True,
-            use_instancing=True,
-            generate_preview_surface=True,
-            generate_materialx_network=True,
-            export_textures_mode='NEW',
-            overwrite_textures=False,
-        )
-
+        # Sky injection and DOF settings written into the USD post-export
+        prep = _load_prep_module() if run_prep else None
         if prep is not None:
             try:
-                ana = getattr(bpy.context.scene, 'anacapa', None)
-                use_dof = getattr(ana, 'use_dof', False)
-                sky = ana if (ana and getattr(ana, 'use_sky', False)) else None
+                ana      = getattr(bpy.context.scene, 'anacapa', None)
+                use_dof  = getattr(ana, 'use_dof', False)
+                sky      = ana if (ana and getattr(ana, 'use_sky', False)) else None
                 prep.post_process_usd(usd_path, shutter_close=shutter_close,
                                       disable_dof=not use_dof,
                                       sky_settings=sky)
             except Exception as e:
                 print(f"[Anacapa] USD post-process warning: {e}")
 
-        # Always restore: remove objects prep/realize created, restore hide states
-        if prep is not None:
-            scene_obj = bpy.context.scene
-            for obj in list(scene_obj.objects):
-                if obj.name not in pre_objects:
-                    bpy.data.objects.remove(obj, do_unlink=True)
-                else:
-                    was_hr, was_hv = pre_objects[obj.name]
-                    is_gn_gen = obj.get("_anacapa_gn_hidden", False)
-                    target_hr = False if is_gn_gen else was_hr
-                    if obj.hide_render != target_hr:
-                        obj.hide_render = target_hr
-                    if obj.hide_viewport != was_hv:
-                        obj.hide_viewport = was_hv
-            print("[Anacapa] Scene restored after export.")
-
         s["dirty_scene"]     = False
         s["dirty_transform"] = False
         s["cached_usd_path"] = usd_path
 
     finally:
-        # Only clear suppress if we set it (don't clear if caller set it)
         if not was_suppressed:
             s["suppress_dirty"] = False
 

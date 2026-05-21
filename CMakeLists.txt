@@ -136,7 +136,8 @@ endif()
 # ---------------------------------------------------------------------------
 # Executable
 # ---------------------------------------------------------------------------
-add_executable(anacapa src/main.cpp)
+add_executable(anacapa src/main.cpp src/export/SceneExporter.cpp)
+target_include_directories(anacapa PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(anacapa PRIVATE anacapa_lib CLI11::CLI11)
 if(ANACAPA_ENABLE_CUDA)
     set_target_properties(anacapa PROPERTIES CUDA_RUNTIME_LIBRARY "Shared")
@@ -243,6 +244,7 @@ set(_addon_py_files
     "${_addon_src_dir}/properties.py"
     "${_addon_src_dir}/ui.py"
     "${_addon_src_dir}/blender_prep_for_usd_export.py"
+    "${_addon_src_dir}/anacapa_scene_export.py"
     "${_addon_src_dir}/osl/anacapa_lib.h"
 )
 add_custom_command(
