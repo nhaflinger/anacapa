@@ -891,13 +891,24 @@ def _anacapa_export_scene(usd_path, context, executable,
         raise RuntimeError("anacapa_scene_export.py not found")
 
     blob_path = usd_path + ".blob.bin"
+    prep = _load_prep_module()
 
-    # 1. Write binary blob from depsgraph (motion blur keys sampled when enabled)
+    # 1. Collect HALO / GN-based particles before any frame seeking so that GN
+    #    simulation zones are captured at the current evaluated state.
+    if prep is not None:
+        try:
+            n = prep.collect_halo_particles()
+            if n:
+                print(f"[Anacapa] Collected {n} halo particles")
+        except Exception as e:
+            print(f"[Anacapa] Halo particle collection warning: {e}")
+
+    # 2. Write binary blob from depsgraph (motion blur keys sampled when enabled)
     scene_mod.export_scene_binary(blob_path, context,
                                   shutter_open=shutter_open,
                                   shutter_close=shutter_close)
 
-    # 2. C++ converts blob → USD
+    # 3. C++ converts blob → USD
     result = subprocess.run(
         [executable, "export-scene", blob_path, usd_path],
         capture_output=True, text=True
@@ -909,8 +920,14 @@ def _anacapa_export_scene(usd_path, context, executable,
     if result.stdout:
         print(result.stdout, end="")
 
-    # 3. Write MaterialX / OSL material files
-    prep = _load_prep_module()
+    # 4. Inject halo particles as UsdGeomPoints into the written USD
+    if prep is not None:
+        try:
+            prep._inject_halo_particles(usd_path, shutter_close=shutter_close)
+        except Exception as e:
+            print(f"[Anacapa] Halo particle injection warning: {e}")
+
+    # 5. Write MaterialX / OSL material files
     if prep is not None:
         mtlx_dir = os.path.join(os.path.dirname(usd_path), "materials")
         try:

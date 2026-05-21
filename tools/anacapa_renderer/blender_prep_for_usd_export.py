@@ -5939,15 +5939,21 @@ def _inject_halo_particles(usd_path, shutter_close=0.0):
             entry['name'].replace(' ', '_').replace('.', '_').replace('/', '_'))
         pts_prim = UsdGeom.Points.Define(stage, prim_path)
 
-        time      = Usd.TimeCode(entry['frame'])
+        time      = Usd.TimeCode(stage.GetStartTimeCode())
         positions = entry['positions']
-        pts_prim.GetPointsAttr().Set(
-            Vt.Vec3fArray([Gf.Vec3f(*p) for p in positions]), time)
+
+        # Blender world-space positions are Z-up; our USD stage is Y-up.
+        # USDLoader reads particles with zUp=False (Y-up stage) and does NOT
+        # apply any axis swap, so we must convert here: (x,y,z) → (x,z,-y).
+        def _zup_to_yup(pts):
+            return [Gf.Vec3f(p[0], p[2], -p[1]) for p in pts]
+
+        pts_prim.GetPointsAttr().Set(Vt.Vec3fArray(_zup_to_yup(positions)), time)
         pts_prim.GetWidthsAttr().Set(
             Vt.FloatArray(entry['widths']), time)
         if entry['velocities']:
             pts_prim.GetVelocitiesAttr().Set(
-                Vt.Vec3fArray([Gf.Vec3f(*v) for v in entry['velocities']]), time)
+                Vt.Vec3fArray(_zup_to_yup(entry['velocities'])), time)
 
         r, g, b = entry['color']
         pts_prim.GetPrim().CreateAttribute(
@@ -5987,7 +5993,7 @@ def _inject_halo_particles(usd_path, shutter_close=0.0):
             if close_positions:
                 pts_prim.GetPrim().CreateAttribute(
                     'anacapa:closePositions', Sdf.ValueTypeNames.Point3fArray, False
-                ).Set(Vt.Vec3fArray([Gf.Vec3f(*p) for p in close_positions]))
+                ).Set(Vt.Vec3fArray(_zup_to_yup(close_positions)))
 
         print(f"  [halo] Injected '{prim_path}': {len(positions)} particles at frame {entry['frame']}.")
 
