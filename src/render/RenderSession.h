@@ -72,6 +72,7 @@ struct RenderSettings {
     bool           gpuAssist       = false; // Use GPU (Metal/CUDA) backend when available
     bool           overrideLights    = false; // Replace scene lights with a simple white directional
     bool           overrideMaterials = false; // Replace all scene materials with white Lambertian
+    bool           skipOSL           = false; // Skip OSL material loading; fall back to StandardSurface
     std::string    pngPath;                   // If set, write sRGB-encoded PNG alongside EXR (no tone mapping)
     std::string    previewExrPath;            // If set, write progressive linear EXR preview to this path
     float          exposure          = 0.f;   // EV adjustment for PNG output
@@ -95,6 +96,10 @@ struct RenderSettings {
     // Useful for isolating which pixels belong to a given mesh, and for testing
     // that mesh's shading in isolation.  Indirect bounces are unaffected.
     int32_t        debugMeshID       = -1;
+
+    // Highlight: when >= 0, renders the target mesh as flat red and dims all
+    // other geometry to 20% brightness so you can visually locate a mesh by ID.
+    int32_t        highlightMeshID   = -1;
 };
 
 // ---------------------------------------------------------------------------

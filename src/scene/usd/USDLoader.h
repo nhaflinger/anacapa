@@ -31,6 +31,7 @@ LoadedScene loadUSD(const std::string& path,
                     const std::string& cameraOverridePath = "",
                     double frame        = std::numeric_limits<double>::quiet_NaN(),
                     float  shutterOpen  = 0.f,
-                    float  shutterClose = 0.f);
+                    float  shutterClose = 0.f,
+                    bool   skipOSL      = false);
 
 } // namespace anacapa

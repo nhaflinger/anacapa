@@ -1088,6 +1088,21 @@ static Spectrum evalSchlick(float cosTheta, const OslLobe& lobe) {
     return schlickGeneral(cosTheta, lobe.f0, lobe.f90, lobe.schlickExp);
 }
 
+// Selection luminance for lobe mixing.
+// For dielectric GGXRefl lobes (f0 < 0.5), scale down by F0 so that a dark
+// diffuse lobe isn't overwhelmed by a unit-weight specular from layer().
+// This keeps the estimator unbiased while dramatically reducing variance for
+// dark-albedo materials (e.g. chocolate icing).
+static float lobeSelLum(const OslLobe& lobe) {
+    float lw = luminance(lobe.weight);
+    if (lobe.kind == OslLobe::Kind::GGXRefl) {
+        float f0avg = luminance(lobe.f0);
+        if (f0avg > 0.f && f0avg < 0.5f)  // dielectrics only, not metals
+            lw *= f0avg;
+    }
+    return lw;
+}
+
 static BSDFEval evalGGXReflLobe(const OslLobe& lobe, Vec3f wo, Vec3f wi) {
     if (lobe.alpha2 < 1e-6f) return {};  // delta BSDF — cannot evaluate
     if (wo.z <= 0.f || wi.z <= 0.f) return {};
@@ -1365,18 +1380,38 @@ public:
         return MarschnerHairMaterial(p);
     }
 
+    // When custom SSS params are set (m_sss.weight > 0), blend each diffuse /
+    // subsurface lobe's apparent albedo toward the SSS color so that path-traced
+    // renders reflect the artist's intended material appearance.  Without this,
+    // OSL layer() assigns weight {1,1,1} to every lobe and a white-base-color
+    // Principled BSDF with dark SSS would render white in path tracing.
+    void applySssLobeTint(std::vector<OslLobe>& lobes) const {
+        if (m_sss.weight <= 0.f) return;
+        for (auto& lobe : lobes) {
+            if (lobe.kind != OslLobe::Kind::Diffuse &&
+                lobe.kind != OslLobe::Kind::DiffuseTrans)
+                continue;
+            // blend: apparent_color = base * (1-w) + sss_color * w
+            lobe.weight = lobe.weight * (1.f - m_sss.weight)
+                        + m_sss.color  * m_sss.weight;
+            lobe.albedo = lobe.weight;
+        }
+    }
+
     // ---------- sample ----------
     BSDFSample sample(const ShadingContext& ctx,
                       Vec3f wo, Vec2f u, float uComp) const override {
         Vec3f woLocal = ctx.toLocal(wo);
         auto lobes = evalClosure(ctx, wo);
         mergeGGXPairs(lobes);
+        applySssLobeTint(lobes);
 
-        // Select lobe by luminance weight; GGXBoth handles R/T split internally
+        // Select lobe by selection luminance (lobeSelLum scales dielectric GGXRefl
+        // by F0 to prevent specular from dominating over dark diffuse albedos).
         float total = 0.f;
         for (auto& l : lobes)
             if (l.kind != OslLobe::Kind::Emission)
-                total += luminance(l.weight);
+                total += lobeSelLum(l);
 
         if (total <= 0.f) return {};
 
@@ -1386,9 +1421,9 @@ public:
             const auto& lobe = lobes[i];
             if (lobe.kind == OslLobe::Kind::Emission) continue;
             accumPrev = accum;
-            accum += luminance(lobe.weight);
+            accum += lobeSelLum(lobe);
             if (uComp * total <= accum || i == lobes.size() - 1) {
-                float selPdf = luminance(lobe.weight) / total;
+                float selPdf = lobeSelLum(lobe) / total;
 
                 // Remap uComp into [0,1] within this lobe's selection interval
                 // so GGXBoth can use it as an independent R/T Fresnel decision.
@@ -1419,7 +1454,7 @@ public:
                         continue;
                     auto ev = evalLobe(lobes[j], woLocal, wiLocal);
                     if (ev.pdf > 0.f) {
-                        float wj = luminance(lobes[j].weight) / total;
+                        float wj = lobeSelLum(lobes[j]) / total;
                         s.f   = s.f + ev.f;
                         s.pdf += ev.pdf * wj;
                     }
@@ -1439,16 +1474,17 @@ public:
 
         auto lobes = evalClosure(ctx, wo);
         mergeGGXPairs(lobes);
+        applySssLobeTint(lobes);
 
         float total = 0.f;
         for (auto& l : lobes)
             if (l.kind != OslLobe::Kind::Emission)
-                total += luminance(l.weight);
+                total += lobeSelLum(l);
 
         BSDFEval result = {};
         for (auto& lobe : lobes) {
             if (lobe.kind == OslLobe::Kind::Emission) continue;
-            float selPdf = total > 0.f ? luminance(lobe.weight) / total : 0.f;
+            float selPdf = total > 0.f ? lobeSelLum(lobe) / total : 0.f;
             if (lobe.kind == OslLobe::Kind::MarschnerHair) {
                 auto mat = marschnerFromLobe(lobe);
                 auto ev  = mat.evaluate(ctx, wo, wi);

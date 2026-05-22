@@ -220,6 +220,9 @@ class ANACAPA_OT_render(bpy.types.Operator):
                                      curves_path=abc_path,
                                      matassign_paths=matassign_paths,
                                      frame=context.scene.frame_current)
+        import shlex as _shlex
+        print(f"[Anacapa] use_osl={getattr(settings, 'use_osl', '(missing)')}")
+        print(f"[Anacapa] render cmd: {_shlex.join(cmd)}")
 
         # --- Viewer / display driver ---
         use_viewer = settings.use_viewer

@@ -200,6 +200,12 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
         description="Replace all materials with white Lambertian",
         default=False,
     )
+    use_osl: bpy.props.BoolProperty(
+        name="Use OSL Materials",
+        description="Evaluate OSL/MaterialX shaders. Disable to fall back to StandardSurface "
+                    "(useful for verifying material assignment without OSL execution)",
+        default=True,
+    )
 
     # Depth of field
     use_dof: bpy.props.BoolProperty(

@@ -173,6 +173,7 @@ class ANACAPA_PT_lighting(bpy.types.Panel):
         layout.separator()
         layout.prop(s, "override_lights")
         layout.prop(s, "override_materials")
+        layout.prop(s, "use_osl")
 
 
 # ---------------------------------------------------------------------------

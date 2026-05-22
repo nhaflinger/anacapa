@@ -121,10 +121,20 @@ int main(int argc, char** argv) {
                  "Replace all scene materials with white Lambertian "
                  "(useful for isolating lighting issues from material issues)");
 
+    app.add_flag("--skip-osl", settings.skipOSL,
+                 "Skip OSL shader loading; fall through to StandardSurface/UsdPreviewSurface "
+                 "(useful for verifying material assignment without OSL execution).");
+
     app.add_option("--debug-mesh", settings.debugMeshID,
                    "Debug: primary rays that hit any other mesh ID return "
                    "black, so only the target mesh's pixels are shaded.  "
                    "Indirect bounces are unaffected.  Default: -1 (off).")
+       ->default_val(-1);
+
+    app.add_option("--highlight-mesh", settings.highlightMeshID,
+                   "Debug: renders the target mesh as flat red; all other "
+                   "geometry is dimmed to 20%%.  Useful for visually locating "
+                   "a mesh by its ID in the render.  Default: -1 (off).")
        ->default_val(-1);
 
 

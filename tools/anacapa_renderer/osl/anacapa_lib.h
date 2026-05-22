@@ -280,4 +280,22 @@ float anacapa_brick_fac(point pos, float scale,
     return smoothstep(hms - hms_s, hms + hms_s, em);
 }
 
+// ===========================================================================
+// Object random color  (Blender's OBJECT_INFO → Color / Random output)
+//
+// Returns a stable greyscale color(v,v,v) where v ∈ [0,1] is uniquely
+// derived from the object's world-space origin.  Each GN instance placed
+// at a different world position produces a distinct value, matching the
+// per-object random color behaviour in Blender Cycles.
+// ===========================================================================
+
+color anacapa_object_random_color3()
+{
+    // Transform the object-space origin (0,0,0) to world space to obtain a
+    // position unique to this instance.
+    point world_origin = transform("object", "world", point(0.0, 0.0, 0.0));
+    float h = cellnoise(world_origin * 13.7 + vector(0.42, 0.73, 0.17));
+    return color(h, h, h);
+}
+
 #endif // ANACAPA_LIB_H

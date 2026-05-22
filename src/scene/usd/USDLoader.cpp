@@ -627,7 +627,33 @@ static FloatTOV resolveFloatTOVWithFallback(const FloatTOV& primary,
 //     keeping the texture connection only in the UsdPreviewSurface network.
 // ---------------------------------------------------------------------------
 static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
-                                                    const std::string& stageDir) {
+                                                    const std::string& stageDir,
+                                                    bool skipOSL = false) {
+    // anacapa:translucency:enabled — custom flag written by SceneExporter for
+    // materials identified as pure Translucent BSDF in Blender.  Checked first
+    // so it works even when no ND_translucent_bsdf node tree is present.
+    {
+        bool anacapaTrans = false;
+        mat.GetPrim().GetAttribute(TfToken("anacapa:translucency:enabled")).Get(&anacapaTrans);
+        if (anacapaTrans) {
+            Spectrum color = {0.8f, 0.8f, 0.8f};
+            GfVec3f cv;
+            if (mat.GetPrim().GetAttribute(TfToken("anacapa:translucency:color")).Get(&cv))
+                color = {cv[0], cv[1], cv[2]};
+            spdlog::info("USDLoader: material '{}' → translucent (anacapa flag, "
+                         "color=({:.2f},{:.2f},{:.2f}))",
+                         mat.GetPath().GetString(), color.x, color.y, color.z);
+            StandardSurfaceMaterial::Params p;
+            p.base               = 0.f;
+            p.translucency       = 1.f;
+            p.translucency_color = SpectrumTOV(color);
+            p.scatter            = 0.5f;
+            p.roughness          = FloatTOV(1.f);
+            p.specular           = FloatTOV(0.f);
+            return std::make_unique<StandardSurfaceMaterial>(p);
+        }
+    }
+
     // ND_translucent_bsdf — checked before OSL so the StandardSurface path
     // (which supports the scatter width parameter) handles it even when an
     // OSL shader file exists for the same material.
@@ -661,6 +687,9 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
     }
 
 #ifdef ANACAPA_ENABLE_OSL
+    // --skip-osl: bypass OSL entirely and fall through to StandardSurface.
+    // Useful for verifying material assignment without OSL execution complexity.
+    if (!skipOSL)
     // If a matching .osl/.oso file exists in <stageDir>/materials/, prefer
     // OslMaterial — it evaluates the full procedural MaterialX graph.
     //
@@ -858,6 +887,8 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
 
     UsdShadeShader surface = mat.ComputeSurfaceSource();
     if (!surface) {
+        spdlog::info("USDLoader: mat '{}' → no surface shader found",
+                     mat.GetPrim().GetName().GetString());
         // No surface shader exported — check if the material name implies glass.
         // Blender's Glass BSDF nodes are not translated by the USD exporter and
         // result in an empty material shell. Detect by name and substitute glass.
@@ -880,8 +911,14 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
     TfToken shaderId;
     surface.GetShaderId(&shaderId);
 
-    if (shaderId != TfToken("UsdPreviewSurface"))
+    spdlog::info("USDLoader: mat '{}' → UsdPreviewSurface path (shaderId='{}')",
+                 mat.GetPrim().GetName().GetString(), shaderId.GetString());
+
+    if (shaderId != TfToken("UsdPreviewSurface")) {
+        spdlog::info("USDLoader: mat '{}' → shaderId mismatch → Lambertian(0.5)",
+                     mat.GetPrim().GetName().GetString());
         return std::make_unique<LambertianMaterial>(Spectrum{0.5f, 0.5f, 0.5f});
+    }
 
     StandardSurfaceMaterial::Params p;
     p.base_color = resolveColorTOV(surface.GetInput(TfToken("diffuseColor")),
@@ -1013,6 +1050,15 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
         crIn.Get(&crVal);
         p.caustic_radius = crVal;
     }
+
+    spdlog::info("USDLoader: mat '{}' → StandardSurface "
+                 "diffuse=({:.3f},{:.3f},{:.3f}) sss={:.3f} sss_color=({:.3f},{:.3f},{:.3f}) "
+                 "rough={:.3f} spec={:.3f} metal={:.3f} opacity={:.3f}",
+                 mat.GetPrim().GetName().GetString(),
+                 p.base_color.value.x, p.base_color.value.y, p.base_color.value.z,
+                 p.subsurface,
+                 p.subsurface_color.value.x, p.subsurface_color.value.y, p.subsurface_color.value.z,
+                 p.roughness.value, p.specular.value, p.metalness.value, p.opacity.value);
 
     return std::make_unique<StandardSurfaceMaterial>(p);
 }
@@ -1457,7 +1503,8 @@ LoadedScene loadUSD(const std::string& path,
                     const std::string& cameraOverridePath,
                     double frame,
                     float  shutterOpen,
-                    float  shutterClose) {
+                    float  shutterClose,
+                    bool   skipOSL) {
     LoadedScene result;
 
     auto stage = UsdStage::Open(path);
@@ -1698,7 +1745,7 @@ LoadedScene loadUSD(const std::string& path,
                 auto it = matPathToIdx.find(matPath);
                 if (it != matPathToIdx.end()) return it->second;
                 uint32_t idx = static_cast<uint32_t>(result.materials.size());
-                result.materials.push_back(resolveMaterial(mat, stageDir));
+                result.materials.push_back(resolveMaterial(mat, stageDir, skipOSL));
                 matPathToIdx[matPath] = idx;
                 return idx;
             };
@@ -1844,7 +1891,7 @@ LoadedScene loadUSD(const std::string& path,
                 auto it = matPathToIdx.find(matPath);
                 if (it != matPathToIdx.end()) return it->second;
                 uint32_t idx = static_cast<uint32_t>(result.materials.size());
-                result.materials.push_back(resolveMaterial(mat, stageDir));
+                result.materials.push_back(resolveMaterial(mat, stageDir, skipOSL));
                 matPathToIdx[matPath] = idx;
                 return idx;
             };
@@ -2154,11 +2201,11 @@ LoadedScene loadUSD(const std::string& path,
             Vec3f uHalf = transformPoint(xform, GfVec3d(width * 0.5, 0, 0), zUp) - center;
             Vec3f vHalf = transformPoint(xform, GfVec3d(0, height * 0.5, 0), zUp) - center;
 
-            // Blender always exports normalize=true with intensity = energy/π.
-            // To recover radiance: Le = intensity/area (Power = Le*area*π = energy).
-            // normalize=false: intensity is raw radiance.
+            // USD/Blender convention for normalize=true: intensity = total power (Watts).
+            // Le = intensity / (area × π)  [Lambertian area-light normalization]
+            // normalize=false: intensity is already radiance (W/m²/sr).
             float lightArea = cross(uHalf, vHalf).length() * 4.f;
-            float leScale = normalize ? (1.f / lightArea) : 1.f;
+            float leScale = normalize ? (1.f / (lightArea * float(M_PI))) : 1.f;
             Spectrum Le = {color[0] * intensity * leScale,
                            color[1] * intensity * leScale,
                            color[2] * intensity * leScale};
@@ -2228,9 +2275,9 @@ LoadedScene loadUSD(const std::string& path,
             Vec3f xEdge = transformPoint(xform, GfVec3d(radius, 0, 0), zUp) - center;
             Vec3f yEdge = transformPoint(xform, GfVec3d(0, radius, 0), zUp) - center;
 
-            // Same Blender convention: intensity=energy/π, normalize=true.
+            // Same normalize convention: intensity = total power → Le = intensity/(area×π).
             float diskArea = 3.14159265f * radius * radius;
-            float leScale = normalize ? (1.f / diskArea) : 1.f;
+            float leScale = normalize ? (1.f / (diskArea * float(M_PI))) : 1.f;
             Spectrum Le = {color[0] * intensity * leScale,
                            color[1] * intensity * leScale,
                            color[2] * intensity * leScale};
@@ -2701,7 +2748,7 @@ LoadedScene loadUSD(const std::string& path,
         if (matPathToIdx.count(matPath)) continue;  // already indexed
         UsdShadeMaterial mat(prim);
         uint32_t idx = static_cast<uint32_t>(result.materials.size());
-        auto m = resolveMaterial(mat, stageDir);
+        auto m = resolveMaterial(mat, stageDir, skipOSL);
         if (!m) continue;
         result.materials.push_back(std::move(m));
         matPathToIdx[matPath] = idx;

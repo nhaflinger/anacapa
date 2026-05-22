@@ -226,27 +226,34 @@ bool exportSceneToUsd(const std::string& blobPath, const std::string& usdPath) {
                 TfToken("anacapa:translucency:color"),
                 SdfValueTypeNames->Color3f, false)
                 .Set(GfVec3f(transColor[0], transColor[1], transColor[2]));
-        }
-
-        // For materials with SSS, create a UsdPreviewSurface shader node and
-        // wire its SSS inputs.  USDLoader's resolveMaterial() finds this via
-        // mat.ComputeSurfaceSource() and calls oslSetSubsurfaceParams() from it.
-        // sssData layout: [weight, cr, cg, cb, rr, rg, rb, scale, anisotropy]
-        if (hasSss && sssData) {
+        } else {
+            // For all non-translucent materials create a UsdPreviewSurface so
+            // USDLoader's StandardSurface fallback (used when OSL is off or absent)
+            // can pick up the correct diffuseColor instead of defaulting to white.
+            // transColor here carries the Principled BSDF base_color exported from
+            // Blender; for SSS materials it is the base colour before SSS blending.
             SdfPath previewPath = mp.AppendChild(TfToken("Preview"));
             UsdShadeShader preview = UsdShadeShader::Define(stage, previewPath);
             preview.CreateIdAttr(VtValue(TfToken("UsdPreviewSurface")));
-            preview.CreateInput(TfToken("subsurface_weight"), SdfValueTypeNames->Float)
-                .Set(sssData[0]);
-            preview.CreateInput(TfToken("subsurface_color"), SdfValueTypeNames->Color3f)
-                .Set(GfVec3f(sssData[1], sssData[2], sssData[3]));
-            // subsurface_radius is per-channel (color3f); USDLoader averages them
-            preview.CreateInput(TfToken("subsurface_radius"), SdfValueTypeNames->Color3f)
-                .Set(GfVec3f(sssData[4], sssData[5], sssData[6]));
-            preview.CreateInput(TfToken("subsurface_scale"), SdfValueTypeNames->Float)
-                .Set(sssData[7]);
-            preview.CreateInput(TfToken("subsurface_anisotropy"), SdfValueTypeNames->Float)
-                .Set(sssData[8]);
+            preview.CreateInput(TfToken("diffuseColor"), SdfValueTypeNames->Color3f)
+                .Set(GfVec3f(transColor[0], transColor[1], transColor[2]));
+
+            // SSS params — sssData layout:
+            // [weight, cr, cg, cb, rr, rg, rb, scale, anisotropy]
+            if (hasSss && sssData) {
+                preview.CreateInput(TfToken("subsurface_weight"), SdfValueTypeNames->Float)
+                    .Set(sssData[0]);
+                preview.CreateInput(TfToken("subsurface_color"), SdfValueTypeNames->Color3f)
+                    .Set(GfVec3f(sssData[1], sssData[2], sssData[3]));
+                // subsurface_radius is per-channel (color3f); USDLoader averages them
+                preview.CreateInput(TfToken("subsurface_radius"), SdfValueTypeNames->Color3f)
+                    .Set(GfVec3f(sssData[4], sssData[5], sssData[6]));
+                preview.CreateInput(TfToken("subsurface_scale"), SdfValueTypeNames->Float)
+                    .Set(sssData[7]);
+                preview.CreateInput(TfToken("subsurface_anisotropy"), SdfValueTypeNames->Float)
+                    .Set(sssData[8]);
+            }
+
             // Connect surface output so ComputeSurfaceSource() can find this node
             mat.CreateSurfaceOutput().ConnectToSource(
                 preview.CreateOutput(TfToken("surface"), SdfValueTypeNames->Token));

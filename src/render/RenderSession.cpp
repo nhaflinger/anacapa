@@ -155,7 +155,8 @@ void RenderSession::loadScene() {
                                       m_settings.cameraPath,
                                       renderFrame,
                                       m_settings.shutterOpen,
-                                      m_settings.shutterClose);
+                                      m_settings.shutterClose,
+                                      m_settings.skipOSL);
         if (!loaded.valid) {
             spdlog::error("Aborting: could not open scene '{}'",
                           m_settings.scenePath);
@@ -843,6 +844,8 @@ void RenderSession::render() {
                  pixelFilterName(m_pixelFilter->type()), m_pixelFilter->radius());
 
     m_integrator->setDebugMeshID(m_settings.debugMeshID);
+    if (auto* pi = dynamic_cast<PathIntegrator*>(m_integrator.get()))
+        pi->setHighlightMeshID(m_settings.highlightMeshID);
     m_integrator->setPixelFilter(m_pixelFilter.get());
     m_integrator->prepare(m_scene);
 

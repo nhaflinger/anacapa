@@ -1047,6 +1047,8 @@ def build_command(executable, usd_path, settings, width, height, output_path,
         cmd.append("--override-lights")
     if settings.override_materials:
         cmd.append("--override-materials")
+    if not getattr(settings, 'use_osl', True):
+        cmd.append("--skip-osl")
 
     # use_dof=False: fStop already zeroed in USD by post_process_usd — nothing to pass
     if getattr(settings, 'use_dof', False) and settings.fstop > 0 and settings.focus_distance > 0:

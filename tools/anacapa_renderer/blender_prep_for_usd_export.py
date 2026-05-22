@@ -541,6 +541,7 @@ def collect_halo_particles() -> int:
     ]
     for obj in gn_emitters:
         positions, widths, velocities, ids = [], [], [], []
+        is_mesh_instancer = False  # set True when GN output is solid mesh instances
 
         # --- Strategy 0: read on-disk GN bake cache (most reliable) -------------
         positions, widths, velocities, ids = _read_gn_bake(obj, current_frame)
@@ -548,6 +549,11 @@ def collect_halo_particles() -> int:
         if not positions:
             # --- Strategy 1: duplicate + convert to mesh ------------------------
             # Works for non-simulation GN setups (Instance on Points, etc.)
+            # NOTE: if the converted mesh has polygons, the GN output is realized
+            # solid geometry (e.g. a mesh instancer whose instances were merged).
+            # In that case mark as mesh_instancer and skip ALL remaining strategies:
+            # the instances are exported as solid geometry by export_scene_binary,
+            # so halo emission would double them as large glowing discs.
             try:
                 bpy.ops.object.select_all(action='DESELECT')
                 obj.select_set(True)
@@ -556,10 +562,14 @@ def collect_halo_particles() -> int:
                 dup = bpy.context.active_object
                 bpy.ops.object.convert(target='MESH')
                 vcount = len(dup.data.vertices)
-                log(f"  [halo] GN '{obj.name}': convert→mesh gave {vcount} verts.")
-                if vcount > 0:
+                pcount = len(dup.data.polygons)
+                log(f"  [halo] GN '{obj.name}': convert→mesh gave {vcount} verts, {pcount} polys.")
+                if vcount > 0 and pcount == 0:
                     positions, widths, velocities = _read_verts_from_mesh(
                         dup.data, obj.matrix_world)
+                elif pcount > 0:
+                    log(f"  [halo] GN '{obj.name}': mesh has polygons → mesh instancer, skipping halo emission.")
+                    is_mesh_instancer = True
                 bpy.data.objects.remove(dup, do_unlink=True)
             except Exception as e:
                 log(f"  [halo] GN '{obj.name}': convert strategy failed: {e}")
@@ -568,6 +578,9 @@ def collect_halo_particles() -> int:
                         bpy.data.objects.remove(dup, do_unlink=True)
                 except Exception:
                     pass
+
+        if is_mesh_instancer:
+            continue
 
         if not positions:
             # --- Strategy 2: auto-bake then re-read via bake cache --------------
@@ -2509,6 +2522,20 @@ class _MtlxBuilder:
         impls = [('color', sc_c), ('fac', sc_f)]
         return self._acl_nodedef(key, nd_name, out_types, inputs, impls)
 
+    def _acl_object_random_category(self):
+        """Return node-category for the OBJECT_INFO per-object random color."""
+        key = ('object_random',)
+        nd_name = 'ND_anacapa_object_random'
+        sc = 'anacapa_object_random_color3()'
+        return self._acl_nodedef(key, nd_name,
+                                 [('color', 'color3')], [], [(None, sc)])
+
+    def _tx_object_info(self):
+        """OBJECT_INFO → per-object random color derived from world-space origin."""
+        cat  = self._acl_object_random_category()
+        node = self._ng.addNode(cat, self._uid('objrnd'), 'color3')
+        return node.addOutput('color', 'color3')
+
     # ------------------------------------------------------------------ #
     #  Main dispatch                                                        #
     # ------------------------------------------------------------------ #
@@ -2665,7 +2692,7 @@ class _MtlxBuilder:
         elif t in ('NEW_GEOMETRY', 'GEOMETRY'):
             out = self._tx_geometry(bl_node)
         elif t == 'OBJECT_INFO':
-            out = self._const_color3(0.5, 0.5, 0.5) # object-level, not shadeable
+            out = self._tx_object_info()
         elif t in ('CAMERA', 'LIGHT_PATH', 'HAIR_INFO', 'PARTICLE_INFO',
                    'POINT_INFO', 'VOLUME_INFO', 'WIREFRAME', 'BEVEL',
                    'MATERIAL_RAYCAST', 'UVALONGSTROKE'):

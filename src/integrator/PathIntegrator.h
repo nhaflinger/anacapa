@@ -36,6 +36,7 @@ public:
                     TileBuffer& localTile) override;
 
     void setDebugMeshID(int32_t id) override { m_debugMeshID = id; }
+    void setHighlightMeshID(int32_t id) { m_highlightMeshID = id; }
     void setPixelFilter(const PixelFilter* f) override { m_pixelFilter = f; }
 
 private:
@@ -66,7 +67,8 @@ private:
     uint32_t            m_maxDepth     = 8;
     uint32_t            m_minDepth     = 2;
     float               m_fireflyClamp = 10.f;
-    int32_t             m_debugMeshID  = -1;
+    int32_t             m_debugMeshID     = -1;
+    int32_t             m_highlightMeshID = -1;
     const PixelFilter*  m_pixelFilter  = nullptr;  // owned by RenderSession
 };
 

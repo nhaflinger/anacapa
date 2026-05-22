@@ -182,6 +182,17 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
         Vec3f wo = -r.direction;
         ShadingContext ctx(si, r.direction);
 
+        // Highlight mode: shade target mesh with flat red, others at 20% brightness
+        if (m_highlightMeshID >= 0 && firstHit) {
+            if (static_cast<int32_t>(si.meshID) == m_highlightMeshID) {
+                outAlbedo = {1.f, 0.f, 0.f};
+                outNormal = si.n;
+                return {1.f, 0.f, 0.f};
+            }
+            // dim everything else so the highlight stands out
+            beta *= 0.2f;
+        }
+
         // Alpha / opacity cutout
         {
             float opacity = mat->evalOpacity(ctx);

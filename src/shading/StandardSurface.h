@@ -603,8 +603,13 @@ public:
         float wMetal = metal * (1.f - wCoat);
         float wSpec  = spec * (1.f - metal) * specF * (1.f - wCoat);
         float wDiff  = m_p.base * (1.f - metal)
-                     * (1.f - spec * specE) * (1.f - wCoat)
-                     * (1.f - m_p.subsurface); // SSS absorbs the diffuse layer
+                     * (1.f - spec * specE) * (1.f - wCoat);
+        // In path-tracing mode SSS is approximated as a colored diffuse lobe.
+        // Blend base_color toward subsurface_color proportional to subsurface weight
+        // so materials with subsurface=1.0 show the SSS color rather than pure white.
+        Spectrum sss_color  = evalTOV(m_p.subsurface_color, ctx.uv);
+        Spectrum diff_color = base_color * (1.f - m_p.subsurface)
+                            + sss_color * m_p.subsurface;
 
         // Diffuse translucency (ND_translucent_bsdf) — lower hemisphere
         float wTrans = m_p.translucency;
@@ -632,8 +637,8 @@ public:
             Spectrum f0 = m_p.specular_color * (spec * m_f0Dielectric);
             result = sampleGGX(sctx, woLocal, u, alpha, alpha2, f0, false);
         } else if (uComponent < wCoat + wMetal + wSpec + wDiff) {
-            // Diffuse
-            result = sampleDiffuse(sctx, woLocal, u, base_color);
+            // Diffuse (uses diff_color which blends base_color toward sss_color)
+            result = sampleDiffuse(sctx, woLocal, u, diff_color);
         } else {
             // Power-cosine lobe around the straight-through direction (-wo).
             // scatter=1 → Lambertian (max blur), scatter→0 → delta straight-through (sharp).
@@ -702,7 +707,7 @@ public:
         float pdfFwd = 0.f, pdfRev = 0.f;
         Spectrum fCombined = evalCombined(ctx, woLocal, sctx.toLocal(result.wi),
                                           wCoat, wMetal, wSpec, wDiff,
-                                          base_color, spec, rough, alpha2,
+                                          diff_color, spec, rough, alpha2,
                                           pdfFwd, pdfRev);
 
         result.f      = fCombined * std::abs(sctx.toLocal(result.wi).z);
@@ -815,8 +820,10 @@ public:
         float wMetal = metal * (1.f - wCoat);
         float wSpec  = spec * (1.f - metal) * specF * (1.f - wCoat);
         float wDiff  = m_p.base * (1.f - metal)
-                     * (1.f - spec * specE) * (1.f - wCoat)
-                     * (1.f - m_p.subsurface); // SSS absorbs the diffuse layer
+                     * (1.f - spec * specE) * (1.f - wCoat);
+        Spectrum sss_color_e  = evalTOV(m_p.subsurface_color, ctx.uv);
+        Spectrum diff_color_e = base_color * (1.f - m_p.subsurface)
+                              + sss_color_e * m_p.subsurface;
 
         float wTrans = m_p.translucency;  // translucency takes probability from reflection pool
         float wSum = wCoat + wMetal + wSpec + wDiff + wTrans;
@@ -827,7 +834,7 @@ public:
         float pdfFwd, pdfRev;
         Spectrum f = evalCombined(ctx, woLocal, wiLocal,
                                   wCoat, wMetal, wSpec, wDiff,
-                                  base_color, spec, rough, alpha2,
+                                  diff_color_e, spec, rough, alpha2,
                                   pdfFwd, pdfRev);
 
         BSDFEval e;
