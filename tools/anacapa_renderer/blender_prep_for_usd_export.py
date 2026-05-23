@@ -2408,10 +2408,13 @@ class _MtlxBuilder:
         if key in self._acl_nodedefs:
             return self._acl_nodedefs[key]
 
+        is_multi = len(out_types) > 1 or force_multioutput
         nd = self._doc.addNodeDef(nd_name,
-                                  "multioutput" if (len(out_types) > 1 or force_multioutput)
-                                  else out_types[0][1],
+                                  "multioutput" if is_multi else out_types[0][1],
                                   nd_name[3:])  # node category = name minus "ND_"
+        # addNodeDef may silently drop "multioutput" as a type string; set it directly.
+        if is_multi:
+            nd.setAttribute("type", "multioutput")
         for inp_name, inp_type, inp_default in inputs_spec:
             inp = nd.addInput(inp_name, inp_type)
             if inp_default is not None:
@@ -2525,20 +2528,15 @@ class _MtlxBuilder:
     def _acl_object_random_category(self):
         """Return node-category for the OBJECT_INFO per-object random color."""
         key = ('object_random',)
-        nd_name = 'ND_anacapa_object_random'
+        nd_name = 'ND_anacapa_object_random_color3'
         sc = 'anacapa_object_random_color3()'
-        # force_multioutput=True: single-output custom nodes cause MaterialX
-        # validation errors ("Node interface doesn't support this output type")
-        # when addOutput() is called on color3-type node instances; multioutput
-        # nodes allow explicit output child elements and genosl finds the nodedef.
         return self._acl_nodedef(key, nd_name,
-                                 [('color', 'color3')], [], [('color', sc)],
-                                 force_multioutput=True)
+                                 [('color', 'color3')], [], [(None, sc)])
 
     def _tx_object_info(self):
         """OBJECT_INFO → per-object random color derived from world-space origin."""
         cat  = self._acl_object_random_category()
-        node = self._ng.addNode(cat, self._uid('objrnd'), 'multioutput')
+        node = self._ng.addNode(cat, self._uid('objrnd'), 'color3')
         return node.addOutput('color', 'color3')
 
     # ------------------------------------------------------------------ #
@@ -2917,10 +2915,12 @@ class _MtlxBuilder:
     def _connect(mx_input, mx_output):
         """Wire mx_input to mx_output.
         Only sets the 'output' attribute for multi-output nodes — single-output
-        nodes must NOT have it or MaterialX logs 'Multi-output type expected'."""
+        nodes must NOT have it or MaterialX logs 'Multi-output type expected'.
+        Use node type == 'multioutput' rather than output count: a forced-multioutput
+        node with one explicit output still needs the attribute for genosl to resolve."""
         node = mx_output.getParent()
         mx_input.setNodeName(node.getName())
-        if len(node.getOutputs()) > 1:
+        if node.getType() == 'multioutput' or len(node.getOutputs()) > 1:
             mx_input.setAttribute('output', mx_output.getName())
 
     # ------------------------------------------------------------------ #
@@ -4729,6 +4729,34 @@ def _generate_osl_from_mtlx_dir(mtlx_dir: str, mx_lib_path: str):
         print(f"  [osl gen] Could not load MaterialX stdlib: {e}")
         return
 
+    # Inject anacapa custom nodedefs so gen.generate() can find them.
+    # The genosl generator searches only library-imported nodedefs (loaded via
+    # importLibrary), not elements read directly via readFromXmlFile into the
+    # per-material doc.  Writing a temp lib file and importing it into stdlib
+    # makes the nodedef visible to the lookup in the generator.
+    _ANACAPA_DEFS_XML = ('<?xml version="1.0"?>\n'
+        '<materialx version="1.39">\n'
+        '  <nodedef name="ND_anacapa_object_random_color3"'
+        ' node="anacapa_object_random_color3" type="color3">\n'
+        '  </nodedef>\n'
+        '  <implementation name="IM_anacapa_object_random_color3_genosl"'
+        ' nodedef="ND_anacapa_object_random_color3" target="genosl"'
+        ' sourcecode="anacapa_object_random_color3()" />\n'
+        '</materialx>\n')
+    try:
+        import tempfile as _tmpmod
+        _tmp = _tmpmod.NamedTemporaryFile(
+            suffix='.mtlx', mode='w', delete=False, dir=mtlx_dir)
+        _tmp.write(_ANACAPA_DEFS_XML)
+        _tmp.close()
+        _acl_lib = mx.createDocument()
+        mx.readFromXmlFile(_acl_lib, _tmp.name, search_path)
+        stdlib.importLibrary(_acl_lib)
+        os.unlink(_tmp.name)
+        print('  [osl gen] Injected anacapa custom nodedefs into stdlib.')
+    except Exception as _e:
+        print(f'  [osl gen] WARNING: Could not inject anacapa nodedefs: {_e}')
+
     gen = mxosl.OslShaderGenerator.create()
     ctx = mxgen.GenContext(gen)
     ctx.registerSourceCodeSearchPath(search_path)
@@ -4766,8 +4794,15 @@ def _generate_osl_from_mtlx_dir(mtlx_dir: str, mx_lib_path: str):
 
         except Exception as e:
             import traceback
+            tb_str = traceback.format_exc()
             print(f"  [osl gen] ERROR generating OSL for {fname}: {e}")
-            traceback.print_exc()
+            print(tb_str)
+            log_path = os.path.join(mtlx_dir, fname[:-5] + '_osl_error.log')
+            try:
+                with open(log_path, 'w') as _lf:
+                    _lf.write(f"ERROR generating OSL for {fname}:\n{e}\n\n{tb_str}")
+            except Exception:
+                pass
             osl_errors += 1
 
     if not generated:

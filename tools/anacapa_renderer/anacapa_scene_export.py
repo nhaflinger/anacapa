@@ -491,16 +491,6 @@ def export_scene_binary(filepath: str, context,
                         print(f"[anacapa mat] '{mat_name_str}': color=({color[0]:.3f},{color[1]:.3f},{color[2]:.3f}) "
                               f"sss=None")
 
-            # Diagnostic: log slot→material mapping for every mesh so material
-            # assignment problems are visible in Blender's console output.
-            if mat_names:
-                _slot_str = ', '.join(f'{i}={n}' for i, n in enumerate(mat_names))
-                _idx_counts = {}
-                for _mi in mat_indices:
-                    _idx_counts[_mi] = _idx_counts.get(_mi, 0) + 1
-                _count_str = ' '.join(f'[{k}]×{v}' for k, v in sorted(_idx_counts.items()))
-                print(f"[anacapa matmap] '{orig.name}': slots=[{_slot_str}] "
-                      f"poly_idx_dist={_count_str}")
 
             mesh_data.append({
                 'name':         obj.name,

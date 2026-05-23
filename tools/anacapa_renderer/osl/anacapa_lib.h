@@ -291,11 +291,11 @@ float anacapa_brick_fac(point pos, float scale,
 
 color anacapa_object_random_color3()
 {
-    // Transform the object-space origin (0,0,0) to world space to obtain a
-    // position unique to this instance.
     point world_origin = transform("object", "world", point(0.0, 0.0, 0.0));
-    float h = cellnoise(world_origin * 13.7 + vector(0.42, 0.73, 0.17));
-    return color(h, h, h);
+    float hue = cellnoise(world_origin * 13.7 + vector(0.42, 0.73, 0.17));
+    float sat = mix(0.75, 1.0,  cellnoise(world_origin * 7.3  + vector(1.11, 2.33, 0.57)));
+    float val = mix(0.70, 1.0,  cellnoise(world_origin * 19.1 + vector(3.14, 0.91, 1.62)));
+    return color("hsv", hue, sat, val);
 }
 
 #endif // ANACAPA_LIB_H
