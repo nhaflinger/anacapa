@@ -1113,7 +1113,9 @@ static BSDFEval evalGGXReflLobe(const OslLobe& lobe, Vec3f wo, Vec3f wi) {
     float D   = D_GGX(cosH, lobe.alpha2);
     float G2  = G2_Smith_Separable(wo.z, wi.z, lobe.alpha2);
     Spectrum F  = evalSchlick(dotVH, lobe) * lobe.refl_tint;
-    Spectrum f  = F * D * G2 / (4.f * wo.z * wi.z) * wi.z;
+    // Returns pure BRDF (no cosine) — integrator applies cosI externally, consistent
+    // with evalDiffuseLobe and StandardSurface::evaluate.
+    Spectrum f  = F * D * G2 / (4.f * wo.z * wi.z);
     float pdf   = pdfGGX_reflection(cosH, lobe.alpha2, dotVH);
     return { f * lobe.weight, pdf, pdf };
 }

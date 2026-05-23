@@ -638,8 +638,9 @@ public:
             result = sampleGGX(sctx, woLocal, u, alpha, alpha2,
                                base_color * m_p.base, false);
         } else if (uComponent < wCoat + wMetal + wSpec) {
-            // Dielectric specular: F0 = specular * specular_color * f0_from_IOR
-            Spectrum f0 = m_p.specular_color * (spec * m_f0Dielectric);
+            // Dielectric specular: F0 = specular_color * f0_from_IOR (no spec factor —
+            // spec is already in the selection weight wSpec).
+            Spectrum f0 = m_p.specular_color * m_f0Dielectric;
             result = sampleGGX(sctx, woLocal, u, alpha, alpha2, f0, false);
         } else if (uComponent < wCoat + wMetal + wSpec + wDiff) {
             // Diffuse (uses diff_color which blends base_color toward sss_color)
@@ -989,15 +990,20 @@ private:
             pdfRev += pR * wMetal;
         }
 
-        // Dielectric specular layer (same MS compensation; effect is small at
-        // F0=0.04 but consistent with the metal lobe).
+        // Dielectric specular layer.
+        // The BSDF value uses `spec` (the physical artistic weight) directly — NOT
+        // wSpec (which is the sampling selection probability ≈ spec*F0/total).
+        // wSpec encodes how often to sample this lobe; the BSDF value is the actual
+        // reflectance `spec * GGX(F0)`. Using wSpec for the BSDF value would scale
+        // the specular by F0 twice (once inside evalGGX via Schlick, once again via
+        // wSpec ≈ spec*F0), making it ~F0 = 3% too dim — invisible for dark dielectrics.
         if (wSpec > 0.f) {
             float pF, pR;
-            Spectrum f0 = m_p.specular_color * (spec * m_f0Dielectric);
+            Spectrum f0 = m_p.specular_color * m_f0Dielectric;
             Spectrum fS = evalGGX(woLocal, wiLocal, alpha2, f0, pF, pR);
             fS = fS + evalGGX_ms(woLocal, wiLocal, roughness, f0);
-            f += fS * wSpec;
-            pdfFwd += pF * wSpec;
+            f += fS * spec;    // physical BSDF: spec * GGX
+            pdfFwd += pF * wSpec;  // PDF: sampling selection weight (not spec)
             pdfRev += pR * wSpec;
         }
 
@@ -1009,6 +1015,7 @@ private:
         // the diffuse at grazing — the retro-reflection peak that gives
         // Cycles its softer wall-bounce look.  Reduces to plain Lambertian
         // when both cos_i and cos_o = 1.
+        // Same split as specular: BSDF value is the physical fD, PDF uses wDiff.
         if (wDiff > 0.f) {
             float cosI = std::abs(wiLocal.z);
             float cosO = std::abs(woLocal.z);
@@ -1021,8 +1028,8 @@ private:
                          * (kSS_InvPi * Fview * Flight);
             float pF = cosI * kSS_InvPi;
             float pR = cosO * kSS_InvPi;
-            f += fD * wDiff;
-            pdfFwd += pF * wDiff;
+            f += fD;           // physical BSDF: base_color * base / pi
+            pdfFwd += pF * wDiff;  // PDF: sampling selection weight
             pdfRev += pR * wDiff;
         }
 
