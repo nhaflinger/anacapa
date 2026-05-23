@@ -341,16 +341,13 @@ def export_scene_binary(filepath: str, context,
                 _proto_name = (_dproto_obj.material_slots[0].material.name
                                if _dproto_obj and _dproto_obj.material_slots
                                and _dproto_obj.material_slots[0].material else '(none)')
-                print(f"[anacapa GN SetMat] '{_dn}': {_dcount}×{_dpp}={expected} expected, "
-                      f"slot {best_slot} ({_dmat.name}) has {_defc[best_slot]} faces "
-                      f"(err={best_ratio:.2f}) → override instances (proto had '{_proto_name}') "
-                      f"+ filter emitter mesh")
+                pass  # GN SetMaterial override applied
 
     # Track which non-instanced objects we have already exported so that
     # objects appearing in depsgraph.object_instances as both a "real" object
     # and an instance of themselves don't get written twice.
     seen_non_instance = set()
-    _printed_mat_diag = set()
+
 
     for inst in depsgraph.object_instances:
         obj      = inst.object
@@ -451,8 +448,7 @@ def export_scene_binary(filepath: str, context,
                 if len(mat_slots) != len(_orig_slots) or \
                    any(mat_slots[i].material != _orig_slots[i].material
                        for i in range(len(mat_slots))):
-                    print(f"[anacapa mat slots] '{orig.name}': eval slots differ from orig — "
-                          f"using eval: {[s.material.name if s.material else '(none)' for s in mat_slots]}")
+                    pass  # eval/orig slot mismatch is normal for GN instances
             # GN instance fallback: if prototype has no materials (or only empty
             # slots), use the emitter's material slots.
             has_real_mats = any(slot.material is not None for slot in mat_slots)
@@ -461,7 +457,6 @@ def export_scene_binary(filepath: str, context,
                 parent_slots = [s for s in parent_orig.material_slots if s.material is not None]
                 if parent_slots:
                     mat_slots = parent_slots
-                    print(f"[anacapa mat fallback] {orig.name}: using {len(mat_slots)} slot(s) from emitter '{parent_orig.name}'")
             for slot in mat_slots:
                 mat = slot.material
                 mat_names.append(mat.name if mat else "")
@@ -480,16 +475,8 @@ def export_scene_binary(filepath: str, context,
                 if sss is not None:
                     weight, sc, radius, scale, aniso = sss
                     mat_sss_data.extend([weight] + sc + radius + [scale, aniso])
-                    if mat_name_str not in _printed_mat_diag:
-                        _printed_mat_diag.add(mat_name_str)
-                        print(f"[anacapa mat] '{mat_name_str}': color=({color[0]:.3f},{color[1]:.3f},{color[2]:.3f}) "
-                              f"sss_weight={weight:.3f} sss_color=({sc[0]:.3f},{sc[1]:.3f},{sc[2]:.3f})")
                 else:
                     mat_sss_data.extend([0.0, 0.8, 0.8, 0.8, 0.1, 0.1, 0.1, 1.0, 0.0])
-                    if mat_name_str not in _printed_mat_diag:
-                        _printed_mat_diag.add(mat_name_str)
-                        print(f"[anacapa mat] '{mat_name_str}': color=({color[0]:.3f},{color[1]:.3f},{color[2]:.3f}) "
-                              f"sss=None")
 
 
             mesh_data.append({
