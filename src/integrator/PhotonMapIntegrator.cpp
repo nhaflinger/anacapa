@@ -381,15 +381,21 @@ Spectrum PhotonMapIntegrator::Li(const Ray& ray, const SceneView& scene,
 
         // NEE + photon map query at diffuse surfaces
         if (!mat->isDelta()) {
-            // Direct illumination via NEE
-            if (!scene.lights.empty()) {
-                uint32_t N = static_cast<uint32_t>(scene.lights.size());
-                uint32_t lightIdx = std::min(
-                    static_cast<uint32_t>(sampler.get1D() * static_cast<float>(N)), N - 1);
-                Spectrum Ld = estimateDirect(si, *mat, wo,
-                                              *scene.lights[lightIdx],
-                                              scene, sampler, ray.time);
-                L += beta * Ld * static_cast<float>(N);
+            // Direct illumination via NEE (includes env/dome light when present)
+            {
+                uint32_t N = static_cast<uint32_t>(scene.lights.size())
+                           + (scene.envLight ? 1u : 0u);
+                if (N > 0) {
+                    uint32_t lightIdx = std::min(
+                        static_cast<uint32_t>(sampler.get1D() * static_cast<float>(N)), N - 1);
+                    const ILight* light = (scene.envLight && lightIdx >= scene.lights.size())
+                        ? scene.envLight
+                        : scene.lights[lightIdx];
+                    Spectrum Ld = estimateDirect(si, *mat, wo,
+                                                  *light,
+                                                  scene, sampler, ray.time);
+                    L += beta * Ld * static_cast<float>(N);
+                }
             }
 
             // Caustic photon map contribution
@@ -493,11 +499,18 @@ Spectrum PhotonMapIntegrator::estimateDirect(const SurfaceInteraction& si,
 // ---------------------------------------------------------------------------
 float PhotonMapIntegrator::emitterPdf(Vec3f from, Vec3f wi,
                                        const SceneView& scene) const {
-    if (scene.lights.empty()) return 0.f;
+    uint32_t N = static_cast<uint32_t>(scene.lights.size())
+               + (scene.envLight ? 1u : 0u);
+    if (N == 0) return 0.f;
     float pdf    = 0.f;
-    float weight = 1.f / static_cast<float>(scene.lights.size());
+    float weight = 1.f / static_cast<float>(N);
     for (const ILight* light : scene.lights) {
         float lpdf = light->pdf(from, wi);
+        if (lpdf > 0.f)
+            pdf += weight * lpdf;
+    }
+    if (scene.envLight) {
+        float lpdf = scene.envLight->pdf(from, wi);
         if (lpdf > 0.f)
             pdf += weight * lpdf;
     }

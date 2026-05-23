@@ -224,14 +224,20 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
             L += beta * Le * weight;
         }
 
-        // NEE: uniform random light selection
-        if (!mat->isDelta() && !scene.lights.empty()) {
-            uint32_t N = static_cast<uint32_t>(scene.lights.size());
-            uint32_t lightIdx = std::min(
-                static_cast<uint32_t>(sampler.get1D() * static_cast<float>(N)), N - 1);
-            Spectrum Ld = estimateDirect(si, *mat, wo, *scene.lights[lightIdx],
-                                          scene, sampler, ray.time);
-            L += beta * Ld * static_cast<float>(N);
+        // NEE: uniform random light selection (includes env/dome light when present)
+        {
+            uint32_t N = static_cast<uint32_t>(scene.lights.size())
+                       + (scene.envLight ? 1u : 0u);
+            if (!mat->isDelta() && N > 0) {
+                uint32_t lightIdx = std::min(
+                    static_cast<uint32_t>(sampler.get1D() * static_cast<float>(N)), N - 1);
+                const ILight* light = (scene.envLight && lightIdx >= scene.lights.size())
+                    ? scene.envLight
+                    : scene.lights[lightIdx];
+                Spectrum Ld = estimateDirect(si, *mat, wo, *light,
+                                              scene, sampler, ray.time);
+                L += beta * Ld * static_cast<float>(N);
+            }
         }
 
         // BSDF sample for path continuation
@@ -315,11 +321,18 @@ Spectrum PathIntegrator::estimateDirect(const SurfaceInteraction& si,
 // ---------------------------------------------------------------------------
 float PathIntegrator::emitterPdf(Vec3f from, Vec3f wi,
                                    const SceneView& scene) const {
-    if (scene.lights.empty()) return 0.f;
-    float pdf = 0.f;
-    float weight = 1.f / static_cast<float>(scene.lights.size());
+    uint32_t N = static_cast<uint32_t>(scene.lights.size())
+               + (scene.envLight ? 1u : 0u);
+    if (N == 0) return 0.f;
+    float pdf    = 0.f;
+    float weight = 1.f / static_cast<float>(N);
     for (const ILight* light : scene.lights) {
         float lpdf = light->pdf(from, wi);
+        if (lpdf > 0.f)
+            pdf += weight * lpdf;
+    }
+    if (scene.envLight) {
+        float lpdf = scene.envLight->pdf(from, wi);
         if (lpdf > 0.f)
             pdf += weight * lpdf;
     }
