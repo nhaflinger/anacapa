@@ -1086,6 +1086,10 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     camParams.lowerLeftClose  = {cam.lowerLeftClose.x,  cam.lowerLeftClose.y,  cam.lowerLeftClose.z};
     camParams.horizontalClose = {cam.horizontalClose.x, cam.horizontalClose.y, cam.horizontalClose.z};
     camParams.verticalClose   = {cam.verticalClose.x,   cam.verticalClose.y,   cam.verticalClose.z};
+    camParams.apertureRadius  = cam.apertureRadius;
+    camParams.focalDistance   = cam.focalDistance;
+    camParams.basisU = {cam.basisU.x, cam.basisU.y, cam.basisU.z};
+    camParams.basisV = {cam.basisV.x, cam.basisV.y, cam.basisV.z};
 
     // Use the persistent accum buffer — allocates only on first call or size change.
     // clearAccum() should be called when starting a fresh render (new scene/camera).
@@ -1304,6 +1308,10 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
     camParams.lowerLeftClose  = {cam.lowerLeftClose.x,  cam.lowerLeftClose.y,  cam.lowerLeftClose.z};
     camParams.horizontalClose = {cam.horizontalClose.x, cam.horizontalClose.y, cam.horizontalClose.z};
     camParams.verticalClose   = {cam.verticalClose.x,   cam.verticalClose.y,   cam.verticalClose.z};
+    camParams.apertureRadius  = cam.apertureRadius;
+    camParams.focalDistance   = cam.focalDistance;
+    camParams.basisU = {cam.basisU.x, cam.basisU.y, cam.basisU.z};
+    camParams.basisV = {cam.basisV.x, cam.basisV.y, cam.basisV.z};
 
     // Tile-sized accum buffer (gid is local; shader writes gid.y*tileW+gid.x)
     size_t accumBytes   = tileW * tileH * sizeof(GpuAccumPixel);

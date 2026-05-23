@@ -235,6 +235,14 @@ struct GpuCameraParams {
     float     _padVC;
     uint32_t  hasMotion;      // 0 = static camera, 1 = lerp at rayTime
 
+    // Depth of field — thin lens (apertureRadius == 0 → pinhole)
+    float     apertureRadius;  // half aperture diameter in world units
+    float     focalDistance;   // distance to focal plane in world units
+    GpuFloat3 basisU;          // camera right unit vector
+    float     _padBU;
+    GpuFloat3 basisV;          // camera up unit vector
+    float     _padBV;
+
     // Caustic photon map hash grid (enabled when photonMapEnabled != 0).
     // cellStart[numCells+1] and sortedPhotonIdx[numPhotons] are bound at
     // buffers 21 and 22; the photon array is at buffer 23.

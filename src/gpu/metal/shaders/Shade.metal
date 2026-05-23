@@ -1220,6 +1220,35 @@ kernel void shade(
         r.min_distance = 1e-4f;
         r.max_distance = 1e10f;
 
+        // Thin-lens DOF: sample aperture disk and redirect to focal point
+        if (cam.apertureRadius > 0.f) {
+            float lensU = rand01(rng);
+            float lensV = rand01(rng);
+            float lx = 2.f * lensU - 1.f;
+            float ly = 2.f * lensV - 1.f;
+            float diskX, diskY;
+            if (lx == 0.f && ly == 0.f) {
+                diskX = diskY = 0.f;
+            } else if (abs(lx) >= abs(ly)) {
+                float rr  = lx;
+                float phi = (M_PI_F / 4.f) * (ly / lx);
+                diskX = rr * cos(phi);
+                diskY = rr * sin(phi);
+            } else {
+                float rr  = ly;
+                float phi = (M_PI_F / 2.f) - (M_PI_F / 4.f) * (lx / ly);
+                diskX = rr * cos(phi);
+                diskY = rr * sin(phi);
+            }
+            float3 bU = float3(cam.basisU.x, cam.basisU.y, cam.basisU.z);
+            float3 bV = float3(cam.basisV.x, cam.basisV.y, cam.basisV.z);
+            float3 lensPoint  = origin + bU * (diskX * cam.apertureRadius)
+                                       + bV * (diskY * cam.apertureRadius);
+            float3 focalPoint = origin + r.direction * cam.focalDistance;
+            r.origin    = lensPoint;
+            r.direction = normalize(focalPoint - lensPoint);
+        }
+
         // Path tracing loop
         float3 throughput  = float3(1.0f);
         float3 L           = float3(0.0f);

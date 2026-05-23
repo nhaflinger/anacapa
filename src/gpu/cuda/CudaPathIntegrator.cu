@@ -1463,6 +1463,10 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.cam.lowerLeftClose  = {cam.lowerLeftClose.x,  cam.lowerLeftClose.y,  cam.lowerLeftClose.z};
     p.cam.horizontalClose = {cam.horizontalClose.x, cam.horizontalClose.y, cam.horizontalClose.z};
     p.cam.verticalClose   = {cam.verticalClose.x,   cam.verticalClose.y,   cam.verticalClose.z};
+    p.cam.apertureRadius  = cam.apertureRadius;
+    p.cam.focalDistance   = cam.focalDistance;
+    p.cam.basisU = {cam.basisU.x, cam.basisU.y, cam.basisU.z};
+    p.cam.basisV = {cam.basisV.x, cam.basisV.y, cam.basisV.z};
     p.cam.imageWidth  = filmWidth;
     p.cam.imageHeight = filmHeight;
     p.cam.samplesPerPixel = sampleCount;

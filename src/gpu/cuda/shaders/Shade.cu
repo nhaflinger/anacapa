@@ -1464,10 +1464,40 @@ extern "C" __global__ void __raygen__wf_primary()
     const float3 horiz  = lerp3(make3(params.cam.horizontal), make3(params.cam.horizontalClose), lerpT);
     const float3 vert   = lerp3(make3(params.cam.vertical),   make3(params.cam.verticalClose),   lerpT);
     const float3 ll     = lerp3(make3(params.cam.lowerLeft),  make3(params.cam.lowerLeftClose),  lerpT);
-    const float3 rayDir = normalize(ll + u * horiz + v * vert - origin);
+    float3 rayOrigin = origin;
+    float3 rayDir    = normalize(ll + u * horiz + v * vert - origin);
+
+    // Thin-lens DOF: sample aperture disk and redirect to focal point
+    if (params.cam.apertureRadius > 0.f) {
+        float lensU = rand01(rng);
+        float lensV = rand01(rng);
+        float lx = 2.f * lensU - 1.f;
+        float ly = 2.f * lensV - 1.f;
+        float diskX, diskY;
+        if (lx == 0.f && ly == 0.f) {
+            diskX = diskY = 0.f;
+        } else if (fabsf(lx) >= fabsf(ly)) {
+            float rr  = lx;
+            float phi = (3.14159265f / 4.f) * (ly / lx);
+            diskX = rr * cosf(phi);
+            diskY = rr * sinf(phi);
+        } else {
+            float rr  = ly;
+            float phi = (3.14159265f / 2.f) - (3.14159265f / 4.f) * (lx / ly);
+            diskX = rr * cosf(phi);
+            diskY = rr * sinf(phi);
+        }
+        float3 bU = make3(params.cam.basisU);
+        float3 bV = make3(params.cam.basisV);
+        float3 lensPoint  = origin + bU * (diskX * params.cam.apertureRadius)
+                                   + bV * (diskY * params.cam.apertureRadius);
+        float3 focalPoint = origin + rayDir * params.cam.focalDistance;
+        rayOrigin = lensPoint;
+        rayDir    = normalize(focalPoint - lensPoint);
+    }
 
     WfRayState st{};
-    st.origin       = {origin.x, origin.y, origin.z};
+    st.origin       = {rayOrigin.x, rayOrigin.y, rayOrigin.z};
     st.rayTime      = rayTime;
     st.dir          = {rayDir.x, rayDir.y, rayDir.z};
     st.flags        = kWfPrevWasDelta;
