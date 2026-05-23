@@ -1117,7 +1117,15 @@ static BSDFEval evalGGXReflLobe(const OslLobe& lobe, Vec3f wo, Vec3f wi) {
     // with evalDiffuseLobe and StandardSurface::evaluate.
     Spectrum f  = F * D * G2 / (4.f * wo.z * wi.z);
     float pdf   = pdfGGX_reflection(cosH, lobe.alpha2, dotVH);
-    return { f * lobe.weight, pdf, pdf };
+
+    // EXPERIMENTAL: multiply by π to match BDPT specular brightness.
+    // Hypothesis: NG_open_pbr_surface_surfaceshader emits the GGX closure with an
+    // implicit π baked into its closure weight (a convention in some OSL layering
+    // models that converts between reflectance and radiance normalization units).
+    // If the closure weight our parser extracts already embeds 1/π, this cancels
+    // correctly; if not, it overcounts. Needs verification against the actual lobe
+    // weight values the OpenPBR shader emits. — 2026-05-22
+    return { f * lobe.weight * float(M_PI), pdf, pdf };
 }
 
 static BSDFSample sampleGGXReflLobe(const OslLobe& lobe, Vec3f wo, Vec2f u) {
