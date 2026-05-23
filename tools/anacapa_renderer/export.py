@@ -1050,10 +1050,39 @@ def build_command(executable, usd_path, settings, width, height, output_path,
     if not getattr(settings, 'use_osl', True):
         cmd.append("--skip-osl")
 
-    # use_dof=False: fStop already zeroed in USD by post_process_usd — nothing to pass
-    if getattr(settings, 'use_dof', False) and settings.fstop > 0 and settings.focus_distance > 0:
-        cmd += ["--fstop", str(settings.fstop),
-                "--focus-distance", str(settings.focus_distance)]
+    if not getattr(settings, 'use_dof', False):
+        cmd.append("--no-dof")
+    else:
+        fstop      = settings.fstop
+        focus_dist = getattr(settings, 'focus_distance', 0.0)
+        if fstop == 0:
+            try:
+                import bpy as _bpy
+                cam_obj = _bpy.context.scene.camera
+                if cam_obj and cam_obj.data and cam_obj.data.dof:
+                    dof       = cam_obj.data.dof
+                    fstop     = dof.aperture_fstop
+                    focus_obj = dof.focus_object
+                    if focus_obj:
+                        cam_loc    = cam_obj.matrix_world.translation
+                        obj_loc    = focus_obj.matrix_world.translation
+                        focus_dist = (cam_loc - obj_loc).length
+                    else:
+                        focus_dist = dof.focus_distance
+            except Exception as _e:
+                print(f"[Anacapa] DOF: failed to read Blender camera: {_e}")
+        if fstop > 0 and focus_dist > 0:
+            # Blender's USD exporter writes metersPerUnit=0.01 (cm convention) but
+            # exports coordinates in Blender units, so the renderer's focalLength is
+            # 100× too large relative to scene scale. Scale fstop by the same factor
+            # so the computed aperture radius matches the actual coordinate scale.
+            try:
+                import bpy as _bpy
+                scale_length = _bpy.context.scene.unit_settings.scale_length
+            except Exception:
+                scale_length = 1.0
+            fstop = fstop * (scale_length / 0.01)
+            cmd += ["--fstop", str(fstop), "--focus-distance", str(focus_dist)]
 
     if getattr(settings, 'use_motion_blur', False):
         shutter = getattr(settings, 'motion_blur_shutter', 0.5)
