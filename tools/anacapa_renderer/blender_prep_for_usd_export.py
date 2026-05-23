@@ -6092,15 +6092,12 @@ def _patch_camera_no_dof(usd_path):
 
 def _inject_sky_params(usd_path, sky_settings):
     """
-    Write anacapa:sky:* custom attributes onto every DomeLight prim in the
-    stage.  USDLoader reads these to construct a SkyLight instead of loading
-    an HDRI image.
-
-    sky_settings — an object with attributes matching the AnacapaRenderSettings
-                   sky_* properties (sky_sun_elevation, sky_sun_azimuth, etc.).
+    Write anacapa:sky:* custom attributes onto the DomeLight prim in the stage.
+    If no DomeLight exists (our binary exporter doesn't write one), create one.
+    USDLoader reads these to construct a SkyLight instead of loading an HDRI.
     """
     try:
-        from pxr import Usd, Sdf
+        from pxr import Usd, UsdLux, Sdf
     except ImportError:
         log("  [sky] pxr not available — cannot inject sky attributes")
         return
@@ -6110,34 +6107,39 @@ def _inject_sky_params(usd_path, sky_settings):
         log(f"  [sky] Failed to open stage: {usd_path}")
         return
 
-    patched = 0
+    # Find existing DomeLight or create one at a predictable path.
+    dome_prim = None
     for prim in stage.Traverse():
-        if prim.GetTypeName() != "DomeLight":
-            continue
+        if prim.GetTypeName() == "DomeLight":
+            dome_prim = prim
+            break
 
-        def _set(name, val, type_name):
-            attr = prim.GetAttribute(name)
-            if not attr:
-                attr = prim.CreateAttribute(name, type_name)
-            attr.Set(val)
+    if dome_prim is None:
+        root = stage.GetDefaultPrim() or stage.GetPrimAtPath("/root")
+        parent_path = root.GetPath() if root else Sdf.Path("/root")
+        dome_path = parent_path.AppendChild("AnacapaSky")
+        dome_prim = UsdLux.DomeLight.Define(stage, dome_path).GetPrim()
+        log(f"  [sky] Created DomeLight prim at {dome_path}")
 
-        _set("anacapa:sky:type",          "nishita",                        Sdf.ValueTypeNames.String)
-        _set("anacapa:sky:sun_elevation",  sky_settings.sky_sun_elevation,  Sdf.ValueTypeNames.Float)
-        _set("anacapa:sky:sun_azimuth",    sky_settings.sky_sun_azimuth,    Sdf.ValueTypeNames.Float)
-        _set("anacapa:sky:sun_intensity",  sky_settings.sky_sun_intensity,  Sdf.ValueTypeNames.Float)
-        _set("anacapa:sky:sun_disc_size",  sky_settings.sky_sun_disc_size,  Sdf.ValueTypeNames.Float)
-        _set("anacapa:sky:altitude",       sky_settings.sky_altitude,       Sdf.ValueTypeNames.Float)
-        _set("anacapa:sky:air_density",    sky_settings.sky_air_density,    Sdf.ValueTypeNames.Float)
-        _set("anacapa:sky:dust_density",   sky_settings.sky_dust_density,   Sdf.ValueTypeNames.Float)
-        _set("anacapa:sky:ozone_density",  sky_settings.sky_ozone_density,  Sdf.ValueTypeNames.Float)
-        _set("anacapa:sky:transparent_bg", int(sky_settings.sky_transparent_bg), Sdf.ValueTypeNames.Int)
-        patched += 1
+    def _set(name, val, type_name):
+        attr = dome_prim.GetAttribute(name)
+        if not attr:
+            attr = dome_prim.CreateAttribute(name, type_name)
+        attr.Set(val)
 
-    if patched:
-        stage.GetRootLayer().Save()
-        log(f"  [sky] Nishita sky attributes written to {patched} DomeLight prim(s).")
-    else:
-        log("  [sky] Warning: no DomeLight prim found — sky will not be active.")
+    _set("anacapa:sky:type",          "nishita",                        Sdf.ValueTypeNames.String)
+    _set("anacapa:sky:sun_elevation",  sky_settings.sky_sun_elevation,  Sdf.ValueTypeNames.Float)
+    _set("anacapa:sky:sun_azimuth",    sky_settings.sky_sun_azimuth,    Sdf.ValueTypeNames.Float)
+    _set("anacapa:sky:sun_intensity",  sky_settings.sky_sun_intensity,  Sdf.ValueTypeNames.Float)
+    _set("anacapa:sky:sun_disc_size",  sky_settings.sky_sun_disc_size,  Sdf.ValueTypeNames.Float)
+    _set("anacapa:sky:altitude",       sky_settings.sky_altitude,       Sdf.ValueTypeNames.Float)
+    _set("anacapa:sky:air_density",    sky_settings.sky_air_density,    Sdf.ValueTypeNames.Float)
+    _set("anacapa:sky:dust_density",   sky_settings.sky_dust_density,   Sdf.ValueTypeNames.Float)
+    _set("anacapa:sky:ozone_density",  sky_settings.sky_ozone_density,  Sdf.ValueTypeNames.Float)
+    _set("anacapa:sky:transparent_bg", int(sky_settings.sky_transparent_bg), Sdf.ValueTypeNames.Int)
+
+    stage.GetRootLayer().Save()
+    log(f"  [sky] Nishita sky attributes written to {dome_prim.GetPath()}")
 
 
 def post_process_usd(usd_path, sky_texture="", shutter_close=0.0, disable_dof=False,

@@ -1,6 +1,11 @@
 import bpy
 
 
+def _mark_sky_dirty(self, ctx):
+    from . import export as _export
+    _export.mark_all_dirty()
+
+
 class AnacapaAddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __package__
 
@@ -123,21 +128,25 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
         description="Replace the HDRI environment with a physically-based Nishita sky. "
                     "Provides sun + atmosphere illumination without an HDR file.",
         default=False,
+        update=lambda self, ctx: _mark_sky_dirty(self, ctx),
     )
     sky_sun_elevation: bpy.props.FloatProperty(
         name="Sun Elevation",
         description="Angle of the sun above the horizon in degrees (0 = horizon, 90 = overhead)",
         default=45.0, min=-10.0, max=90.0, soft_min=0.0,
+        update=lambda self, ctx: _mark_sky_dirty(self, ctx),
     )
     sky_sun_azimuth: bpy.props.FloatProperty(
         name="Sun Azimuth",
         description="Compass direction of the sun in degrees (0 = north/+Z, 90 = east/+X, 180 = south/-Z)",
         default=180.0, min=0.0, max=360.0,
+        update=lambda self, ctx: _mark_sky_dirty(self, ctx),
     )
     sky_sun_intensity: bpy.props.FloatProperty(
         name="Sun Intensity",
         description="Radiance multiplier for the sun and sky",
         default=1.0, min=0.0, soft_max=10.0,
+        update=lambda self, ctx: _mark_sky_dirty(self, ctx),
     )
     sky_sun_disc_size: bpy.props.FloatProperty(
         name="Sun Disc Size",
@@ -145,30 +154,35 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
                     "2.0 = Blender default). Larger values produce more scene illumination "
                     "and softer shadows as well as a bigger visible disc.",
         default=2.0, min=0.01, max=5.0,
+        update=lambda self, ctx: _mark_sky_dirty(self, ctx),
     )
     sky_altitude: bpy.props.FloatProperty(
         name="Altitude",
         description="Viewer altitude above sea level in metres. Higher altitudes produce a "
                     "darker, bluer zenith and less horizon haze.",
         default=0.0, min=0.0, max=60000.0, soft_max=5000.0,
+        update=lambda self, ctx: _mark_sky_dirty(self, ctx),
     )
     sky_air_density: bpy.props.FloatProperty(
         name="Air Density",
         description="Rayleigh scattering scale (1.0 = Earth standard atmosphere). "
                     "Lower = thinner air, blacker sky; higher = denser scattering.",
         default=1.0, min=0.0, soft_max=5.0,
+        update=lambda self, ctx: _mark_sky_dirty(self, ctx),
     )
     sky_dust_density: bpy.props.FloatProperty(
         name="Dust Density",
         description="Mie (aerosol) scattering scale (1.0 = standard haze). "
                     "Higher = more haze, whiter horizon, hazier sun disc.",
         default=1.0, min=0.0, soft_max=10.0,
+        update=lambda self, ctx: _mark_sky_dirty(self, ctx),
     )
     sky_ozone_density: bpy.props.FloatProperty(
         name="Ozone Density",
         description="Ozone absorption layer scale (1.0 = standard). "
                     "Controls how blue/cyan the zenith appears; higher = more ozone absorption.",
         default=1.0, min=0.0, soft_max=5.0,
+        update=lambda self, ctx: _mark_sky_dirty(self, ctx),
     )
     sky_transparent_bg: bpy.props.BoolProperty(
         name="Transparent Background",
@@ -177,6 +191,7 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
                     "sky dome background is made transparent. EXR output will "
                     "include an alpha channel.",
         default=False,
+        update=lambda self, ctx: _mark_sky_dirty(self, ctx),
     )
 
     # Lighting tweaks
