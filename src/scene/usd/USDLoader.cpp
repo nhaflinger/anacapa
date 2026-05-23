@@ -1737,6 +1737,8 @@ LoadedScene loadUSD(const std::string& path,
                              prim.GetPath().GetString());
                 continue;
             }
+            spdlog::info("USDLoader: mesh '{}' → meshID={}",
+                         prim.GetPath().GetString(), meshID);
 
             // Helper: resolve a UsdShadeMaterial to a material index
             auto resolveMaterialIdx = [&](const UsdShadeMaterial& mat) -> uint32_t {

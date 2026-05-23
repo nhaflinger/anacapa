@@ -2393,7 +2393,7 @@ class _MtlxBuilder:
     #  Anacapa custom nodedef registration                                  #
     # ------------------------------------------------------------------ #
 
-    def _acl_nodedef(self, key, nd_name, out_types, inputs_spec, impls):
+    def _acl_nodedef(self, key, nd_name, out_types, inputs_spec, impls, force_multioutput=False):
         """Lazily register a custom nodedef + genosl implementations.
 
         key       : hashable cache key (tuple)
@@ -2409,7 +2409,7 @@ class _MtlxBuilder:
             return self._acl_nodedefs[key]
 
         nd = self._doc.addNodeDef(nd_name,
-                                  "multioutput" if len(out_types) > 1
+                                  "multioutput" if (len(out_types) > 1 or force_multioutput)
                                   else out_types[0][1],
                                   nd_name[3:])  # node category = name minus "ND_"
         for inp_name, inp_type, inp_default in inputs_spec:
@@ -2527,13 +2527,18 @@ class _MtlxBuilder:
         key = ('object_random',)
         nd_name = 'ND_anacapa_object_random'
         sc = 'anacapa_object_random_color3()'
+        # force_multioutput=True: single-output custom nodes cause MaterialX
+        # validation errors ("Node interface doesn't support this output type")
+        # when addOutput() is called on color3-type node instances; multioutput
+        # nodes allow explicit output child elements and genosl finds the nodedef.
         return self._acl_nodedef(key, nd_name,
-                                 [('color', 'color3')], [], [(None, sc)])
+                                 [('color', 'color3')], [], [('color', sc)],
+                                 force_multioutput=True)
 
     def _tx_object_info(self):
         """OBJECT_INFO → per-object random color derived from world-space origin."""
         cat  = self._acl_object_random_category()
-        node = self._ng.addNode(cat, self._uid('objrnd'), 'color3')
+        node = self._ng.addNode(cat, self._uid('objrnd'), 'multioutput')
         return node.addOutput('color', 'color3')
 
     # ------------------------------------------------------------------ #

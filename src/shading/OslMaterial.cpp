@@ -1387,6 +1387,13 @@ public:
     // Principled BSDF with dark SSS would render white in path tracing.
     void applySssLobeTint(std::vector<OslLobe>& lobes) const {
         if (m_sss.weight <= 0.f) return;
+        // Skip if the stored SSS color is near-white — this happens when the
+        // material's base/SSS color is procedural and we fell back to (0.8,0.8,0.8).
+        // In that case the OSL shader already computed the correct color; tinting
+        // with white would bleach it.
+        float sssLum = 0.299f * m_sss.color.x + 0.587f * m_sss.color.y
+                     + 0.114f * m_sss.color.z;
+        if (sssLum > 0.65f) return;
         for (auto& lobe : lobes) {
             if (lobe.kind != OslLobe::Kind::Diffuse &&
                 lobe.kind != OslLobe::Kind::DiffuseTrans)

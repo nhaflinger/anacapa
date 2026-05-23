@@ -331,25 +331,20 @@ def export_scene_binary(filepath: str, context,
                 # Always strip the baked GN instances from the emitter mesh to avoid
                 # double-rendering them alongside the virtual instances.
                 _instance_mat_filter_idx[_dn] = best_slot
-                # Only override the virtual-instance material when the prototype has
-                # no material of its own.  If the prototype already carries a valid
-                # material (e.g. Icing on a donut), those virtual instances should
-                # keep using it — overriding to the GN "Set Material" slot (Bread)
-                # was causing the icing to appear as the wrong material.
-                _dproto_obj  = _gn_emitter_proto.get(_dn)
-                _proto_has_mat = (_dproto_obj is not None and
-                                  any(s.material is not None
-                                      for s in _dproto_obj.material_slots))
-                if not _proto_has_mat:
-                    _instance_mat_overrides[_dn] = _dmat.name
-                    print(f"[anacapa GN SetMat] '{_dn}': {_dcount}×{_dpp}={expected} expected, "
-                          f"slot {best_slot} ({_dmat.name}) has {_defc[best_slot]} faces "
-                          f"(err={best_ratio:.2f}) → override instances + filter emitter mesh")
-                else:
-                    print(f"[anacapa GN SetMat] '{_dn}': {_dcount}×{_dpp}={expected} expected, "
-                          f"slot {best_slot} ({_dmat.name}) has {_defc[best_slot]} faces "
-                          f"(err={best_ratio:.2f}) → filter emitter mesh only "
-                          f"(prototype already has material '{_dproto_obj.material_slots[0].material.name if _dproto_obj and _dproto_obj.material_slots else '?'}')")
+                # Always override the virtual-instance material with the one the GN
+                # "Set Material" node assigned.  The old proto_has_mat guard was
+                # blocking this override when the candy prototype had Bread assigned
+                # by the GN; that guard is no longer needed because face-subset
+                # ordering is now correct (eval_obj.material_slots).
+                _instance_mat_overrides[_dn] = _dmat.name
+                _dproto_obj = _gn_emitter_proto.get(_dn)
+                _proto_name = (_dproto_obj.material_slots[0].material.name
+                               if _dproto_obj and _dproto_obj.material_slots
+                               and _dproto_obj.material_slots[0].material else '(none)')
+                print(f"[anacapa GN SetMat] '{_dn}': {_dcount}×{_dpp}={expected} expected, "
+                      f"slot {best_slot} ({_dmat.name}) has {_defc[best_slot]} faces "
+                      f"(err={best_ratio:.2f}) → override instances (proto had '{_proto_name}') "
+                      f"+ filter emitter mesh")
 
     # Track which non-instanced objects we have already exported so that
     # objects appearing in depsgraph.object_instances as both a "real" object
@@ -446,18 +441,18 @@ def export_scene_binary(filepath: str, context,
             mat_flags    = []
             mat_colors   = []
             mat_sss_data = []
-            mat_slots = list(orig.material_slots)
-            # GN "Set Material" override: the prototype carries the original material
-            # but the GN modifier reassigns a different one.  Use the detected override.
-            if inst.is_instance and inst.parent is not None:
-                _ep = inst.parent.original if hasattr(inst.parent, 'original') else inst.parent
-                _ovn = _instance_mat_overrides.get(_ep.name)
-                if _ovn is not None:
-                    _ovm = bpy.data.materials.get(_ovn)
-                    if _ovm is not None:
-                        class _MS:
-                            def __init__(self, m): self.material = m
-                        mat_slots = [_MS(_ovm)]
+            # Always use the EVALUATED object's material_slots: polygon.material_index
+            # values come from the evaluated mesh and must index into eval slots.
+            # For GN instances this is critical — the GN "Set Material" node puts the
+            # override material into eval_obj.material_slots but NOT into orig.material_slots.
+            mat_slots = list(eval_obj.material_slots)
+            if not inst.is_instance:
+                _orig_slots = list(orig.material_slots)
+                if len(mat_slots) != len(_orig_slots) or \
+                   any(mat_slots[i].material != _orig_slots[i].material
+                       for i in range(len(mat_slots))):
+                    print(f"[anacapa mat slots] '{orig.name}': eval slots differ from orig — "
+                          f"using eval: {[s.material.name if s.material else '(none)' for s in mat_slots]}")
             # GN instance fallback: if prototype has no materials (or only empty
             # slots), use the emitter's material slots.
             has_real_mats = any(slot.material is not None for slot in mat_slots)
@@ -495,6 +490,17 @@ def export_scene_binary(filepath: str, context,
                         _printed_mat_diag.add(mat_name_str)
                         print(f"[anacapa mat] '{mat_name_str}': color=({color[0]:.3f},{color[1]:.3f},{color[2]:.3f}) "
                               f"sss=None")
+
+            # Diagnostic: log slot→material mapping for every mesh so material
+            # assignment problems are visible in Blender's console output.
+            if mat_names:
+                _slot_str = ', '.join(f'{i}={n}' for i, n in enumerate(mat_names))
+                _idx_counts = {}
+                for _mi in mat_indices:
+                    _idx_counts[_mi] = _idx_counts.get(_mi, 0) + 1
+                _count_str = ' '.join(f'[{k}]×{v}' for k, v in sorted(_idx_counts.items()))
+                print(f"[anacapa matmap] '{orig.name}': slots=[{_slot_str}] "
+                      f"poly_idx_dist={_count_str}")
 
             mesh_data.append({
                 'name':         obj.name,

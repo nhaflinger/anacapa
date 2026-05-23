@@ -607,8 +607,13 @@ public:
         // In path-tracing mode SSS is approximated as a colored diffuse lobe.
         // Blend base_color toward subsurface_color proportional to subsurface weight
         // so materials with subsurface=1.0 show the SSS color rather than pure white.
+        // Near-white SSS color is a fallback default, not an intentional tint — skip
+        // blending to preserve the base color (matches OslMaterial::applySssLobeTint guard).
         Spectrum sss_color  = evalTOV(m_p.subsurface_color, ctx.uv);
-        Spectrum diff_color = base_color * (1.f - m_p.subsurface)
+        float sssLum = 0.299f * sss_color.x + 0.587f * sss_color.y + 0.114f * sss_color.z;
+        Spectrum diff_color = (sssLum > 0.65f)
+                            ? base_color
+                            : base_color * (1.f - m_p.subsurface)
                             + sss_color * m_p.subsurface;
 
         // Diffuse translucency (ND_translucent_bsdf) — lower hemisphere
@@ -822,7 +827,10 @@ public:
         float wDiff  = m_p.base * (1.f - metal)
                      * (1.f - spec * specE) * (1.f - wCoat);
         Spectrum sss_color_e  = evalTOV(m_p.subsurface_color, ctx.uv);
-        Spectrum diff_color_e = base_color * (1.f - m_p.subsurface)
+        float sssLumE = 0.299f * sss_color_e.x + 0.587f * sss_color_e.y + 0.114f * sss_color_e.z;
+        Spectrum diff_color_e = (sssLumE > 0.65f)
+                              ? base_color
+                              : base_color * (1.f - m_p.subsurface)
                               + sss_color_e * m_p.subsurface;
 
         float wTrans = m_p.translucency;  // translucency takes probability from reflection pool
