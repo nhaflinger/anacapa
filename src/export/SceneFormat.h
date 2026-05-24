@@ -7,9 +7,10 @@
 //
 // File layout (all values little-endian):
 //   SceneHeader
-//   [MeshRecord] × num_meshes
-//   [LightRecord] × num_lights
-//   CameraRecord  (only present when SceneHeader::has_camera != 0)
+//   [MeshRecord]          × num_meshes        (non-instanced objects)
+//   [InstanceGroupRecord] × num_inst_groups   (GN instances, v5+)
+//   [LightRecord]         × num_lights
+//   CameraRecord          (only present when SceneHeader::has_camera != 0)
 //
 // Variable-length strings are length-prefixed:
 //   uint32_t  byte_count
@@ -34,13 +35,26 @@
 //   uint32[num_polys]        loop_total   (vertex count of each polygon)
 //   uint32[num_polys]        mat_index    (material slot index per polygon)
 //   uint32[num_loops]        vert_index   (vertex index per loop — faceVertexIndices)
+//
+// InstanceGroupRecord layout (v5+):
+//   InstanceGroupHeader      fixed counts
+//   string                   proto_name (Blender orig.name — used as USD prototype path)
+//   string[num_mat_slots]    material slot names
+//   uint32[num_mat_slots]    mat_flags
+//   float[num_mat_slots * 3] mat_translucency_colors
+//   float[num_mat_slots * 9] mat_sss_data
+//   float[num_motion_keys]   USD time codes (same for all instances in group)
+//   <geometry — identical layout as the geometry section of MeshRecord>
+//   [per-instance] × num_instances:
+//     string                 instance object name
+//     float[num_motion_keys * 16]  world transform matrix per key
 // ---------------------------------------------------------------------------
 
 namespace anacapa {
 namespace scene_fmt {
 
 static constexpr uint32_t kMagic   = 0x41434E41u; // "ANCA"
-static constexpr uint32_t kVersion = 4u;
+static constexpr uint32_t kVersion = 5u;
 
 // Coordinate convention written by the Python exporter:
 //   Y-up, right-handed (Blender Z-up corrected to Y-up by the Python side).
@@ -50,12 +64,13 @@ static constexpr uint32_t kVersion = 4u;
 #pragma pack(push, 1)
 
 struct SceneHeader {
-    uint32_t magic;       // kMagic
-    uint32_t version;     // kVersion
-    uint32_t num_meshes;
+    uint32_t magic;            // kMagic
+    uint32_t version;          // kVersion
+    uint32_t num_meshes;       // non-instanced MeshRecord count
     uint32_t num_lights;
-    uint32_t has_camera;  // 0 or 1
-    uint32_t _pad[3];
+    uint32_t has_camera;       // 0 or 1
+    uint32_t num_inst_groups;  // InstanceGroupRecord count (v5+; was _pad[0])
+    uint32_t _pad[2];
 };
 static_assert(sizeof(SceneHeader) == 32, "SceneHeader must be 32 bytes");
 
@@ -66,6 +81,16 @@ struct MeshHeader {
     uint32_t num_uvlayers;
     uint32_t num_mat_slots;
     uint32_t num_motion_keys;  // ≥ 1; >1 enables motion blur (matrices + time codes follow)
+};
+
+struct InstanceGroupHeader {
+    uint32_t num_verts;
+    uint32_t num_loops;
+    uint32_t num_polys;
+    uint32_t num_uvlayers;
+    uint32_t num_mat_slots;
+    uint32_t num_motion_keys;  // number of time samples per instance (1 = static)
+    uint32_t num_instances;    // number of instances in this group
 };
 
 enum class LightType : uint32_t {

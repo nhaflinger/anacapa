@@ -103,6 +103,7 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
     bool  prevWasDelta = true;
     bool  firstHit     = true;
 
+    uint32_t passthroughTotal = 0;
     for (uint32_t bounce = 0; bounce <= m_maxDepth; ++bounce) {
         TraceResult hit = scene.accel->trace(r);
 
@@ -159,8 +160,8 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
                 }
                 L += beta * bg * weight;
             }
-            // Straight alpha: sky color stays in RGB; alpha=0 for compositing
-            if (bounce == 0 && scene.envLight && scene.envLight->transparentBg())
+            // Alpha=0 for background pixels so renders are always compositable.
+            if (bounce == 0)
                 outAlpha = 0.f;
             break;
         }
@@ -193,12 +194,14 @@ Spectrum PathIntegrator::Li(const Ray& ray, const SceneView& scene,
             beta *= 0.2f;
         }
 
-        // Alpha / opacity cutout
+        // Alpha / opacity cutout — cap passthroughs to avoid near-infinite loops
+        // when instanced geometry has missing/zero-opacity materials.
         {
             float opacity = mat->evalOpacity(ctx);
-            bool passThrough = opacity <= 0.f
-                || (opacity < 1.f && sampler.get1D() >= opacity);
+            bool passThrough = (passthroughTotal < 64u)
+                && (opacity <= 0.f || (opacity < 1.f && sampler.get1D() >= opacity));
             if (passThrough) {
+                ++passthroughTotal;
                 r = spawnRay(si.p, si.ng, r.direction);
                 r.time = ray.time;
                 continue;

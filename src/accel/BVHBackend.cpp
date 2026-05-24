@@ -1,9 +1,11 @@
 #include "BVHBackend.h"
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <spdlog/spdlog.h>
 
 // Platform-specific SIMD headers — guarded so non-SIMD builds stay clean.
 #if defined(__aarch64__)
@@ -82,53 +84,56 @@ void BVHBackend::commit() {
         }
     }
 
-    if (m_trav.empty()) { m_built = true; return; }
-
-    uint32_t n = static_cast<uint32_t>(m_trav.size());
-    std::vector<PrimInfo> primInfo(n);
-    for (uint32_t i = 0; i < n; ++i) {
-        const BVHTriTrav& trav = m_trav[i];
-        BBox3f b;
-        if (trav.isObjectSpace()) {
-            const MeshDesc& mesh = m_pool.mesh(trav.meshID());
-            for (const MotionKey& key : mesh.motionKeys) {
-                Vec3f w0 = key.objectToWorld.transformPoint(trav.v0);
-                Vec3f w1 = key.objectToWorld.transformPoint(trav.v0 + trav.e1);
-                Vec3f w2 = key.objectToWorld.transformPoint(trav.v0 + trav.e2);
-                b.expand(w0); b.expand(w1); b.expand(w2);
+    if (!m_trav.empty()) {
+        uint32_t n = static_cast<uint32_t>(m_trav.size());
+        std::vector<PrimInfo> primInfo(n);
+        for (uint32_t i = 0; i < n; ++i) {
+            const BVHTriTrav& trav = m_trav[i];
+            BBox3f b;
+            if (trav.isObjectSpace()) {
+                const MeshDesc& mesh = m_pool.mesh(trav.meshID());
+                for (const MotionKey& key : mesh.motionKeys) {
+                    Vec3f w0 = key.objectToWorld.transformPoint(trav.v0);
+                    Vec3f w1 = key.objectToWorld.transformPoint(trav.v0 + trav.e1);
+                    Vec3f w2 = key.objectToWorld.transformPoint(trav.v0 + trav.e2);
+                    b.expand(w0); b.expand(w1); b.expand(w2);
+                }
+            } else {
+                Vec3f v1 = trav.v0 + trav.e1, v2 = trav.v0 + trav.e2;
+                b.expand(trav.v0); b.expand(v1); b.expand(v2);
             }
-        } else {
-            Vec3f v1 = trav.v0 + trav.e1, v2 = trav.v0 + trav.e2;
-            b.expand(trav.v0); b.expand(v1); b.expand(v2);
+            for (int ax = 0; ax < 3; ++ax)
+                if (b.diagonal()[ax] < 1e-7f)
+                    { b.pMin[ax] -= 1e-7f; b.pMax[ax] += 1e-7f; }
+            primInfo[i] = { b, b.centroid(), i,
+                            trav.v0, trav.v0 + trav.e1, trav.v0 + trav.e2,
+                            trav.isObjectSpace() };
         }
-        for (int ax = 0; ax < 3; ++ax)
-            if (b.diagonal()[ax] < 1e-7f)
-                { b.pMin[ax] -= 1e-7f; b.pMax[ax] += 1e-7f; }
-        primInfo[i] = { b, b.centroid(), i,
-                        trav.v0, trav.v0 + trav.e1, trav.v0 + trav.e2,
-                        trav.isObjectSpace() };
-    }
 
-    // SBVH build budget
-    {
         BBox3f rootBounds;
         for (uint32_t i = 0; i < n; ++i) rootBounds.expand(primInfo[i].bounds);
         Vec3f rd = rootBounds.diagonal();
-        m_buildRootSA    = 2.f * (rd.x*rd.y + rd.y*rd.z + rd.z*rd.x);
-        m_buildMaxRefs   = static_cast<uint32_t>(n * kMaxRefFactor);
-        m_buildTotalRefs = n;
+        m_buildRootSA  = 2.f * (rd.x*rd.y + rd.y*rd.z + rd.z*rd.x);
+        m_buildMaxRefs = static_cast<uint32_t>(n * kMaxRefFactor);
+        BuildState state;
+        state.totalRefs = n;
+
+        m_primIndices.clear();
+        m_primIndices.reserve(n);
+
+        std::vector<BuildBVHNode> buildNodes;
+        buildNodes.reserve(2 * n);
+        buildRecursive(primInfo, 0, n, buildNodes, m_primIndices, state);
+        repackBuildTree(buildNodes, m_nodes);
     }
 
-    m_primIndices.clear();
-    m_primIndices.reserve(n);
-
-    // Phase 1: binary SAH build
-    std::vector<BuildBVHNode> buildNodes;
-    buildNodes.reserve(2 * n);
-    buildRecursive(primInfo, 0, n, buildNodes);
-
-    // Phase 2: collapse binary tree into BVH4 SOA nodes
-    repackBuildTree(buildNodes);
+    // Build BLASes and TLAS for instance groups
+    if (m_pool.numInstanceGroups() > 0) {
+        m_blasList.resize(m_pool.numInstanceGroups());
+        for (uint32_t gi = 0; gi < (uint32_t)m_pool.numInstanceGroups(); ++gi)
+            buildBLAS(gi);
+        buildTLAS();
+    }
 
     m_built = true;
 }
@@ -143,7 +148,10 @@ static void storeBuildBounds(BuildBVHNode& node, const BBox3f& b) {
 
 uint32_t BVHBackend::buildRecursive(std::vector<PrimInfo>& primInfo,
                                     uint32_t start, uint32_t end,
-                                    std::vector<BuildBVHNode>& buildNodes) {
+                                    std::vector<BuildBVHNode>& buildNodes,
+                                    std::vector<uint32_t>& primIndices,
+                                    BuildState& state,
+                                    int maxLeafPrims) {
     uint32_t nodeIdx = static_cast<uint32_t>(buildNodes.size());
     buildNodes.emplace_back();
 
@@ -160,13 +168,13 @@ uint32_t BVHBackend::buildRecursive(std::vector<PrimInfo>& primInfo,
     // Object split
     float    objCost   = std::numeric_limits<float>::infinity();
     int      objAxis   = -1, objBucket = -1;
-    if (count > (uint32_t)kMaxLeafPrims)
+    if (count > (uint32_t)maxLeafPrims)
         objBucket = sahSplit(primInfo, start, end, centroidBounds, bounds, objAxis, objCost);
 
     // Spatial split — only when budget allows
     float spatCost = std::numeric_limits<float>::infinity();
     int   spatAxis = -1; float spatPos = 0.f;
-    if (count > (uint32_t)kMaxLeafPrims && m_buildTotalRefs < m_buildMaxRefs)
+    if (count > (uint32_t)maxLeafPrims && state.totalRefs < m_buildMaxRefs)
         spatCost = spatialSplit(primInfo, start, end, bounds, spatAxis, spatPos);
 
     // Spatial split path — try first if it beats both object split and leaf
@@ -209,10 +217,10 @@ uint32_t BVHBackend::buildRecursive(std::vector<PrimInfo>& primInfo,
 
         if (!leftRefs.empty() && !rightRefs.empty()) {
             uint32_t extra = (uint32_t)(leftRefs.size() + rightRefs.size()) - count;
-            m_buildTotalRefs += extra;
+            state.totalRefs += extra;
 
-            buildRecursive(leftRefs, 0, (uint32_t)leftRefs.size(), buildNodes);
-            uint32_t rightIdx = buildRecursive(rightRefs, 0, (uint32_t)rightRefs.size(), buildNodes);
+            buildRecursive(leftRefs, 0, (uint32_t)leftRefs.size(), buildNodes, primIndices, state, maxLeafPrims);
+            uint32_t rightIdx = buildRecursive(rightRefs, 0, (uint32_t)rightRefs.size(), buildNodes, primIndices, state, maxLeafPrims);
 
             buildNodes[nodeIdx].dataA = rightIdx;
             buildNodes[nodeIdx].dataB = (uint32_t)spatAxis;
@@ -237,8 +245,8 @@ uint32_t BVHBackend::buildRecursive(std::vector<PrimInfo>& primInfo,
         }
         if (mid == start || mid == end) mid = start + count / 2;
 
-        buildRecursive(primInfo, start, mid, buildNodes);
-        uint32_t rightIdx = buildRecursive(primInfo, mid, end, buildNodes);
+        buildRecursive(primInfo, start, mid, buildNodes, primIndices, state, maxLeafPrims);
+        uint32_t rightIdx = buildRecursive(primInfo, mid, end, buildNodes, primIndices, state, maxLeafPrims);
 
         buildNodes[nodeIdx].dataA = rightIdx;
         buildNodes[nodeIdx].dataB = (uint32_t)objAxis;
@@ -246,9 +254,9 @@ uint32_t BVHBackend::buildRecursive(std::vector<PrimInfo>& primInfo,
     }
 
     // Leaf
-    uint32_t offset = (uint32_t)m_primIndices.size();
+    uint32_t offset = (uint32_t)primIndices.size();
     for (uint32_t i = start; i < end; ++i)
-        m_primIndices.push_back(primInfo[i].originalIndex);
+        primIndices.push_back(primInfo[i].originalIndex);
     buildNodes[nodeIdx].dataA = offset;
     buildNodes[nodeIdx].dataB = count | BuildBVHNode::kLeafFlag;
     return nodeIdx;
@@ -465,7 +473,8 @@ static void fillEmptySlot(BVHNode& node, int s) {
 }
 
 uint32_t BVHBackend::buildBVH4Node(const std::vector<BuildBVHNode>& build,
-                                    uint32_t oldIdx) {
+                                    uint32_t oldIdx,
+                                    std::vector<BVHNode>& nodes) {
     // Gather up to 4 child slots by expanding the two binary children one level.
     // Each binary child is expanded into its own children if it is interior and
     // we still have room (total slots < 4).  This collapses two binary levels
@@ -491,59 +500,301 @@ uint32_t BVHBackend::buildBVH4Node(const std::vector<BuildBVHNode>& build,
     // nSlots is now 2, 3, or 4
 
     // Allocate BVH4 node — do this AFTER gathering slots so no index is stale
-    uint32_t newIdx = static_cast<uint32_t>(m_nodes.size());
-    m_nodes.push_back(BVHNode{});
+    uint32_t newIdx = static_cast<uint32_t>(nodes.size());
+    nodes.push_back(BVHNode{});
 
     // Fill each slot; recurse for interior children
     for (int s = 0; s < nSlots; ++s) {
         uint32_t si = slots[s].idx;
         const BuildBVHNode& sn = build[si];
 
-        m_nodes[newIdx].minX[s] = sn.boundsMin[0];
-        m_nodes[newIdx].minY[s] = sn.boundsMin[1];
-        m_nodes[newIdx].minZ[s] = sn.boundsMin[2];
-        m_nodes[newIdx].maxX[s] = sn.boundsMax[0];
-        m_nodes[newIdx].maxY[s] = sn.boundsMax[1];
-        m_nodes[newIdx].maxZ[s] = sn.boundsMax[2];
+        nodes[newIdx].minX[s] = sn.boundsMin[0];
+        nodes[newIdx].minY[s] = sn.boundsMin[1];
+        nodes[newIdx].minZ[s] = sn.boundsMin[2];
+        nodes[newIdx].maxX[s] = sn.boundsMax[0];
+        nodes[newIdx].maxY[s] = sn.boundsMax[1];
+        nodes[newIdx].maxZ[s] = sn.boundsMax[2];
 
         if (sn.isLeaf()) {
-            m_nodes[newIdx].childData[s] = sn.primOffset();
-            m_nodes[newIdx].childMeta[s] = sn.primCount() | BVHNode::kLeafFlag;
+            nodes[newIdx].childData[s] = sn.primOffset();
+            nodes[newIdx].childMeta[s] = sn.primCount() | BVHNode::kLeafFlag;
         } else {
-            uint32_t childNodeIdx = buildBVH4Node(build, si);
-            // Re-index through newIdx — m_nodes may have reallocated during recursion
-            m_nodes[newIdx].childData[s] = childNodeIdx;
-            m_nodes[newIdx].childMeta[s] = 0;
+            uint32_t childNodeIdx = buildBVH4Node(build, si, nodes);
+            // Re-index through newIdx — nodes may have reallocated during recursion
+            nodes[newIdx].childData[s] = childNodeIdx;
+            nodes[newIdx].childMeta[s] = 0;
         }
     }
 
     // Pad unused slots with empty AABBs
     for (int s = nSlots; s < 4; ++s)
-        fillEmptySlot(m_nodes[newIdx], s);
+        fillEmptySlot(nodes[newIdx], s);
 
     return newIdx;
 }
 
-void BVHBackend::repackBuildTree(const std::vector<BuildBVHNode>& build) {
+void BVHBackend::repackBuildTree(const std::vector<BuildBVHNode>& build,
+                                  std::vector<BVHNode>& nodes) {
     if (build.empty()) return;
 
     const BuildBVHNode& root = build[0];
 
     if (root.isLeaf()) {
-        // Degenerate: single leaf — wrap it in slot 0, pad slots 1-3.
-        m_nodes.push_back(BVHNode{});
-        m_nodes[0].minX[0] = root.boundsMin[0];
-        m_nodes[0].minY[0] = root.boundsMin[1];
-        m_nodes[0].minZ[0] = root.boundsMin[2];
-        m_nodes[0].maxX[0] = root.boundsMax[0];
-        m_nodes[0].maxY[0] = root.boundsMax[1];
-        m_nodes[0].maxZ[0] = root.boundsMax[2];
-        m_nodes[0].childData[0] = root.primOffset();
-        m_nodes[0].childMeta[0] = root.primCount() | BVHNode::kLeafFlag;
-        for (int s = 1; s < 4; ++s) fillEmptySlot(m_nodes[0], s);
+        nodes.push_back(BVHNode{});
+        nodes[0].minX[0] = root.boundsMin[0];
+        nodes[0].minY[0] = root.boundsMin[1];
+        nodes[0].minZ[0] = root.boundsMin[2];
+        nodes[0].maxX[0] = root.boundsMax[0];
+        nodes[0].maxY[0] = root.boundsMax[1];
+        nodes[0].maxZ[0] = root.boundsMax[2];
+        nodes[0].childData[0] = root.primOffset();
+        nodes[0].childMeta[0] = root.primCount() | BVHNode::kLeafFlag;
+        for (int s = 1; s < 4; ++s) fillEmptySlot(nodes[0], s);
     } else {
-        buildBVH4Node(build, 0);  // root BVH4 node will be at index 0
+        buildBVH4Node(build, 0, nodes);
     }
+}
+
+// ---------------------------------------------------------------------------
+// buildBLAS — build a BLAS for the prototype mesh of one instance group.
+// ---------------------------------------------------------------------------
+void BVHBackend::buildBLAS(uint32_t groupID) {
+    BLAS& blas = m_blasList[groupID];
+    const InstanceGroupDesc& grp   = m_pool.instanceGroup(groupID);
+    const MeshDesc&          proto = m_pool.mesh(grp.protoMeshID);
+
+    uint32_t numTris = proto.numTriangles();
+    if (numTris == 0) return;
+
+    blas.trav.reserve(numTris);
+    blas.attribs.reserve(numTris);
+
+    for (uint32_t ti = 0; ti < numTris; ++ti) {
+        uint32_t i0 = proto.indices[ti * 3 + 0];
+        uint32_t i1 = proto.indices[ti * 3 + 1];
+        uint32_t i2 = proto.indices[ti * 3 + 2];
+
+        BVHTriTrav   trav;
+        BVHTriAttrib attrib;
+
+        // Positions stored in object space (prototype mesh is never baked to world).
+        trav.v0  = proto.positions[i0];
+        Vec3f v1 = proto.positions[i1];
+        Vec3f v2 = proto.positions[i2];
+        trav.e1  = v1 - trav.v0;
+        trav.e2  = v2 - trav.v0;
+        trav.data = grp.protoMeshID;  // meshID used for material lookup
+
+        attrib.n = safeNormalize(cross(trav.e1, trav.e2));
+        auto getN = [&](uint32_t idx) -> Vec3f {
+            return idx < proto.normals.size()
+                ? safeNormalize(proto.normals[idx]) : attrib.n;
+        };
+        attrib.sn0 = getN(i0); attrib.sn1 = getN(i1); attrib.sn2 = getN(i2);
+
+        auto getUV = [&](uint32_t idx) -> Vec2f {
+            return idx < proto.uvs.size() ? proto.uvs[idx] : Vec2f{0.f, 0.f};
+        };
+        attrib.uv0 = getUV(i0); attrib.uv1 = getUV(i1); attrib.uv2 = getUV(i2);
+        attrib.primID = ti;
+
+        blas.trav.push_back(trav);
+        blas.attribs.push_back(attrib);
+    }
+
+    // Build PrimInfo — object-space bounds (no transforms applied).
+    std::vector<PrimInfo> primInfo(numTris);
+    for (uint32_t i = 0; i < numTris; ++i) {
+        const BVHTriTrav& t = blas.trav[i];
+        Vec3f v1 = t.v0 + t.e1, v2 = t.v0 + t.e2;
+        BBox3f b;
+        b.expand(t.v0); b.expand(v1); b.expand(v2);
+        for (int ax = 0; ax < 3; ++ax)
+            if (b.diagonal()[ax] < 1e-7f)
+                { b.pMin[ax] -= 1e-7f; b.pMax[ax] += 1e-7f; }
+        primInfo[i] = { b, b.centroid(), i, t.v0, v1, v2, false };
+    }
+
+    BBox3f rootBounds;
+    for (uint32_t i = 0; i < numTris; ++i) rootBounds.expand(primInfo[i].bounds);
+    Vec3f rd = rootBounds.diagonal();
+    m_buildRootSA  = 2.f * (rd.x*rd.y + rd.y*rd.z + rd.z*rd.x);
+    m_buildMaxRefs = static_cast<uint32_t>(numTris * kMaxRefFactor);
+    BuildState state;
+    state.totalRefs = numTris;
+
+    blas.primIndices.reserve(numTris);
+    std::vector<BuildBVHNode> buildNodes;
+    buildNodes.reserve(2 * numTris);
+    buildRecursive(primInfo, 0, numTris, buildNodes, blas.primIndices, state);
+    repackBuildTree(buildNodes, blas.nodes);
+    spdlog::info("BVHBackend: BLAS[{}] built — {} tris, {} BVH4 nodes, {} instances",
+                 groupID, numTris, blas.nodes.size(),
+                 m_pool.instanceGroup(groupID).instances.size());
+}
+
+// ---------------------------------------------------------------------------
+// buildTLAS — build a BVH4 over world-space instance AABBs.
+// ---------------------------------------------------------------------------
+void BVHBackend::buildTLAS() {
+    uint32_t totalInstances = 0;
+    for (uint32_t gi = 0; gi < (uint32_t)m_pool.numInstanceGroups(); ++gi)
+        totalInstances += (uint32_t)m_pool.instanceGroup(gi).instances.size();
+    if (totalInstances == 0) return;
+
+    m_tlasInstances.reserve(totalInstances);
+    m_tlasPrimIndices.reserve(totalInstances);
+
+    std::vector<PrimInfo> primInfo;
+    primInfo.reserve(totalInstances);
+
+    for (uint32_t gi = 0; gi < (uint32_t)m_pool.numInstanceGroups(); ++gi) {
+        const InstanceGroupDesc& grp   = m_pool.instanceGroup(gi);
+        const MeshDesc&          proto = m_pool.mesh(grp.protoMeshID);
+
+        // Object-space prototype bounds
+        BBox3f protoBounds;
+        for (const Vec3f& p : proto.positions) protoBounds.expand(p);
+
+        for (uint32_t ii = 0; ii < (uint32_t)grp.instances.size(); ++ii) {
+            const InstanceDesc& inst = grp.instances[ii];
+
+            // World-space AABB: transform all 8 corners at each motion key
+            BBox3f wb;
+            for (const MotionKey& key : inst.keys) {
+                for (int cx = 0; cx < 2; ++cx)
+                for (int cy = 0; cy < 2; ++cy)
+                for (int cz = 0; cz < 2; ++cz) {
+                    Vec3f c = {
+                        cx ? protoBounds.pMax.x : protoBounds.pMin.x,
+                        cy ? protoBounds.pMax.y : protoBounds.pMin.y,
+                        cz ? protoBounds.pMax.z : protoBounds.pMin.z
+                    };
+                    wb.expand(key.objectToWorld.transformPoint(c));
+                }
+            }
+            for (int ax = 0; ax < 3; ++ax)
+                if (wb.diagonal()[ax] < 1e-7f)
+                    { wb.pMin[ax] -= 1e-7f; wb.pMax[ax] += 1e-7f; }
+
+            uint32_t instIdx = (uint32_t)m_tlasInstances.size();
+            TLASInstance ti;
+            ti.groupID     = gi;
+            ti.instanceIdx = ii;
+            ti.bMin[0] = wb.pMin.x; ti.bMin[1] = wb.pMin.y; ti.bMin[2] = wb.pMin.z;
+            ti.bMax[0] = wb.pMax.x; ti.bMax[1] = wb.pMax.y; ti.bMax[2] = wb.pMax.z;
+            m_tlasInstances.push_back(ti);
+
+            // animated=true disables SBVH spatial splits for TLAS prims
+            primInfo.push_back({wb, wb.centroid(), instIdx, {}, {}, {}, true});
+        }
+    }
+
+    BBox3f rootBounds;
+    for (const PrimInfo& pi : primInfo) rootBounds.expand(pi.bounds);
+    Vec3f rd = rootBounds.diagonal();
+    m_buildRootSA  = 2.f * (rd.x*rd.y + rd.y*rd.z + rd.z*rd.x);
+    m_buildMaxRefs = totalInstances;  // no spatial splits for TLAS
+    BuildState state;
+    state.totalRefs = totalInstances;
+
+    std::vector<BuildBVHNode> buildNodes;
+    buildNodes.reserve(2 * totalInstances);
+    buildRecursive(primInfo, 0, totalInstances, buildNodes, m_tlasPrimIndices, state, kTLASMaxLeafPrims);
+    repackBuildTree(buildNodes, m_tlasNodes);
+
+    spdlog::info("BVHBackend: TLAS built — {} instance groups, {} instances total",
+                 m_pool.numInstanceGroups(), totalInstances);
+}
+
+// ---------------------------------------------------------------------------
+// traceBLAS — traverse one instance's BLAS; updates closestT on hit.
+// ---------------------------------------------------------------------------
+void BVHBackend::traceBLAS(const BLAS& blas, const Ray& ray, const Ray4& objRay,
+                            uint32_t groupID, uint32_t instanceIdx, const Mat4f& o2w,
+                            float& closestT, uint32_t& hitBlasTriIdx,
+                            float& hitU, float& hitV,
+                            uint32_t& hitGroupID, uint32_t& hitInstanceIdx) const {
+    if (blas.nodes.empty()) return;
+
+    uint32_t stack[64];
+    int      top = 0;
+    stack[top++] = 0;
+
+    Ray4 r = objRay;
+    r.tMax = closestT;
+
+    while (top > 0) {
+        const BVHNode& node = blas.nodes[stack[--top]];
+        float tNear[4];
+        int mask = intersectAABB4(node, r, tNear, r.tMax);
+        if (!mask) continue;
+
+        int hits[4], nHits = 0;
+        for (int c = 0; c < 4; ++c)
+            if (mask & (1 << c)) hits[nHits++] = c;
+        for (int i = 1; i < nHits; ++i) {
+            int key = hits[i], j = i - 1;
+            while (j >= 0 && tNear[hits[j]] > tNear[key]) { hits[j+1] = hits[j]; --j; }
+            hits[j+1] = key;
+        }
+
+        for (int i = nHits - 1; i >= 0; --i)
+            if (!node.isLeaf(hits[i])) stack[top++] = node.childIdx(hits[i]);
+
+        for (int i = 0; i < nHits; ++i) {
+            int c = hits[i];
+            if (!node.isLeaf(c)) continue;
+            uint32_t offset = node.primOffset(c);
+            uint32_t count  = node.primCount(c);
+            for (uint32_t k = 0; k < count; ++k) {
+                uint32_t idx = blas.primIndices[offset + k];
+                float t, u, v;
+                Ray4 rc = r; rc.tMax = r.tMax;
+                if (intersectTriangle(blas.trav[idx], rc, t, u, v)) {
+                    r.tMax = t;
+                    hitBlasTriIdx  = idx;
+                    hitU = u; hitV = v;
+                    hitGroupID     = groupID;
+                    hitInstanceIdx = instanceIdx;
+                }
+            }
+        }
+    }
+    closestT = r.tMax;
+}
+
+// ---------------------------------------------------------------------------
+// occludedBLAS — early-exit shadow test through one BLAS.
+// ---------------------------------------------------------------------------
+bool BVHBackend::occludedBLAS(const BLAS& blas, const Ray4& objRay) const {
+    if (blas.nodes.empty()) return false;
+
+    uint32_t stack[64];
+    int top = 0;
+    stack[top++] = 0;
+    float tNear[4];
+
+    while (top > 0) {
+        const BVHNode& node = blas.nodes[stack[--top]];
+        int mask = intersectAABB4(node, objRay, tNear, objRay.tMax);
+        if (!mask) continue;
+        for (int c = 0; c < 4; ++c) {
+            if (!(mask & (1 << c))) continue;
+            if (node.isLeaf(c)) {
+                uint32_t offset = node.primOffset(c);
+                uint32_t count  = node.primCount(c);
+                for (uint32_t k = 0; k < count; ++k) {
+                    float t, u, v;
+                    if (intersectTriangle(blas.trav[blas.primIndices[offset + k]], objRay, t, u, v))
+                        return true;
+                }
+            } else {
+                stack[top++] = node.childIdx(c);
+            }
+        }
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -802,8 +1053,82 @@ TraceResult BVHBackend::traceImpl(const Ray& ray) const {
         }
     }
 
+    // --- Query TLAS (instance groups), using single-BVH closestT as tMax ---
+    // Single-BVH ran first so TLAS only finds hits strictly closer.
+    // If TLAS wins, hitBlasTriIdx is set; hitIdx retains the single-BVH result.
+    uint32_t hitBlasTriIdx  = ~0u;
+    uint32_t hitGroupID     = ~0u;
+    uint32_t hitInstanceIdx = ~0u;
+    float    hitBU = 0.f, hitBV = 0.f;
+
+    if (!m_tlasNodes.empty()) {
+        uint32_t tlasStack[64];
+        int      tlasTop = 0;
+        tlasStack[tlasTop++] = 0;
+
+        while (tlasTop > 0) {
+            const BVHNode& node = m_tlasNodes[tlasStack[--tlasTop]];
+            float tNear[4];
+            int mask = intersectAABB4(node, r, tNear, closestT);
+            if (!mask) continue;
+
+            int hits[4], nHits = 0;
+            for (int c = 0; c < 4; ++c)
+                if (mask & (1 << c)) hits[nHits++] = c;
+            for (int i = 1; i < nHits; ++i) {
+                int key = hits[i], j = i - 1;
+                while (j >= 0 && tNear[hits[j]] > tNear[key]) { hits[j+1] = hits[j]; --j; }
+                hits[j+1] = key;
+            }
+
+            for (int i = nHits - 1; i >= 0; --i)
+                if (!node.isLeaf(hits[i])) tlasStack[tlasTop++] = node.childIdx(hits[i]);
+
+            for (int i = 0; i < nHits; ++i) {
+                int c = hits[i];
+                if (!node.isLeaf(c)) continue;
+                uint32_t offset = node.primOffset(c);
+                uint32_t count  = node.primCount(c);
+                for (uint32_t k = 0; k < count; ++k) {
+                    const TLASInstance& ti = m_tlasInstances[m_tlasPrimIndices[offset + k]];
+                    // Tight per-instance AABB test — rejects false positives from the
+                    // leaf's union AABB without paying full BLAS traversal cost.
+                    {
+                        float tn = r.tMin, tf = closestT;
+                        for (int ax = 0; ax < 3; ++ax) {
+                            float t0 = (ti.bMin[ax] - r.origin[ax]) * r.invDir[ax];
+                            float t1 = (ti.bMax[ax] - r.origin[ax]) * r.invDir[ax];
+                            tn = std::max(tn, std::min(t0, t1));
+                            tf = std::min(tf, std::max(t0, t1));
+                        }
+                        if (tn > tf) continue;
+                    }
+                    const InstanceGroupDesc& grp  = m_pool.instanceGroup(ti.groupID);
+                    const InstanceDesc&      inst = grp.instances[ti.instanceIdx];
+                    Mat4f o2w = inst.interpolateO2W(ray.time);
+                    Mat4f w2o = inst.interpolateW2O(ray.time);
+                    Ray4  objRay = makeObjectSpaceRay4(ray, w2o);
+                    traceBLAS(m_blasList[ti.groupID], ray, objRay,
+                               ti.groupID, ti.instanceIdx, o2w,
+                               closestT, hitBlasTriIdx, hitBU, hitBV,
+                               hitGroupID, hitInstanceIdx);
+                }
+            }
+        }
+    }
+
+    // TLAS ran second: if hitBlasTriIdx is set it is strictly closer than
+    // any single-BVH hit (TLAS used single-BVH's closestT as its tMax).
     TraceResult result;
-    if (hitIdx != ~0u) {
+    if (hitBlasTriIdx != ~0u) {
+        result.hit = true;
+        const InstanceGroupDesc& grp   = m_pool.instanceGroup(hitGroupID);
+        const InstanceDesc&      inst  = grp.instances[hitInstanceIdx];
+        Mat4f o2w = inst.interpolateO2W(ray.time);
+        fillSurfaceInteraction(m_blasList[hitGroupID].trav[hitBlasTriIdx],
+                               m_blasList[hitGroupID].attribs[hitBlasTriIdx],
+                               closestT, hitBU, hitBV, &o2w, result.si);
+    } else if (hitIdx != ~0u) {
         result.hit = true;
         const BVHTriTrav&   trav   = m_trav[hitIdx];
         const BVHTriAttrib& attrib = m_attribs[hitIdx];
@@ -823,42 +1148,87 @@ TraceResult BVHBackend::traceImpl(const Ray& ray) const {
 // ---------------------------------------------------------------------------
 bool BVHBackend::occluded(const Ray& ray) const {
     assert(m_built);
-    if (m_nodes.empty()) return false;
 
     Ray4 r = makeRay4(ray);
-    uint32_t stack[64];
-    int top = 0;
-    stack[top++] = 0;
     float tNear[4];
 
-    while (top > 0) {
-        const BVHNode& node = m_nodes[stack[--top]];
-        int mask = intersectAABB4(node, r, tNear, r.tMax);
-        if (!mask) continue;
+    // Single-level BVH
+    if (!m_nodes.empty()) {
+        uint32_t stack[64];
+        int top = 0;
+        stack[top++] = 0;
 
-        for (int c = 0; c < 4; ++c) {
-            if (!(mask & (1 << c))) continue;
-            if (node.isLeaf(c)) {
-                uint32_t offset = node.primOffset(c);
-                uint32_t count  = node.primCount(c);
-                for (uint32_t k = 0; k < count; ++k) {
-                    uint32_t idx = m_primIndices[offset + k];
-                    const BVHTriTrav& trav = m_trav[idx];
-                    float t, u, v;
-                    if (trav.isObjectSpace()) {
-                        const MeshDesc& mesh = m_pool.mesh(trav.meshID());
-                        Mat4f o2w = mesh.interpolateO2W(ray.time);
-                        Ray4 ro = makeObjectSpaceRay4(ray, o2w.inverse());
-                        if (intersectTriangle(trav, ro, t, u, v)) return true;
-                    } else {
-                        if (intersectTriangle(trav, r, t, u, v)) return true;
+        while (top > 0) {
+            const BVHNode& node = m_nodes[stack[--top]];
+            int mask = intersectAABB4(node, r, tNear, r.tMax);
+            if (!mask) continue;
+
+            for (int c = 0; c < 4; ++c) {
+                if (!(mask & (1 << c))) continue;
+                if (node.isLeaf(c)) {
+                    uint32_t offset = node.primOffset(c);
+                    uint32_t count  = node.primCount(c);
+                    for (uint32_t k = 0; k < count; ++k) {
+                        uint32_t idx = m_primIndices[offset + k];
+                        const BVHTriTrav& trav = m_trav[idx];
+                        float t, u, v;
+                        if (trav.isObjectSpace()) {
+                            const MeshDesc& mesh = m_pool.mesh(trav.meshID());
+                            Mat4f o2w = mesh.interpolateO2W(ray.time);
+                            Ray4 ro = makeObjectSpaceRay4(ray, o2w.inverse());
+                            if (intersectTriangle(trav, ro, t, u, v)) return true;
+                        } else {
+                            if (intersectTriangle(trav, r, t, u, v)) return true;
+                        }
                     }
+                } else {
+                    stack[top++] = node.childIdx(c);
                 }
-            } else {
-                stack[top++] = node.childIdx(c);
             }
         }
     }
+
+    // TLAS (instance groups)
+    if (!m_tlasNodes.empty()) {
+        uint32_t stack[64];
+        int top = 0;
+        stack[top++] = 0;
+
+        while (top > 0) {
+            const BVHNode& node = m_tlasNodes[stack[--top]];
+            int mask = intersectAABB4(node, r, tNear, r.tMax);
+            if (!mask) continue;
+
+            for (int c = 0; c < 4; ++c) {
+                if (!(mask & (1 << c))) continue;
+                if (node.isLeaf(c)) {
+                    uint32_t offset = node.primOffset(c);
+                    uint32_t count  = node.primCount(c);
+                    for (uint32_t k = 0; k < count; ++k) {
+                        const TLASInstance& ti = m_tlasInstances[m_tlasPrimIndices[offset + k]];
+                        {
+                            float tn = r.tMin, tf = r.tMax;
+                            for (int ax = 0; ax < 3; ++ax) {
+                                float t0 = (ti.bMin[ax] - r.origin[ax]) * r.invDir[ax];
+                                float t1 = (ti.bMax[ax] - r.origin[ax]) * r.invDir[ax];
+                                tn = std::max(tn, std::min(t0, t1));
+                                tf = std::min(tf, std::max(t0, t1));
+                            }
+                            if (tn > tf) continue;
+                        }
+                        const InstanceGroupDesc& grp  = m_pool.instanceGroup(ti.groupID);
+                        const InstanceDesc&      inst = grp.instances[ti.instanceIdx];
+                        Mat4f w2o = inst.interpolateW2O(ray.time);
+                        Ray4  objRay = makeObjectSpaceRay4(ray, w2o);
+                        if (occludedBLAS(m_blasList[ti.groupID], objRay)) return true;
+                    }
+                } else {
+                    stack[top++] = node.childIdx(c);
+                }
+            }
+        }
+    }
+
     return false;
 }
 

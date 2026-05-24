@@ -878,7 +878,8 @@ _load_scene_export_module._mod = None
 
 
 def _anacapa_export_scene(usd_path, context, executable,
-                          shutter_open=0.0, shutter_close=0.0):
+                          shutter_open=0.0, shutter_close=0.0,
+                          depsgraph_override=None):
     """
     New scene export pipeline — reads from the depsgraph without touching the
     live scene, writes a binary blob, invokes the C++ exporter to produce USD,
@@ -895,7 +896,11 @@ def _anacapa_export_scene(usd_path, context, executable,
 
     # 1. Collect HALO / GN-based particles before any frame seeking so that GN
     #    simulation zones are captured at the current evaluated state.
-    if prep is not None:
+    # Skip when depsgraph_override is set (render engine path): bpy.ops calls
+    # inside RenderEngine.render() deadlock waiting for the event loop.
+    # In the render engine path GN instances come from the render-mode depsgraph
+    # directly, so halo collection is not needed for mesh-based GN scatter.
+    if prep is not None and depsgraph_override is None:
         try:
             n = prep.collect_halo_particles()
             if n:
@@ -906,7 +911,8 @@ def _anacapa_export_scene(usd_path, context, executable,
     # 2. Write binary blob from depsgraph (motion blur keys sampled when enabled)
     scene_mod.export_scene_binary(blob_path, context,
                                   shutter_open=shutter_open,
-                                  shutter_close=shutter_close)
+                                  shutter_close=shutter_close,
+                                  depsgraph_override=depsgraph_override)
 
     # 3. C++ converts blob → USD
     result = subprocess.run(
@@ -921,7 +927,8 @@ def _anacapa_export_scene(usd_path, context, executable,
         print(result.stdout, end="")
 
     # 4. Inject halo particles as UsdGeomPoints into the written USD
-    if prep is not None:
+    # Skip in render engine path (depsgraph_override set) — same reason as step 1.
+    if prep is not None and depsgraph_override is None:
         try:
             prep._inject_halo_particles(usd_path, shutter_close=shutter_close)
         except Exception as e:
@@ -943,7 +950,8 @@ def _anacapa_export_scene(usd_path, context, executable,
 
 
 def export_usd(usd_path, context, run_prep=True,
-               shutter_open=0.0, shutter_close=0.0):
+               shutter_open=0.0, shutter_close=0.0,
+               depsgraph_override=None):
     """
     Export the scene to a single USD file.
     Skips export entirely when nothing changed.
@@ -972,7 +980,8 @@ def export_usd(usd_path, context, run_prep=True,
     try:
         _anacapa_export_scene(usd_path, context, executable,
                               shutter_open=shutter_open,
-                              shutter_close=shutter_close)
+                              shutter_close=shutter_close,
+                              depsgraph_override=depsgraph_override)
 
         # Sky injection and DOF settings written into the USD post-export
         prep = _load_prep_module() if run_prep else None

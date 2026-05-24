@@ -84,13 +84,41 @@ struct BVHTriAttrib {
 static_assert(sizeof(BVHTriAttrib) == 96, "BVHTriAttrib must be 96 bytes");
 
 // ---------------------------------------------------------------------------
+// BLAS — bottom-level acceleration structure for one prototype mesh.
+// ---------------------------------------------------------------------------
+struct BLAS {
+    std::vector<BVHNode>      nodes;
+    std::vector<BVHTriTrav>   trav;
+    std::vector<BVHTriAttrib> attribs;
+    std::vector<uint32_t>     primIndices;
+};
+
+// ---------------------------------------------------------------------------
+// TLASInstance — one entry in the TLAS primitive list.
+// ---------------------------------------------------------------------------
+// Per-instance world-space AABB stored alongside groupID/instanceIdx so
+// traversal can reject false-positive leaf hits without a full BLAS traversal.
+struct TLASInstance {
+    uint32_t groupID;
+    uint32_t instanceIdx;
+    float    bMin[3];   // world-space AABB min
+    float    bMax[3];   // world-space AABB max
+};
+
+// ---------------------------------------------------------------------------
 // BVHBackend — CPU SAH BVH4 over a GeometryPool
+//
+// Two-level structure when instance groups are present:
+//   TLAS — BVH4 over per-instance world-space AABBs
+//   BLAS — one BVH4 per prototype mesh (object-space triangles)
+// Non-instanced meshes use the original single-level BVH.
 // ---------------------------------------------------------------------------
 class BVHBackend : public IAccelerationStructure {
 public:
     static constexpr int   kSAHBuckets      = 12;
     static constexpr int   kSpatialBuckets  = 16;
     static constexpr int   kMaxLeafPrims    = 4;
+    static constexpr int   kTLASMaxLeafPrims = 8;
     static constexpr float kTraversalCost   = 1.f;
     static constexpr float kIntersectCost   = 1.f;
     static constexpr float kSpatialAlpha    = 1e-5f;  // skip spatial splits on tiny nodes
@@ -117,9 +145,17 @@ private:
         bool     animated;    // if true, skip spatial splits for this ref
     };
 
+    // Build state threaded through recursive calls (totalRefs is mutable during build).
+    struct BuildState {
+        uint32_t totalRefs = 0;
+    };
+
     uint32_t buildRecursive(std::vector<PrimInfo>& primInfo,
                             uint32_t start, uint32_t end,
-                            std::vector<BuildBVHNode>& buildNodes);
+                            std::vector<BuildBVHNode>& buildNodes,
+                            std::vector<uint32_t>& primIndices,
+                            BuildState& state,
+                            int maxLeafPrims = kMaxLeafPrims);
 
     // Returns best SAH bucket (or -1 if no valid split). Caller compares outCost vs leafCost.
     int sahSplit(const std::vector<PrimInfo>& primInfo,
@@ -138,13 +174,19 @@ private:
     // Clips triangle v[0..2] to the slab [sMin,sMax] on axis; returns clipped bbox.
     static BBox3f clipTriangleSlab(const Vec3f v[3], int axis, float sMin, float sMax);
 
-    // Convert binary BuildBVHNode tree → BVH4 SOA BVHNode array in m_nodes.
-    void repackBuildTree(const std::vector<BuildBVHNode>& build);
+    // Convert binary BuildBVHNode tree → BVH4 SOA BVHNode array.
+    void repackBuildTree(const std::vector<BuildBVHNode>& build,
+                         std::vector<BVHNode>& nodes);
 
     // Recursively build a BVH4 node for the subtree rooted at build[oldIdx].
-    // Collapses one binary level to produce 2-4 children per BVH4 node.
-    // Returns the index of the new BVH4 node in m_nodes.
-    uint32_t buildBVH4Node(const std::vector<BuildBVHNode>& build, uint32_t oldIdx);
+    uint32_t buildBVH4Node(const std::vector<BuildBVHNode>& build, uint32_t oldIdx,
+                           std::vector<BVHNode>& nodes);
+
+    // Build a BLAS for one instance group's prototype mesh.
+    void buildBLAS(uint32_t groupID);
+
+    // Build the TLAS over all instance groups.
+    void buildTLAS();
 
     // -----------------------------------------------------------------------
     // Traversal helpers
@@ -159,13 +201,6 @@ private:
     static Ray4 makeObjectSpaceRay4(const Ray& ray, const Mat4f& worldToObject);
 
     // Test all four children of node simultaneously using SIMD.
-    // Returns hit mask: bit c = child c hit.  tNear[c] set for each hit.
-    // closestT used as tMax so already-found hits prune the test.
-    //
-    // Platform dispatch:
-    //   __aarch64__ → NEON float32x4_t (4-wide, one lane per child)
-    //   __SSE2__    → SSE  __m128      (4-wide, one lane per child)
-    //   fallback    → scalar loop
     static int intersectAABB4(const BVHNode& node, const Ray4& r,
                                float tNear[4], float closestT);
 
@@ -177,22 +212,40 @@ private:
                                 const Mat4f* worldXfm,
                                 SurfaceInteraction& si) const;
 
+    // Traverse BLAS for one instance; update closestT/hit on success.
+    void traceBLAS(const BLAS& blas, const Ray& ray, const Ray4& objRay,
+                   uint32_t groupID, uint32_t instanceIdx, const Mat4f& o2w,
+                   float& closestT, uint32_t& hitBlasTriIdx,
+                   float& hitU, float& hitV,
+                   uint32_t& hitGroupID, uint32_t& hitInstanceIdx) const;
+
+    // Shadow variant — returns true immediately on any hit.
+    bool occludedBLAS(const BLAS& blas, const Ray4& objRay) const;
+
     TraceResult traceImpl(const Ray& ray) const;
 
     // -----------------------------------------------------------------------
     // Data
     // -----------------------------------------------------------------------
     const GeometryPool&        m_pool;
+
+    // Single-level BVH for non-instanced meshes
     std::vector<BVHNode>       m_nodes;
     std::vector<BVHTriTrav>    m_trav;
     std::vector<BVHTriAttrib>  m_attribs;
     std::vector<uint32_t>      m_primIndices;
-    bool                       m_built = false;
 
-    // SBVH build budget — reset in commit(), updated during buildRecursive.
-    float    m_buildRootSA    = 0.f;
-    uint32_t m_buildMaxRefs   = 0;
-    uint32_t m_buildTotalRefs = 0;
+    // Two-level BVH for instance groups
+    std::vector<BLAS>          m_blasList;       // one per instance group
+    std::vector<BVHNode>       m_tlasNodes;
+    std::vector<TLASInstance>  m_tlasInstances;  // indexed by m_tlasPrimIndices
+    std::vector<uint32_t>      m_tlasPrimIndices;
+
+    bool m_built = false;
+
+    // Spatial split budget — set before each build pass (single-BVH or BLAS).
+    mutable float    m_buildRootSA    = 0.f;
+    mutable uint32_t m_buildMaxRefs   = 0;
 };
 
 } // namespace anacapa

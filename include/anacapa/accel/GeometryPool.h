@@ -83,6 +83,45 @@ struct MeshDesc {
 };
 
 // ---------------------------------------------------------------------------
+// InstanceDesc — one instance of a prototype mesh.
+// Static instances have exactly one key; motion-blur instances have >= 2.
+// ---------------------------------------------------------------------------
+struct InstanceDesc {
+    std::vector<MotionKey> keys;
+
+    bool hasMotion() const { return keys.size() >= 2; }
+
+    Mat4f interpolateO2W(float t) const {
+        if (keys.size() == 1) return keys[0].objectToWorld;
+        if (t <= keys.front().time) return keys.front().objectToWorld;
+        if (t >= keys.back().time)  return keys.back().objectToWorld;
+        size_t lo = 0, hi = keys.size() - 1;
+        while (hi - lo > 1) {
+            size_t mid = (lo + hi) / 2;
+            if (keys[mid].time <= t) lo = mid; else hi = mid;
+        }
+        float t0 = keys[lo].time, t1 = keys[hi].time;
+        float alpha = (t - t0) / (t1 - t0);
+        return Mat4f::lerp(keys[lo].objectToWorld, keys[hi].objectToWorld, alpha);
+    }
+
+    Mat4f interpolateW2O(float t) const {
+        if (keys.size() == 1) return keys[0].worldToObject;
+        return interpolateO2W(t).inverse();
+    }
+};
+
+// ---------------------------------------------------------------------------
+// InstanceGroupDesc — a prototype mesh shared by N instances.
+// The prototype MeshDesc (at protoMeshID) must store positions in object space
+// (motionKeys empty, positions NOT baked with any world transform).
+// ---------------------------------------------------------------------------
+struct InstanceGroupDesc {
+    uint32_t                  protoMeshID;
+    std::vector<InstanceDesc> instances;
+};
+
+// ---------------------------------------------------------------------------
 // GeometryPool — owns all mesh data for the scene
 //
 // The BVH backend receives a const reference and builds acceleration
@@ -108,8 +147,20 @@ public:
 
     const std::vector<MeshDesc>& meshes() const { return m_meshes; }
 
+    uint32_t addInstanceGroup(InstanceGroupDesc grp) {
+        uint32_t id = static_cast<uint32_t>(m_instanceGroups.size());
+        m_instanceGroups.push_back(std::move(grp));
+        return id;
+    }
+
+    const InstanceGroupDesc& instanceGroup(uint32_t id) const { return m_instanceGroups[id]; }
+    size_t                   numInstanceGroups()          const { return m_instanceGroups.size(); }
+
+    const std::vector<InstanceGroupDesc>& instanceGroups() const { return m_instanceGroups; }
+
 private:
-    std::vector<MeshDesc> m_meshes;
+    std::vector<MeshDesc>          m_meshes;
+    std::vector<InstanceGroupDesc> m_instanceGroups;
 };
 
 } // namespace anacapa

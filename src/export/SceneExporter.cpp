@@ -5,6 +5,12 @@
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/camera.h>
+#include <pxr/usd/usdGeom/pointInstancer.h>
+#include <pxr/base/gf/matrix3d.h>
+#include <pxr/base/gf/rotation.h>
+#include <pxr/base/gf/quaternion.h>
+#include <pxr/base/gf/quath.h>
+#include <pxr/base/gf/vec3h.h>
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdGeom/subset.h>
@@ -161,8 +167,8 @@ bool exportSceneToUsd(const std::string& blobPath, const std::string& usdPath) {
         return false;
     }
 
-    spdlog::info("SceneExporter: {} meshes, {} lights, camera={}",
-                 hdr.num_meshes, hdr.num_lights, hdr.has_camera ? "yes" : "no");
+    spdlog::info("SceneExporter: {} meshes, {} instance groups, {} lights, camera={}",
+                 hdr.num_meshes, hdr.num_inst_groups, hdr.num_lights, hdr.has_camera ? "yes" : "no");
 
     // --- Create USD stage ---
     auto stage = UsdStage::CreateNew(usdPath);
@@ -418,6 +424,221 @@ bool exportSceneToUsd(const std::string& blobPath, const std::string& usdPath) {
                         .Bind(UsdShadeMaterial(stage->GetPrimAtPath(mp)));
                 }
             }
+        }
+    }
+
+    // --- Write instance groups (v5+) ---
+    if (hdr.num_inst_groups > 0) {
+        SdfPath protRoot = rootPath.AppendChild(TfToken("Prototypes"));
+        stage->DefinePrim(protRoot);
+        std::unordered_map<std::string, int> protoNames, instancerNames;
+
+        // Helper: decompose a blob 4×4 matrix into pos / orientation / scale
+        // suitable for UsdGeomPointInstancer attributes.
+        // Handles non-uniform scale; assumes no shear (GN scatter instances).
+        auto decompose = [](const float* raw)
+            -> std::tuple<GfVec3f, GfQuath, GfVec3f>
+        {
+            GfMatrix4d m = matFromBlob(raw);
+            GfVec3f pos((float)m[3][0], (float)m[3][1], (float)m[3][2]);
+            double sx = std::max(GfVec3d(m[0][0], m[0][1], m[0][2]).GetLength(), 1e-10);
+            double sy = std::max(GfVec3d(m[1][0], m[1][1], m[1][2]).GetLength(), 1e-10);
+            double sz = std::max(GfVec3d(m[2][0], m[2][1], m[2][2]).GetLength(), 1e-10);
+            GfMatrix3d rot(
+                m[0][0]/sx, m[0][1]/sx, m[0][2]/sx,
+                m[1][0]/sy, m[1][1]/sy, m[1][2]/sy,
+                m[2][0]/sz, m[2][1]/sz, m[2][2]/sz);
+            GfQuaternion q = rot.ExtractRotation().GetQuaternion();
+            GfQuath orient(
+                (GfHalf)(float)q.GetReal(),
+                GfVec3h((GfHalf)(float)q.GetImaginary()[0],
+                        (GfHalf)(float)q.GetImaginary()[1],
+                        (GfHalf)(float)q.GetImaginary()[2]));
+            return {pos, orient, GfVec3f((float)sx, (float)sy, (float)sz)};
+        };
+
+        for (uint32_t gi = 0; gi < hdr.num_inst_groups; ++gi) {
+            scene_fmt::InstanceGroupHeader ghdr{};
+            if (!r.read(ghdr)) {
+                spdlog::error("SceneExporter: truncated instance group header {}", gi);
+                return false;
+            }
+
+            std::string protoName;
+            if (!r.readStr(protoName)) return false;
+
+            std::vector<std::string> matNames(ghdr.num_mat_slots);
+            for (auto& mn : matNames)
+                if (!r.readStr(mn)) return false;
+
+            std::vector<uint32_t> matFlags;
+            std::vector<float>    matColors, matSssData;
+            if (!r.readUints(matFlags,    ghdr.num_mat_slots))     return false;
+            if (!r.readFloats(matColors,  ghdr.num_mat_slots * 3)) return false;
+            if (!r.readFloats(matSssData, ghdr.num_mat_slots * 9)) return false;
+
+            std::vector<float> motionTimes;
+            if (!r.readFloats(motionTimes, ghdr.num_motion_keys)) return false;
+
+            // Prototype geometry (same layout as MeshRecord geometry section)
+            std::vector<float> positions, normals;
+            if (!r.readFloats(positions, ghdr.num_verts * 3)) return false;
+            if (!r.readFloats(normals,   ghdr.num_loops * 3)) return false;
+
+            struct UVLayer { std::string name; std::vector<float> uvs; };
+            std::vector<UVLayer> uvLayers(ghdr.num_uvlayers);
+            for (auto& uv : uvLayers) {
+                if (!r.readStr(uv.name)) return false;
+                if (!r.readFloats(uv.uvs, ghdr.num_loops * 2)) return false;
+            }
+
+            std::vector<uint32_t> loopStarts, loopTotals, matIndices, vertIndices;
+            if (!r.readUints(loopStarts,  ghdr.num_polys)) return false;
+            if (!r.readUints(loopTotals,  ghdr.num_polys)) return false;
+            if (!r.readUints(matIndices,  ghdr.num_polys)) return false;
+            if (!r.readUints(vertIndices, ghdr.num_loops)) return false;
+
+            // Per-instance data: name + nmk*16 matrix floats per instance
+            uint32_t nmk = ghdr.num_motion_keys;
+            struct InstData { std::string name; std::vector<float> matrices; };
+            std::vector<InstData> instances(ghdr.num_instances);
+            for (auto& inst : instances) {
+                if (!r.readStr(inst.name)) return false;
+                if (!r.readFloats(inst.matrices, nmk * 16)) return false;
+            }
+
+            // ---- Define prototype mesh ----
+            SdfPath protoPath = uniquePath(protRoot, protoName, protoNames);
+            UsdGeomMesh protoMesh = UsdGeomMesh::Define(stage, protoPath);
+
+            {
+                VtVec3fArray pts(ghdr.num_verts);
+                for (uint32_t i = 0; i < ghdr.num_verts; ++i)
+                    pts[i] = GfVec3f(positions[i*3], positions[i*3+1], positions[i*3+2]);
+                protoMesh.CreatePointsAttr().Set(pts);
+
+                VtIntArray faceVertCounts(ghdr.num_polys);
+                VtIntArray faceVertIndices;
+                faceVertIndices.reserve(ghdr.num_loops);
+                for (uint32_t p = 0; p < ghdr.num_polys; ++p) {
+                    faceVertCounts[p] = static_cast<int>(loopTotals[p]);
+                    for (uint32_t l = loopStarts[p]; l < loopStarts[p] + loopTotals[p]; ++l)
+                        faceVertIndices.push_back(static_cast<int>(vertIndices[l]));
+                }
+                protoMesh.CreateFaceVertexCountsAttr().Set(faceVertCounts);
+                protoMesh.CreateFaceVertexIndicesAttr().Set(faceVertIndices);
+
+                VtVec3fArray norms(ghdr.num_loops);
+                for (uint32_t i = 0; i < ghdr.num_loops; ++i)
+                    norms[i] = GfVec3f(normals[i*3], normals[i*3+1], normals[i*3+2]);
+                protoMesh.CreateNormalsAttr().Set(norms);
+                protoMesh.SetNormalsInterpolation(UsdGeomTokens->faceVarying);
+
+                UsdGeomPrimvarsAPI pvAPI(protoMesh);
+                bool firstUV = true;
+                for (const auto& uv : uvLayers) {
+                    TfToken uvName = firstUV ? TfToken("st") : TfToken(sanitize(uv.name));
+                    firstUV = false;
+                    VtVec2fArray uvArr(ghdr.num_loops);
+                    for (uint32_t i = 0; i < ghdr.num_loops; ++i)
+                        uvArr[i] = GfVec2f(uv.uvs[i*2], uv.uvs[i*2+1]);
+                    auto pv = pvAPI.CreatePrimvar(uvName,
+                                  SdfValueTypeNames->TexCoord2fArray,
+                                  UsdGeomTokens->faceVarying);
+                    pv.Set(uvArr);
+                }
+
+                if (!matNames.empty()) {
+                    std::unordered_map<uint32_t, VtIntArray> slotFaces;
+                    for (uint32_t p = 0; p < ghdr.num_polys; ++p)
+                        slotFaces[matIndices[p]].push_back(static_cast<int>(p));
+
+                    auto matTransColor = [&](uint32_t slot) -> const float* {
+                        static const float kW[3] = {0.8f, 0.8f, 0.8f};
+                        return slot < matColors.size() / 3 ? matColors.data() + slot * 3 : kW;
+                    };
+                    auto matIsTranslucent = [&](uint32_t slot) -> bool {
+                        return slot < matFlags.size() && (matFlags[slot] & 1u);
+                    };
+                    auto matHasSss = [&](uint32_t slot) -> bool {
+                        return slot < matFlags.size() && (matFlags[slot] & 2u);
+                    };
+                    auto matSssPtr = [&](uint32_t slot) -> const float* {
+                        static const float kZ[9] = {};
+                        return slot * 9 + 9 <= matSssData.size() ? matSssData.data() + slot * 9 : kZ;
+                    };
+
+                    if (slotFaces.size() == 1) {
+                        uint32_t slot = slotFaces.begin()->first;
+                        if (slot < matNames.size() && !matNames[slot].empty()) {
+                            SdfPath mp = getOrCreateMaterial(matNames[slot],
+                                             matIsTranslucent(slot), matTransColor(slot),
+                                             matHasSss(slot), matSssPtr(slot));
+                            UsdShadeMaterialBindingAPI::Apply(protoMesh.GetPrim())
+                                .Bind(UsdShadeMaterial(stage->GetPrimAtPath(mp)));
+                        }
+                    } else {
+                        for (auto& [slot, faces] : slotFaces) {
+                            if (slot >= matNames.size() || matNames[slot].empty()) continue;
+                            SdfPath mp = getOrCreateMaterial(matNames[slot],
+                                             matIsTranslucent(slot), matTransColor(slot),
+                                             matHasSss(slot), matSssPtr(slot));
+                            std::string subName = "mat_" + std::to_string(slot);
+                            auto subset = UsdGeomSubset::CreateGeomSubset(
+                                protoMesh, TfToken(subName),
+                                UsdGeomTokens->face, faces,
+                                TfToken("materialBind"));
+                            UsdShadeMaterialBindingAPI::Apply(subset.GetPrim())
+                                .Bind(UsdShadeMaterial(stage->GetPrimAtPath(mp)));
+                        }
+                    }
+                }
+            }
+
+            // ---- Define PointInstancer ----
+            SdfPath instPath = uniquePath(meshRoot,
+                                          sanitize(protoName) + "_instances",
+                                          instancerNames);
+            UsdGeomPointInstancer instancer = UsdGeomPointInstancer::Define(stage, instPath);
+            instancer.CreatePrototypesRel().AddTarget(protoPath);
+
+            uint32_t ni = ghdr.num_instances;
+            VtArray<int> protoIndices(ni, 0);
+            instancer.CreateProtoIndicesAttr().Set(protoIndices);
+
+            if (nmk == 1) {
+                VtArray<GfVec3f> ipos(ni);
+                VtArray<GfQuath> iorient(ni);
+                VtArray<GfVec3f> iscale(ni);
+                for (uint32_t ii = 0; ii < ni; ++ii) {
+                    auto [p, o, s] = decompose(instances[ii].matrices.data());
+                    ipos[ii] = p;  iorient[ii] = o;  iscale[ii] = s;
+                }
+                instancer.CreatePositionsAttr().Set(ipos);
+                instancer.CreateOrientationsAttr().Set(iorient);
+                instancer.CreateScalesAttr().Set(iscale);
+            } else {
+                auto posAttr    = instancer.CreatePositionsAttr();
+                auto orientAttr = instancer.CreateOrientationsAttr();
+                auto scaleAttr  = instancer.CreateScalesAttr();
+                for (uint32_t k = 0; k < nmk; ++k) {
+                    UsdTimeCode tc(motionTimes[k]);
+                    VtArray<GfVec3f> ipos(ni);
+                    VtArray<GfQuath> iorient(ni);
+                    VtArray<GfVec3f> iscale(ni);
+                    for (uint32_t ii = 0; ii < ni; ++ii) {
+                        auto [p, o, s] = decompose(instances[ii].matrices.data() + k * 16);
+                        ipos[ii] = p;  iorient[ii] = o;  iscale[ii] = s;
+                    }
+                    posAttr.Set(ipos, tc);
+                    orientAttr.Set(iorient, tc);
+                    scaleAttr.Set(iscale, tc);
+                    stageMinTime = std::min(stageMinTime, (double)motionTimes[k]);
+                    stageMaxTime = std::max(stageMaxTime, (double)motionTimes[k]);
+                }
+            }
+
+            spdlog::info("SceneExporter: instance group '{}' → {} instances", protoName, ni);
         }
     }
 

@@ -1215,6 +1215,8 @@ static uint32_t loadMesh(const UsdGeomMesh& usdMesh,
     usdMesh.GetFaceVertexIndicesAttr().Get(&fvcIndices);
     if (fvcCounts.empty() || fvcIndices.empty()) return ~0u;
 
+
+
     // For animated meshes we keep positions in object space and carry both transforms.
     const GfMatrix4d& xform = xform0;
 
@@ -1998,36 +2000,71 @@ LoadedScene loadUSD(const std::string& path,
                 }
             }
 
-            int loadedCount = 0;
-            for (size_t ii = 0; ii < instanceXforms.size(); ++ii) {
-                int pi = protoIndices[ii];
-                if (pi < 0 || pi >= (int)protoPaths.size()) continue;
-
-                // World transform of the prototype root for this instance.
-                GfMatrix4d instanceProtoWorld = instancerToWorld * instanceXforms[ii];
-
-                for (auto& pm : protoMeshes[pi]) {
-                    GfMatrix4d meshWorld = instanceProtoWorld * pm.relToRoot;
-                    uint32_t meshID = loadMesh(pm.usdMesh, meshWorld, {}, result.geomPool, zUp);
-                    if (meshID == ~0u) continue;
-
-                    if (meshID >= result.sceneView.materials.size())
-                        result.sceneView.materials.resize(meshID + 1, nullptr);
-
-                    UsdShadeMaterialBindingAPI bindAPI(pm.usdMesh.GetPrim());
-                    UsdShadeMaterial boundMat = bindAPI.ComputeBoundMaterial();
-                    result.sceneView.materials[meshID] =
-                        result.materials[resolveMaterialIdx(boundMat)].get();
-                    ++loadedCount;
+            // Motion-blur instance transforms at shutter close (for two-key instances).
+            VtArray<GfMatrix4d> instanceXformsClose;
+            bool instMotion = false;
+            if (enableMotionBlur) {
+                if (instancer.ComputeInstanceTransformsAtTime(
+                        &instanceXformsClose, tcClose, tcClose,
+                        UsdGeomPointInstancer::IncludeProtoXform)
+                    && instanceXformsClose.size() == instanceXforms.size()) {
+                    instMotion = true;
                 }
             }
 
-            if (loadedCount > 0) {
+            int groupsAdded = 0;
+            // Build one InstanceGroupDesc per prototype mesh entry.
+            // In our pipeline each instancer has exactly one prototype mesh,
+            // but we handle the general case (multiple prototypes / sub-meshes).
+            for (size_t pi = 0; pi < protoPaths.size(); ++pi) {
+                for (auto& pm : protoMeshes[pi]) {
+                    // Load prototype geometry in object space (identity xform).
+                    GfMatrix4d identityXfm(1.0);  // GfMatrix4d(double s) sets diagonal=s, off-diag=0
+                    uint32_t protoMeshID = loadMesh(pm.usdMesh, identityXfm, {}, result.geomPool, zUp);
+                    if (protoMeshID == ~0u) continue;
+
+                    if (protoMeshID >= result.sceneView.materials.size())
+                        result.sceneView.materials.resize(protoMeshID + 1, nullptr);
+                    UsdShadeMaterialBindingAPI bindAPI(pm.usdMesh.GetPrim());
+                    UsdShadeMaterial boundMat = bindAPI.ComputeBoundMaterial();
+                    result.sceneView.materials[protoMeshID] =
+                        result.materials[resolveMaterialIdx(boundMat)].get();
+
+                    InstanceGroupDesc grp;
+                    grp.protoMeshID = protoMeshID;
+
+                    for (size_t ii = 0; ii < instanceXforms.size(); ++ii) {
+                        if (protoIndices[ii] != (int)pi) continue;
+
+                        GfMatrix4d xfOpen  = instancerToWorld * instanceXforms[ii]  * pm.relToRoot;
+                        GfMatrix4d xfClose = instMotion
+                            ? instancerToWorld * instanceXformsClose[ii] * pm.relToRoot
+                            : xfOpen;
+
+                        InstanceDesc inst;
+                        inst.keys.resize(instMotion ? 2 : 1);
+                        inst.keys[0].time           = 0.f;
+                        inst.keys[0].objectToWorld  = toMat4f(xfOpen);
+                        inst.keys[0].worldToObject  = inst.keys[0].objectToWorld.inverse();
+                        if (instMotion) {
+                            inst.keys[1].time           = 1.f;
+                            inst.keys[1].objectToWorld  = toMat4f(xfClose);
+                            inst.keys[1].worldToObject  = inst.keys[1].objectToWorld.inverse();
+                        }
+                        grp.instances.push_back(std::move(inst));
+                    }
+
+                    if (!grp.instances.empty()) {
+                        result.geomPool.addInstanceGroup(std::move(grp));
+                        ++groupsAdded;
+                    }
+                }
+            }
+
+            if (groupsAdded > 0) {
                 spdlog::info(
-                    "USDLoader: instancer '{}' → {} mesh copies "
-                    "({} instances, {} prototype(s))",
-                    prim.GetPath().GetString(), loadedCount,
-                    instanceXforms.size(), protoPaths.size());
+                    "USDLoader: instancer '{}' → {} instance group(s), {} instances",
+                    prim.GetPath().GetString(), groupsAdded, instanceXforms.size());
             } else {
                 tryHaloFallback();
             }

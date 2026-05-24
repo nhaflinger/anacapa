@@ -15,6 +15,7 @@ import bpy
 import struct
 import math
 import os
+import array
 from mathutils import Matrix
 
 
@@ -230,7 +231,8 @@ def _collect_instance_transforms(depsgraph):
 
 def export_scene_binary(filepath: str, context,
                         shutter_open: float = 0.0,
-                        shutter_close: float = 0.0) -> None:
+                        shutter_close: float = 0.0,
+                        depsgraph_override=None) -> None:
     """
     Evaluate the scene via the depsgraph and write the binary scene blob to
     filepath.  The live Blender scene is never modified except for temporary
@@ -241,14 +243,20 @@ def export_scene_binary(filepath: str, context,
     When shutter_close > shutter_open, two transform keys are written per object
     at the corresponding USD time codes so collectMotionKeys() in USDLoader
     produces motion-blur data.
+
+    depsgraph_override: when provided (e.g. from RenderEngine.render()), use this
+    depsgraph for the main frame instead of context.evaluated_depsgraph_get().
+    This lets the render engine pass the render-mode depsgraph so GN instance
+    counts reflect the full render density rather than the viewport guide count.
+    Motion-blur sub-frame depsgraphs still come from context.
     """
-    depsgraph = context.evaluated_depsgraph_get()
+    depsgraph = depsgraph_override if depsgraph_override is not None \
+                else context.evaluated_depsgraph_get()
     scene     = context.scene
     current_frame = scene.frame_current
 
     do_motion_blur = shutter_close > shutter_open + 1e-5
 
-    mesh_data  = []
     light_data = []
     camera     = None
 
@@ -343,227 +351,11 @@ def export_scene_binary(filepath: str, context,
                                and _dproto_obj.material_slots[0].material else '(none)')
                 pass  # GN SetMaterial override applied
 
-    # Track which non-instanced objects we have already exported so that
-    # objects appearing in depsgraph.object_instances as both a "real" object
-    # and an instance of themselves don't get written twice.
-    seen_non_instance = set()
-
-
-    for inst in depsgraph.object_instances:
-        obj      = inst.object
-        orig     = obj.original
-
-        if orig.hide_render:
-            continue
-
-        if obj.type == 'MESH':
-            eval_obj = obj.evaluated_get(depsgraph)
-            mesh = eval_obj.to_mesh()
-            if mesh is None or len(mesh.polygons) == 0:
-                eval_obj.to_mesh_clear()
-                continue
-
-            # calc_normals_split() was removed in Blender 4.1; corner_normals
-            # replaced it and is always up-to-date after to_mesh().
-            if hasattr(mesh, 'calc_normals_split'):
-                mesh.calc_normals_split()
-
-            raw_matrix = inst.matrix_world
-            if inst.is_instance:
-                raw_matrix = _uniform_gn_scale(raw_matrix, inst)
-            mat_world = _to_yup(raw_matrix)
-
-            positions = []
-            for v in mesh.vertices:
-                positions += [v.co.x, v.co.y, v.co.z]
-
-            normals = []
-            if hasattr(mesh, 'corner_normals'):
-                for cn in mesh.corner_normals:
-                    normals += [cn.vector.x, cn.vector.y, cn.vector.z]
-            else:
-                for loop in mesh.loops:
-                    normals += [loop.normal.x, loop.normal.y, loop.normal.z]
-
-            uvlayers = []
-            for uv_layer in mesh.uv_layers:
-                uvs = []
-                for uv in uv_layer.data:
-                    uvs += [uv.uv.x, uv.uv.y]
-                uvlayers.append((uv_layer.name, uvs))
-
-            loop_starts  = [p.loop_start     for p in mesh.polygons]
-            loop_totals  = [p.loop_total     for p in mesh.polygons]
-            mat_indices  = [p.material_index for p in mesh.polygons]
-            vert_indices = [l.vertex_index   for l in mesh.loops]
-
-            # GN realized-mesh face filter: strip the faces whose material_index
-            # matches the detected "Set Material" override slot so that the baked
-            # instance geometry in the emitter mesh doesn't double-render on top of
-            # the virtual instances.
-            if not inst.is_instance:
-                _filt = _instance_mat_filter_idx.get(orig.name)
-                if _filt is not None:
-                    _new_ls, _new_lt, _new_mi, _new_vi = [], [], [], []
-                    _new_nr, _new_uv_lists = [], [[] for _ in mesh.uv_layers]
-                    _corner_off = 0
-                    _cn_list = list(mesh.corner_normals) if hasattr(mesh, 'corner_normals') else None
-                    for _fp in mesh.polygons:
-                        if _fp.material_index == _filt:
-                            continue
-                        _new_ls.append(_corner_off)
-                        _new_lt.append(_fp.loop_total)
-                        _new_mi.append(_fp.material_index)
-                        for _fl in range(_fp.loop_start, _fp.loop_start + _fp.loop_total):
-                            _new_vi.append(mesh.loops[_fl].vertex_index)
-                            if _cn_list:
-                                _cv = _cn_list[_fl].vector
-                                _new_nr += [_cv.x, _cv.y, _cv.z]
-                            else:
-                                _fn = mesh.loops[_fl].normal
-                                _new_nr += [_fn.x, _fn.y, _fn.z]
-                            for _ui, _ul in enumerate(mesh.uv_layers):
-                                _fuv = _ul.data[_fl].uv
-                                _new_uv_lists[_ui] += [_fuv.x, _fuv.y]
-                        _corner_off += _fp.loop_total
-                    loop_starts  = _new_ls
-                    loop_totals  = _new_lt
-                    mat_indices  = _new_mi
-                    vert_indices = _new_vi
-                    normals      = _new_nr
-                    uvlayers     = [(mesh.uv_layers[_ui].name, _new_uv_lists[_ui])
-                                    for _ui in range(len(mesh.uv_layers))]
-
-            mat_names    = []
-            mat_flags    = []
-            mat_colors   = []
-            mat_sss_data = []
-            # Always use the EVALUATED object's material_slots: polygon.material_index
-            # values come from the evaluated mesh and must index into eval slots.
-            # For GN instances this is critical — the GN "Set Material" node puts the
-            # override material into eval_obj.material_slots but NOT into orig.material_slots.
-            mat_slots = list(eval_obj.material_slots)
-            if not inst.is_instance:
-                _orig_slots = list(orig.material_slots)
-                if len(mat_slots) != len(_orig_slots) or \
-                   any(mat_slots[i].material != _orig_slots[i].material
-                       for i in range(len(mat_slots))):
-                    pass  # eval/orig slot mismatch is normal for GN instances
-            # GN instance fallback: if prototype has no materials (or only empty
-            # slots), use the emitter's material slots.
-            has_real_mats = any(slot.material is not None for slot in mat_slots)
-            if not has_real_mats and inst.is_instance and inst.parent is not None:
-                parent_orig = inst.parent.original if hasattr(inst.parent, 'original') else inst.parent
-                parent_slots = [s for s in parent_orig.material_slots if s.material is not None]
-                if parent_slots:
-                    mat_slots = parent_slots
-            for slot in mat_slots:
-                mat = slot.material
-                mat_names.append(mat.name if mat else "")
-                is_trans, color = _is_pure_translucent(mat)
-                if not is_trans:
-                    color = _get_mat_base_color(mat)
-                sss = _get_sss_params(mat)
-                flags = 0
-                if is_trans:
-                    flags |= 1
-                if sss is not None:
-                    flags |= 2
-                mat_flags.append(flags)
-                mat_colors.extend(color)
-                mat_name_str = mat.name if mat else "(none)"
-                if sss is not None:
-                    weight, sc, radius, scale, aniso = sss
-                    mat_sss_data.extend([weight] + sc + radius + [scale, aniso])
-                else:
-                    mat_sss_data.extend([0.0, 0.8, 0.8, 0.8, 0.1, 0.1, 0.1, 1.0, 0.0])
-
-
-            mesh_data.append({
-                'name':         obj.name,
-                'orig_name':    orig.name,
-                'is_instance':  inst.is_instance,
-                'inst_parent_name': inst.parent.name if inst.is_instance and inst.parent else None,
-                'inst_pid':     tuple(inst.persistent_id) if inst.is_instance else None,
-                'matrix':       mat_world,       # current-frame transform (single key fallback)
-                'positions':    positions,
-                'normals':      normals,
-                'uvlayers':     uvlayers,
-                'loop_starts':  loop_starts,
-                'loop_totals':  loop_totals,
-                'mat_indices':  mat_indices,
-                'vert_indices': vert_indices,
-                'mat_names':    mat_names,
-                'mat_flags':    mat_flags,
-                'mat_colors':   mat_colors,
-                'mat_sss_data': mat_sss_data,
-            })
-
-            eval_obj.to_mesh_clear()
-
-        elif obj.type == 'LIGHT':
-            if inst.is_instance:
-                continue
-            if orig.name in seen_non_instance:
-                continue
-            seen_non_instance.add(orig.name)
-
-            ld  = orig.data
-            mat_world = _to_yup(obj.matrix_world)
-
-            type_map = {'SUN': 0, 'AREA': 1, 'POINT': 2, 'SPOT': 2}
-            ltype    = type_map.get(ld.type, 0)
-
-            params = [0.0, 0.0, 0.0, 0.0]
-            if ld.type == 'SUN':
-                params[0] = math.degrees(ld.angle)
-            elif ld.type == 'AREA':
-                params[1] = ld.size
-                params[2] = ld.size_y if ld.shape in ('RECTANGLE', 'ELLIPSE') else ld.size
-            elif ld.type in ('POINT', 'SPOT'):
-                params[3] = ld.shadow_soft_size
-
-            light_data.append({
-                'type':      ltype,
-                'name':      orig.name,
-                'matrix':    mat_world,
-                'color':     list(ld.color),
-                'intensity': ld.energy / math.pi,
-                'normalize': 1,
-                'params':    params,
-            })
-
-        elif obj.type == 'CAMERA':
-            if inst.is_instance:
-                continue
-            if orig.name in seen_non_instance:
-                continue
-            seen_non_instance.add(orig.name)
-
-            # Prefer the scene's active camera; fall back to first found.
-            if camera is not None and orig != scene.camera:
-                continue
-
-            cd        = orig.data
-            mat_world = _to_yup(obj.matrix_world)
-            camera = {
-                'matrix':       mat_world,
-                'lens':         cd.lens,
-                'sensor_width': cd.sensor_width,
-                'sensor_height': (cd.sensor_width / (scene.render.resolution_x / scene.render.resolution_y)
-                                  if cd.sensor_fit == 'AUTO'
-                                  else cd.sensor_height),
-                'clip_start':   cd.clip_start,
-                'clip_end':     cd.clip_end,
-                'dof_distance': cd.dof.focus_distance,
-                'dof_fstop':    cd.dof.aperture_fstop,
-            }
-
     # -------------------------------------------------------------------------
-    # Motion blur: sample transforms at shutter-open and shutter-close frames.
-    # Only non-instanced objects (matched by orig_name) get per-object motion
-    # keys.  Instanced objects (GN, particles) fall back to the current-frame
-    # matrix for both keys — per-instance motion blur is not yet supported.
+    # Motion blur pre-pass: collect transforms at shutter open/close frames
+    # BEFORE the main write loop so they're available during streaming.
+    # Only non-instanced and collection-instance objects get per-instance keys;
+    # GN instances fall back to the current-frame matrix for both keys.
     # -------------------------------------------------------------------------
     if do_motion_blur:
         motion_times = [
@@ -577,103 +369,370 @@ def export_scene_binary(filepath: str, context,
             scene.frame_set(fi, subframe=fs)
 
         try:
-            # Collect transforms at shutter_open
             _frame_set(motion_times[0])
             dg_open = context.evaluated_depsgraph_get()
             xf_open      = _collect_transforms(dg_open)
             xf_inst_open = _collect_instance_transforms(dg_open)
 
-            # Collect transforms at shutter_close
             _frame_set(motion_times[1])
             dg_close = context.evaluated_depsgraph_get()
             xf_close      = _collect_transforms(dg_close)
             xf_inst_close = _collect_instance_transforms(dg_close)
         finally:
             scene.frame_set(current_frame)
-
-        for m in mesh_data:
-            if not m['is_instance']:
-                # Non-instance: match by orig_name across frames
-                oname = m['orig_name']
-                mo = xf_open.get(oname,  m['matrix'])
-                mc = xf_close.get(oname, m['matrix'])
-            elif m['inst_parent_name'] is not None and m['inst_pid'] is not None:
-                # Collection instance: key is (parent_name, pid) — unique because
-                # each collection instancer has a distinct parent name, and objects
-                # within one collection are ordered by persistent_id.
-                # Non-collection instances (GN, particles) were excluded from
-                # xf_inst_open/close, so their lookup falls back to m['matrix'].
-                key = (m['inst_parent_name'], m['inst_pid'])
-                mo = xf_inst_open.get(key,  m['matrix'])
-                mc = xf_inst_close.get(key, m['matrix'])
-            else:
-                mo = mc = m['matrix']
-            m['motion_matrices'] = [mo, mc]
-            m['motion_times']    = motion_times
     else:
-        # Static: single key at the current frame time code
-        for m in mesh_data:
-            m['motion_matrices'] = [m['matrix']]
-            m['motion_times']    = [float(current_frame)]
+        xf_open = xf_close = xf_inst_open = xf_inst_close = {}
+        motion_times = [float(current_frame)]
 
     # -------------------------------------------------------------------------
-    # Write binary
+    # Single-pass streaming write.
+    # All objects are processed exactly once during the depsgraph iteration:
+    # mesh geometry is evaluated, written immediately, and discarded — no
+    # geometry arrays are held in memory across iterations.  Lights and camera
+    # are cheap (no geometry) and collected into small lists written after the
+    # mesh loop.  The mesh count is unknown upfront, so we write a placeholder
+    # in the header and seek back to patch it after the loop completes.
     # -------------------------------------------------------------------------
+    seen_non_instance = set()
+    mesh_count = 0
+    _inst_total = 0
+    # Geometry cache: for GN instances all copies of the same prototype share
+    # identical vertex/loop data.  Pack it once to bytes; subsequent instances
+    # skip to_mesh() entirely and write the cached blob directly.
+    # Key = orig.name (prototype object name).
+    _geo_cache = {}  # orig.name → (nv, nl, np_, nuv, geo_bytes)
+    # Instance groups: GN instances are NOT written as individual MeshRecords.
+    # They are accumulated here and written as compact InstanceGroupRecords
+    # (one geometry blob + N transform records per prototype).
+    # Key = (orig.name, mat_key) so that instances with different material
+    # overrides (GN "Set Material") form separate groups.
+    _inst_groups = {}  # (proto_name, mat_key) → group dict
+
     with open(filepath, 'wb') as f:
 
-        # SceneHeader (32 bytes)
+        # SceneHeader v5 — all counts are placeholders patched at the end.
         f.write(struct.pack('<5I12x',
-                            0x41434E41,        # magic "ANCA"
-                            4,                 # version
-                            len(mesh_data),
-                            len(light_data),
-                            1 if camera else 0))
+                            0x41434E41,   # magic "ANCA"
+                            5,            # version
+                            0,            # num_meshes       — patched below
+                            0,            # num_lights       — patched below
+                            0))           # has_camera       — patched below
+                            # num_inst_groups at offset 20 (in _pad[0]) also 0
 
-        # Mesh records
-        for m in mesh_data:
-            nv  = len(m['positions']) // 3
-            nl  = len(m['normals'])   // 3
-            np_ = len(m['loop_starts'])
-            nuv = len(m['uvlayers'])
-            nm  = len(m['mat_names'])
-            nmk = len(m['motion_matrices'])
+        for inst in depsgraph.object_instances:
+            _inst_total += 1
+            if _inst_total % 10000 == 0:
+                print(f"[anacapa] export: {_inst_total} instances processed, "
+                      f"{mesh_count} meshes written...")
 
-            # MeshHeader (no matrix — matrices follow immediately)
-            f.write(struct.pack('<6I', nv, nl, np_, nuv, nm, nmk))
+            obj  = inst.object
+            orig = obj.original
 
-            # Motion keys: matrices then time codes
-            for mat in m['motion_matrices']:
-                f.write(_pack_matrix(mat))
-            f.write(_pack_floats(m['motion_times']))
+            if orig.hide_render:
+                continue
 
-            # name
-            f.write(_pack_str(m['name']))
+            # ---- MESH --------------------------------------------------------
+            if obj.type == 'MESH':
+                is_inst = inst.is_instance
 
-            # material slot names
-            for mname in m['mat_names']:
+                raw_matrix = inst.matrix_world
+                if is_inst:
+                    raw_matrix = _uniform_gn_scale(raw_matrix, inst)
+                mat_world = _to_yup(raw_matrix)
+
+                # Motion matrices (no mesh needed)
+                if do_motion_blur:
+                    if not is_inst:
+                        mo = xf_open.get(orig.name,  mat_world)
+                        mc = xf_close.get(orig.name, mat_world)
+                    elif inst.parent is not None:
+                        key = (inst.parent.name, tuple(inst.persistent_id))
+                        mo = xf_inst_open.get(key,  mat_world)
+                        mc = xf_inst_close.get(key, mat_world)
+                    else:
+                        mo = mc = mat_world
+                    motion_matrices   = [mo, mc]
+                    motion_times_mesh = motion_times
+                else:
+                    motion_matrices   = [mat_world]
+                    motion_times_mesh = [float(current_frame)]
+
+                # Geometry: use cache for GN instances, evaluate otherwise.
+                cached = _geo_cache.get(orig.name) if is_inst else None
+
+                if cached is not None:
+                    nv, nl, np_, nuv, geo_bytes = cached
+                    eval_obj = obj   # obj IS the evaluated prototype for GN instances
+                else:
+                    eval_obj = obj.evaluated_get(depsgraph)
+                    mesh = eval_obj.to_mesh()
+                    if mesh is None or len(mesh.polygons) == 0:
+                        eval_obj.to_mesh_clear()
+                        continue
+
+                    if hasattr(mesh, 'calc_normals_split'):
+                        mesh.calc_normals_split()
+
+                    nv  = len(mesh.vertices)
+                    nl  = len(mesh.loops)
+                    np_ = len(mesh.polygons)
+                    nuv = len(mesh.uv_layers)
+
+                    if is_inst:
+                        # Fast path for GN instances: foreach_get does bulk C-level
+                        # reads instead of per-element Python attribute access.
+                        _pos = array.array('f', bytes(nv * 12))
+                        mesh.vertices.foreach_get('co', _pos)
+                        _nrm = array.array('f', bytes(nl * 12))
+                        mesh.loops.foreach_get('normal', _nrm)
+                        _ls  = array.array('I', bytes(np_ * 4))
+                        _lt  = array.array('I', bytes(np_ * 4))
+                        _mi  = array.array('I', bytes(np_ * 4))
+                        _vi  = array.array('I', bytes(nl * 4))
+                        mesh.polygons.foreach_get('loop_start',     _ls)
+                        mesh.polygons.foreach_get('loop_total',     _lt)
+                        mesh.polygons.foreach_get('material_index', _mi)
+                        mesh.loops.foreach_get('vertex_index',      _vi)
+
+                        _geo = bytearray()
+                        _geo += _pos.tobytes()
+                        _geo += _nrm.tobytes()
+                        for uv_layer in mesh.uv_layers:
+                            _uv = array.array('f', bytes(nl * 8))
+                            uv_layer.data.foreach_get('uv', _uv)
+                            _geo += _pack_str(uv_layer.name)
+                            _geo += _uv.tobytes()
+                        _geo += _ls.tobytes()
+                        _geo += _lt.tobytes()
+                        _geo += _mi.tobytes()
+                        _geo += _vi.tobytes()
+                        geo_bytes = bytes(_geo)
+                        _geo_cache[orig.name] = (nv, nl, np_, nuv, geo_bytes)
+
+                    else:
+                        # Non-instance path: list comprehensions + optional face filter.
+                        positions    = [c for v in mesh.vertices
+                                        for c in (v.co.x, v.co.y, v.co.z)]
+                        if hasattr(mesh, 'corner_normals'):
+                            normals  = [c for cn in mesh.corner_normals
+                                        for c in (cn.vector.x, cn.vector.y, cn.vector.z)]
+                        else:
+                            normals  = [c for loop in mesh.loops
+                                        for c in (loop.normal.x, loop.normal.y, loop.normal.z)]
+                        uvlayers     = [(uv_layer.name,
+                                         [c for uv in uv_layer.data
+                                          for c in (uv.uv.x, uv.uv.y)])
+                                        for uv_layer in mesh.uv_layers]
+                        loop_starts  = [p.loop_start     for p in mesh.polygons]
+                        loop_totals  = [p.loop_total     for p in mesh.polygons]
+                        mat_indices  = [p.material_index for p in mesh.polygons]
+                        vert_indices = [l.vertex_index   for l in mesh.loops]
+
+                        # GN face filter: strip baked instance faces from emitter.
+                        _filt = _instance_mat_filter_idx.get(orig.name)
+                        if _filt is not None:
+                            _new_ls, _new_lt, _new_mi, _new_vi = [], [], [], []
+                            _new_nr = []
+                            _new_uv_lists = [[] for _ in mesh.uv_layers]
+                            _corner_off = 0
+                            _cn_list = list(mesh.corner_normals) if hasattr(mesh, 'corner_normals') else None
+                            for _fp in mesh.polygons:
+                                if _fp.material_index == _filt:
+                                    continue
+                                _new_ls.append(_corner_off)
+                                _new_lt.append(_fp.loop_total)
+                                _new_mi.append(_fp.material_index)
+                                for _fl in range(_fp.loop_start, _fp.loop_start + _fp.loop_total):
+                                    _new_vi.append(mesh.loops[_fl].vertex_index)
+                                    if _cn_list:
+                                        _cv = _cn_list[_fl].vector
+                                        _new_nr += [_cv.x, _cv.y, _cv.z]
+                                    else:
+                                        _fn = mesh.loops[_fl].normal
+                                        _new_nr += [_fn.x, _fn.y, _fn.z]
+                                    for _ui, _ul in enumerate(mesh.uv_layers):
+                                        _fuv = _ul.data[_fl].uv
+                                        _new_uv_lists[_ui] += [_fuv.x, _fuv.y]
+                                _corner_off += _fp.loop_total
+                            loop_starts  = _new_ls
+                            loop_totals  = _new_lt
+                            mat_indices  = _new_mi
+                            vert_indices = _new_vi
+                            normals      = _new_nr
+                            uvlayers     = [(mesh.uv_layers[_ui].name, _new_uv_lists[_ui])
+                                            for _ui in range(len(mesh.uv_layers))]
+                            nv  = len(positions) // 3
+                            nl  = len(normals)   // 3
+                            np_ = len(loop_starts)
+                            nuv = len(uvlayers)
+
+                        _geo = bytearray()
+                        _geo += struct.pack(f'<{len(positions)}f', *positions)
+                        _geo += struct.pack(f'<{len(normals)}f',   *normals)
+                        for uv_name, uvs in uvlayers:
+                            _geo += _pack_str(uv_name)
+                            _geo += struct.pack(f'<{len(uvs)}f', *uvs)
+                        _geo += struct.pack(f'<{np_}I', *loop_starts)
+                        _geo += struct.pack(f'<{np_}I', *loop_totals)
+                        _geo += struct.pack(f'<{np_}I', *mat_indices)
+                        _geo += struct.pack(f'<{nl}I',  *vert_indices)
+                        geo_bytes = bytes(_geo)
+
+                    eval_obj.to_mesh_clear()
+
+                # Material info from evaluated material slots.
+                mat_names    = []
+                mat_flags    = []
+                mat_colors   = []
+                mat_sss_data = []
+                mat_slots = list(eval_obj.material_slots)
+                has_real_mats = any(s.material is not None for s in mat_slots)
+                if not has_real_mats and is_inst and inst.parent is not None:
+                    parent_orig = inst.parent.original if hasattr(inst.parent, 'original') else inst.parent
+                    parent_slots = [s for s in parent_orig.material_slots if s.material is not None]
+                    if parent_slots:
+                        mat_slots = parent_slots
+                for slot in mat_slots:
+                    mat = slot.material
+                    mat_names.append(mat.name if mat else "")
+                    is_trans, color = _is_pure_translucent(mat)
+                    if not is_trans:
+                        color = _get_mat_base_color(mat)
+                    sss = _get_sss_params(mat)
+                    flags = (1 if is_trans else 0) | (2 if sss is not None else 0)
+                    mat_flags.append(flags)
+                    mat_colors.extend(color)
+                    if sss is not None:
+                        weight, sc, radius, scale, aniso = sss
+                        mat_sss_data.extend([weight] + sc + radius + [scale, aniso])
+                    else:
+                        mat_sss_data.extend([0.0, 0.8, 0.8, 0.8, 0.1, 0.1, 0.1, 1.0, 0.0])
+
+                if is_inst:
+                    # GN instance → accumulate into instance group (no per-instance
+                    # file write; prototype geometry is written once per group).
+                    mat_key = tuple(mat_names)
+                    grp_key = (orig.name, mat_key)
+                    if grp_key not in _inst_groups:
+                        _mt  = raw_matrix.translation
+                        _owt = orig.matrix_world.translation
+                        print(f"[anacapa] proto '{orig.name}' nv={nv}"
+                              f"  v[0]=({_pos[0]:.3f},{_pos[1]:.3f},{_pos[2]:.3f})"
+                              f"  inst_t=({_mt.x:.3f},{_mt.y:.3f},{_mt.z:.3f})"
+                              f"  orig_mw_t=({_owt.x:.3f},{_owt.y:.3f},{_owt.z:.3f})")
+                        import sys; sys.stdout.flush()
+                        _inst_groups[grp_key] = {
+                            'proto_name':  orig.name,
+                            'nv': nv, 'nl': nl, 'np_': np_, 'nuv': nuv,
+                            'mat_names':   mat_names,
+                            'mat_flags':   mat_flags,
+                            'mat_colors':  mat_colors,
+                            'mat_sss_data': mat_sss_data,
+                            'geo_bytes':   geo_bytes,
+                            'nmk':         len(motion_matrices),
+                            'motion_times': motion_times_mesh,
+                            'instances':   [],
+                        }
+                    _mdata = bytearray()
+                    for _m in motion_matrices:
+                        _mdata += _pack_matrix(_m)
+                    _inst_groups[grp_key]['instances'].append(
+                        (obj.name, bytes(_mdata)))
+                else:
+                    # Non-instanced object → write MeshRecord immediately.
+                    nm  = len(mat_names)
+                    nmk = len(motion_matrices)
+                    f.write(struct.pack('<6I', nv, nl, np_, nuv, nm, nmk))
+                    for _mat in motion_matrices:
+                        f.write(_pack_matrix(_mat))
+                    f.write(_pack_floats(motion_times_mesh))
+                    f.write(_pack_str(obj.name))
+                    for mname in mat_names:
+                        f.write(_pack_str(mname))
+                    f.write(_pack_uints(mat_flags))
+                    f.write(_pack_floats(mat_colors))
+                    f.write(_pack_floats(mat_sss_data))
+                    f.write(geo_bytes)
+                    mesh_count += 1
+
+            # ---- LIGHT -------------------------------------------------------
+            elif obj.type == 'LIGHT':
+                if inst.is_instance:
+                    continue
+                if orig.name in seen_non_instance:
+                    continue
+                seen_non_instance.add(orig.name)
+
+                ld = orig.data
+                mat_world = _to_yup(obj.matrix_world)
+                type_map = {'SUN': 0, 'AREA': 1, 'POINT': 2, 'SPOT': 2}
+                ltype  = type_map.get(ld.type, 0)
+                params = [0.0, 0.0, 0.0, 0.0]
+                if ld.type == 'SUN':
+                    params[0] = math.degrees(ld.angle)
+                elif ld.type == 'AREA':
+                    params[1] = ld.size
+                    params[2] = ld.size_y if ld.shape in ('RECTANGLE', 'ELLIPSE') else ld.size
+                elif ld.type in ('POINT', 'SPOT'):
+                    params[3] = ld.shadow_soft_size
+
+                light_data.append({
+                    'type':      ltype,
+                    'name':      orig.name,
+                    'matrix':    mat_world,
+                    'color':     list(ld.color),
+                    'intensity': ld.energy / math.pi,
+                    'normalize': 1,
+                    'params':    params,
+                })
+
+            # ---- CAMERA ------------------------------------------------------
+            elif obj.type == 'CAMERA':
+                if inst.is_instance:
+                    continue
+                if orig.name in seen_non_instance:
+                    continue
+                seen_non_instance.add(orig.name)
+
+                if camera is not None and orig != scene.camera:
+                    continue
+
+                cd = orig.data
+                mat_world = _to_yup(obj.matrix_world)
+                camera = {
+                    'matrix':        mat_world,
+                    'lens':          cd.lens,
+                    'sensor_width':  cd.sensor_width,
+                    'sensor_height': (cd.sensor_width /
+                                      (scene.render.resolution_x / scene.render.resolution_y)
+                                      if cd.sensor_fit == 'AUTO' else cd.sensor_height),
+                    'clip_start':    cd.clip_start,
+                    'clip_end':      cd.clip_end,
+                    'dof_distance':  cd.dof.focus_distance,
+                    'dof_fstop':     cd.dof.aperture_fstop,
+                }
+
+        # ---- Instance group records (after mesh loop) -----------------------
+        for grp in _inst_groups.values():
+            num_inst = len(grp['instances'])
+            nv  = grp['nv'];  nl = grp['nl'];  np_ = grp['np_'];  nuv = grp['nuv']
+            nm  = len(grp['mat_names'])
+            nmk = grp['nmk']
+            # InstanceGroupHeader: nv, nl, np_, nuv, nm, nmk, num_instances
+            f.write(struct.pack('<7I', nv, nl, np_, nuv, nm, nmk, num_inst))
+            f.write(_pack_str(grp['proto_name']))
+            for mname in grp['mat_names']:
                 f.write(_pack_str(mname))
+            f.write(_pack_uints(grp['mat_flags']))
+            f.write(_pack_floats(grp['mat_colors']))
+            f.write(_pack_floats(grp['mat_sss_data']))
+            f.write(_pack_floats(grp['motion_times']))
+            f.write(grp['geo_bytes'])   # prototype geometry, written once
+            for inst_name, mat_bytes in grp['instances']:
+                f.write(_pack_str(inst_name))
+                f.write(mat_bytes)
 
-            # material flags (bit 0 = translucent, bit 1 = sss), translucency colors, sss data
-            f.write(_pack_uints(m['mat_flags']))
-            f.write(_pack_floats(m['mat_colors']))
-            f.write(_pack_floats(m['mat_sss_data']))
-
-            # geometry
-            f.write(_pack_floats(m['positions']))
-            f.write(_pack_floats(m['normals']))
-
-            # UV layers
-            for uv_name, uvs in m['uvlayers']:
-                f.write(_pack_str(uv_name))
-                f.write(_pack_floats(uvs))
-
-            # topology
-            f.write(_pack_uints(m['loop_starts']))
-            f.write(_pack_uints(m['loop_totals']))
-            f.write(_pack_uints(m['mat_indices']))
-            f.write(_pack_uints(m['vert_indices']))
-
-        # Light records
+        # ---- Lights and camera (after mesh loop) ----------------------------
         for l in light_data:
             f.write(struct.pack('<I', l['type']))
             f.write(_pack_matrix(l['matrix']))
@@ -683,7 +742,6 @@ def export_scene_binary(filepath: str, context,
             f.write(struct.pack('<4f', *l['params']))
             f.write(_pack_str(l['name']))
 
-        # Camera record
         if camera:
             f.write(_pack_matrix(camera['matrix']))
             f.write(struct.pack('<7f',
@@ -695,6 +753,18 @@ def export_scene_binary(filepath: str, context,
                                 camera['dof_distance'],
                                 camera['dof_fstop']))
 
-    print(f"[anacapa] scene binary v4: {len(mesh_data)} meshes "
-          f"({'motion blur' if do_motion_blur else 'static'}), "
+        # Patch the header now that all counts are known.
+        # Offsets: magic(4) + version(4) → num_meshes at 8, then lights, has_camera,
+        # num_inst_groups at 20 (was _pad[0]).
+        f.seek(8)
+        f.write(struct.pack('<4I',
+                            mesh_count,
+                            len(light_data),
+                            1 if camera else 0,
+                            len(_inst_groups)))
+
+    total_instances = sum(len(g['instances']) for g in _inst_groups.values())
+    print(f"[anacapa] scene binary v5: {mesh_count} meshes, "
+          f"{len(_inst_groups)} instance groups ({total_instances} instances), "
+          f"{'motion blur' if do_motion_blur else 'static'}, "
           f"{len(light_data)} lights, camera={'yes' if camera else 'no'} → {filepath}")

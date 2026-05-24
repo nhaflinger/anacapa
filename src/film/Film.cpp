@@ -53,8 +53,7 @@ void Film::mergeTile(const TileBuffer& tile) {
                 m_pixels[fi].weight.fetch_add(s.weight, std::memory_order_relaxed);
                 m_pixels[fi].sumLumSq.fetch_add(tile.sumLumSq[ti],
                                                  std::memory_order_relaxed);
-                if (m_hasAlpha)
-                    m_pixels[fi].alpha.fetch_add(s.alpha, std::memory_order_relaxed);
+                m_pixels[fi].alpha.fetch_add(s.alpha, std::memory_order_relaxed);
             }
 
             // Albedo AOV
@@ -91,14 +90,12 @@ void Film::readTile(uint32_t x0, uint32_t y0,
                 const auto& px = m_pixels[fy * m_width + fx];
                 Spectrum s = px.resolve();
                 p[0] = s.x; p[1] = s.y; p[2] = s.z;
-                if (m_hasAlpha) {
+                {
                     float wt = px.weight.load(std::memory_order_relaxed);
                     float a  = (wt > 0.f)
                         ? px.alpha.load(std::memory_order_relaxed) / wt
                         : 0.f;
                     p[3] = std::max(0.f, std::min(1.f, a));
-                } else {
-                    p[3] = 1.f;
                 }
             } else {
                 p[0] = p[1] = p[2] = p[3] = 0.f;
@@ -191,17 +188,16 @@ bool Film::writeEXR(const std::string& path,
 
     const uint32_t N = m_width * m_height;
 
-    const bool writeAlpha   = m_hasAlpha;
     const bool writeDenoised = opts.enabled && !m_denoised.empty();
     const bool writeAOVs    = opts.writeAOVs;
 
     // Build channel list
     std::vector<std::string> channelNames;
     channelNames.reserve(16);
-    channelNames.push_back("R");
-    channelNames.push_back("G");
-    channelNames.push_back("B");
-    if (writeAlpha)    channelNames.push_back("A");
+    channelNames.push_back("Combined.R");
+    channelNames.push_back("Combined.G");
+    channelNames.push_back("Combined.B");
+    channelNames.push_back("Combined.A");  // always written; 1.0 when not in alpha mode
     if (writeDenoised) { channelNames.push_back("denoised.R"); channelNames.push_back("denoised.G"); channelNames.push_back("denoised.B"); }
     if (writeAOVs)     { channelNames.push_back("albedo.R"); channelNames.push_back("albedo.G"); channelNames.push_back("albedo.B");
                          channelNames.push_back("normals.R"); channelNames.push_back("normals.G"); channelNames.push_back("normals.B"); }
@@ -220,8 +216,8 @@ bool Film::writeEXR(const std::string& path,
         p[c++] = beauty.y;
         p[c++] = beauty.z;
 
-        // Alpha
-        if (writeAlpha) {
+        // Alpha — always accumulated; background pixels = 0, geometry = 1.
+        {
             float w = m_pixels[i].weight.load(std::memory_order_relaxed);
             float a = (w > 0.f)
                 ? m_pixels[i].alpha.load(std::memory_order_relaxed) / w
@@ -328,29 +324,24 @@ bool Film::writePNG(const std::string& path, float exposure) const {
 bool Film::writeEXRPreview(const std::string& path) const {
     using namespace OIIO;
     const uint32_t N = m_width * m_height;
-    const int nCh = m_hasAlpha ? 4 : 3;
-
-    std::vector<float> pixels(N * nCh);
+    std::vector<float> pixels(N * 4);
     for (uint32_t i = 0; i < N; ++i) {
-        float* p = pixels.data() + i * nCh;
+        float* p = pixels.data() + i * 4;
         Spectrum c = m_pixels[i].resolve();
         p[0] = c.x;
         p[1] = c.y;
         p[2] = c.z;
-        if (m_hasAlpha) {
-            float w = m_pixels[i].weight.load(std::memory_order_relaxed);
-            float a = (w > 0.f)
-                ? m_pixels[i].alpha.load(std::memory_order_relaxed) / w
-                : 0.f;
-            p[3] = std::max(0.f, std::min(1.f, a));
-        }
+        float w = m_pixels[i].weight.load(std::memory_order_relaxed);
+        float a = (w > 0.f)
+            ? m_pixels[i].alpha.load(std::memory_order_relaxed) / w
+            : 0.f;
+        p[3] = std::max(0.f, std::min(1.f, a));
     }
 
     ImageSpec spec(static_cast<int>(m_width), static_cast<int>(m_height),
-                   nCh, TypeDesc::FLOAT);
+                   4, TypeDesc::FLOAT);
     spec.attribute("compression", "none");  // fastest for progressive preview
-    spec.channelnames = m_hasAlpha ? std::vector<std::string>{"R", "G", "B", "A"}
-                                   : std::vector<std::string>{"R", "G", "B"};
+    spec.channelnames = std::vector<std::string>{"R", "G", "B", "A"};
 
     const std::string tmp = path + ".writing.exr";
     auto out = ImageOutput::create(tmp);

@@ -953,9 +953,12 @@ void RenderSession::render() {
 
             auto sampler = m_baseSampler->clone();
             TileBuffer localTile(tile.x0, tile.y0, tile.width, tile.height);
+            auto t0 = std::chrono::steady_clock::now();
             m_integrator->renderTile(m_scene, tile,
                                       m_settings.imageWidth, m_settings.imageHeight,
                                       *sampler, localTile);
+            auto tileMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count();
             m_film->mergeTile(localTile);
 
             if (displayDriver) {
@@ -965,8 +968,8 @@ void RenderSession::render() {
             }
 
             uint32_t done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
-            if (done % 16 == 0 || done >= totalExpected)
-                spdlog::info("  {}/{} tiles", done, totalExpected);
+            if (done <= 4 || done % 16 == 0 || done >= totalExpected)
+                spdlog::info("  {}/{} tiles ({} ms/tile)", done, totalExpected, tileMs);
         });
 
         { std::lock_guard<std::mutex> lk(m_queueMtx); m_activeTileQueue = nullptr; }
