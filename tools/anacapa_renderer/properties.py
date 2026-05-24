@@ -1,4 +1,10 @@
 import bpy
+from .export import _set_render_display
+
+
+def _use_viewer_update(self, ctx):
+    """Sync render display type with the Use Viewer toggle."""
+    _set_render_display('NONE' if self.use_viewer else 'WINDOW')
 
 
 def _mark_sky_dirty(self, ctx):
@@ -289,6 +295,7 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
                     "already running, then passes --display so tiles stream directly "
                     "into the viewer as they finish.",
         default=False,
+        update=_use_viewer_update,
     )
 
     # Camera

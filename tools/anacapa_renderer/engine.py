@@ -22,6 +22,7 @@ class AnacapaRenderEngine(bpy.types.RenderEngine):
             return
 
         print("[Anacapa RenderEngine] render() called")
+        result = None
         try:
             settings = scene.anacapa
             print(f"[Anacapa RenderEngine] scene={scene.name} "
@@ -76,6 +77,7 @@ class AnacapaRenderEngine(bpy.types.RenderEngine):
             state = export_mod._state()
             state["dirty_scene"]     = True
             state["dirty_transform"] = True
+            state["suppress_dirty"]  = True
 
             self.update_stats("Anacapa", "Exporting scene...")
             print("[Anacapa RenderEngine] Starting USD export...")
@@ -91,13 +93,44 @@ class AnacapaRenderEngine(bpy.types.RenderEngine):
 
             print("[Anacapa RenderEngine] Export complete, building command...")
 
+            # Pick up hair paths written by the render_pre handler.
+            rdata          = export_mod._render_pre_data()
+            abc_path       = rdata.get('abc_path')
+            matassign_paths = rdata.get('matassign_paths')
+
             executable = export_mod.get_executable(ctx)
             cmd = export_mod.build_command(executable, usd_path, settings,
                                            width, height, output_path,
+                                           curves_path=abc_path,
+                                           matassign_paths=matassign_paths,
                                            frame=scene.frame_current)
+
+            # Viewer support — launch if needed and wire up --display.
+            if getattr(settings, 'use_viewer', False):
+                viewer_path = export_mod.get_viewer_executable(ctx)
+                if os.path.exists(viewer_path):
+                    if not export_mod.is_viewer_running():
+                        export_mod.launch_viewer(viewer_path)
+                    if export_mod.is_viewer_running():
+                        cmd.append("--display")
+
+            # Determine whether the custom viewer is receiving updates.
+            using_viewer = '--display' in cmd
+
+            # Progressive preview EXR — written by anacapa after each tile batch.
+            # Always enable so Blender's F12 viewer updates live, unless the custom
+            # viewer is active (in that case anacapa sends via socket instead).
+            preview_path = None
+            if not using_viewer:
+                preview_path = os.path.join(bpy.app.tempdir, "anacapa_preview.exr")
+                cmd += ["--preview-exr", preview_path]
 
             print(f"[Anacapa RenderEngine] cmd: {' '.join(cmd)}")
             self.update_stats("Anacapa", "Rendering...")
+
+            # Open the render result slot now so update_result() works during render.
+            result = self.begin_result(0, 0, width, height)
+            last_preview_mtime = 0.0
 
             proc = subprocess.Popen(cmd,
                                     stdout=subprocess.PIPE,
@@ -108,12 +141,25 @@ class AnacapaRenderEngine(bpy.types.RenderEngine):
                 if self.test_break():
                     proc.kill()
                     print("[Anacapa RenderEngine] Cancelled.")
+                    self.end_result(result, cancel=True)
+                    result = None
                     return
                 line = proc.stdout.readline()
                 if line:
                     print(line, end="")
                 else:
-                    time.sleep(0.1)
+                    time.sleep(0.05)
+
+                # Progressive Blender viewer update.
+                if preview_path:
+                    try:
+                        mtime = os.path.getmtime(preview_path)
+                        if mtime > last_preview_mtime:
+                            last_preview_mtime = mtime
+                            result.layers[0].load_from_file(preview_path)
+                            self.update_result(result)
+                    except Exception:
+                        pass
 
             for line in proc.stdout:
                 print(line, end="")
@@ -121,10 +167,14 @@ class AnacapaRenderEngine(bpy.types.RenderEngine):
             if proc.returncode != 0:
                 self.report({'ERROR'},
                             f"Anacapa exited with code {proc.returncode}")
+                self.end_result(result, cancel=True)
+                result = None
                 return
 
             if not os.path.exists(output_path):
                 self.report({'ERROR'}, "Anacapa produced no output file")
+                self.end_result(result, cancel=True)
+                result = None
                 return
 
             print("[Anacapa RenderEngine] Loading result into Blender...")
@@ -138,40 +188,41 @@ class AnacapaRenderEngine(bpy.types.RenderEngine):
                 shutil.copy2(output_path, user_path)
                 print(f"[Anacapa RenderEngine] Saved EXR -> {user_path}")
 
-            # 1. Standard render-result API — populates the F12 / Render Result slot.
-            result = self.begin_result(0, 0, width, height)
+            # Load final EXR into the render result slot.
             try:
                 result.layers[0].load_from_file(output_path)
             except Exception as load_err:
                 print(f"[Anacapa RenderEngine] load_from_file error: {load_err}")
                 self.report({'WARNING'}, f"Could not load result: {load_err}")
             self.end_result(result)
+            result = None
 
-            # 2. Also load into bpy.data.images so the render persists even if
-            #    Blender resets the render-result slot after the engine exits.
-            #    A short timer overrides the post-render viewer switch.
-            _output = output_path
+            # When not using the custom viewer, also load into bpy.data.images
+            # so the render persists if Blender resets the render-result slot.
+            if not using_viewer:
+                _output = output_path
 
-            def _show_anacapa_render():
-                try:
-                    name = "Anacapa Render"
-                    img = bpy.data.images.get(name)
-                    if img:
-                        img.filepath = _output
-                        img.reload()
-                    else:
-                        img = bpy.data.images.load(_output)
-                        img.name = name
-                    img.use_fake_user = True
-                    for window in bpy.context.window_manager.windows:
-                        for area in window.screen.areas:
-                            if area.type == 'IMAGE_EDITOR':
-                                area.spaces.active.image = img
-                except Exception as _e:
-                    print(f"[Anacapa RenderEngine] show error: {_e}")
-                return None  # do not repeat
+                def _show_anacapa_render():
+                    try:
+                        name = "Anacapa Render"
+                        img = bpy.data.images.get(name)
+                        if img:
+                            img.filepath = _output
+                            img.reload()
+                        else:
+                            img = bpy.data.images.load(_output)
+                            img.name = name
+                        img.use_fake_user = True
+                        for window in bpy.context.window_manager.windows:
+                            for area in window.screen.areas:
+                                if area.type == 'IMAGE_EDITOR':
+                                    area.spaces.active.image = img
+                    except Exception as _e:
+                        print(f"[Anacapa RenderEngine] show error: {_e}")
+                    return None  # do not repeat
 
-            bpy.app.timers.register(_show_anacapa_render, first_interval=0.1)
+                bpy.app.timers.register(_show_anacapa_render, first_interval=0.1)
+
             print("[Anacapa RenderEngine] Done.")
 
         except Exception as e:
@@ -179,6 +230,19 @@ class AnacapaRenderEngine(bpy.types.RenderEngine):
             print(f"[Anacapa RenderEngine] EXCEPTION: {e}")
             traceback.print_exc()
             self.report({'ERROR'}, f"Anacapa render engine error: {e}")
+            try:
+                from . import export as _exp
+                _exp._state()["suppress_dirty"] = False
+            except Exception:
+                pass
+        finally:
+            # Guarantee end_result is called if an exception escaped after
+            # begin_result was already invoked.
+            if result is not None:
+                try:
+                    self.end_result(result, cancel=True)
+                except Exception:
+                    pass
 
 
 def register():

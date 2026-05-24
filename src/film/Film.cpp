@@ -341,7 +341,9 @@ bool Film::writeEXRPreview(const std::string& path) const {
     ImageSpec spec(static_cast<int>(m_width), static_cast<int>(m_height),
                    4, TypeDesc::FLOAT);
     spec.attribute("compression", "none");  // fastest for progressive preview
-    spec.channelnames = std::vector<std::string>{"R", "G", "B", "A"};
+    // Use the same names as writeEXR so Blender's load_from_file finds the pass.
+    spec.channelnames = std::vector<std::string>{"Combined.R", "Combined.G",
+                                                  "Combined.B", "Combined.A"};
 
     const std::string tmp = path + ".writing.exr";
     auto out = ImageOutput::create(tmp);

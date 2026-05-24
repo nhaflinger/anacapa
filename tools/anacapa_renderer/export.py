@@ -19,6 +19,14 @@ import importlib.util
 import shutil
 
 
+def _set_render_display(value):
+    """Set Blender's render display type (Blender 4.x+ API)."""
+    try:
+        bpy.context.preferences.view.render_display_type = value
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Frame-token substitution for output paths
 #
@@ -99,13 +107,182 @@ def mark_all_dirty():
 
 
 def register_dirty_handler():
-    if _on_depsgraph_update not in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update)
+    for handler, lst in [
+        (_on_depsgraph_update,  bpy.app.handlers.depsgraph_update_post),
+        (_anacapa_render_pre,   bpy.app.handlers.render_pre),
+        (_anacapa_render_post,  bpy.app.handlers.render_post),
+        (_anacapa_render_cancel, bpy.app.handlers.render_cancel),
+        (_anacapa_load_post,    bpy.app.handlers.load_post),
+    ]:
+        if handler not in lst:
+            lst.append(handler)
 
 
 def unregister_dirty_handler():
-    if _on_depsgraph_update in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph_update)
+    for handler, lst in [
+        (_on_depsgraph_update,  bpy.app.handlers.depsgraph_update_post),
+        (_anacapa_render_pre,   bpy.app.handlers.render_pre),
+        (_anacapa_render_post,  bpy.app.handlers.render_post),
+        (_anacapa_render_cancel, bpy.app.handlers.render_cancel),
+        (_anacapa_load_post,    bpy.app.handlers.load_post),
+    ]:
+        if handler in lst:
+            lst.remove(handler)
+
+
+# ---------------------------------------------------------------------------
+# Viewer management — shared between operators and the registered engine
+# ---------------------------------------------------------------------------
+VIEWER_SOCK  = "/tmp/anacapa_viewer.sock"
+_viewer_proc = None  # outlives operator instances
+
+
+def is_viewer_running():
+    import socket as _sock
+    try:
+        s = _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM)
+        s.settimeout(0.3)
+        s.connect(VIEWER_SOCK)
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
+def launch_viewer(viewer_path):
+    """Kill any stale viewer process, start a fresh one, wait up to 3 s."""
+    global _viewer_proc
+    import subprocess, time
+    if _viewer_proc and _viewer_proc.poll() is None:
+        _viewer_proc.terminate()
+    _viewer_proc = subprocess.Popen([viewer_path, "--listen"])
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        if is_viewer_running():
+            return
+        time.sleep(0.1)
+
+
+# ---------------------------------------------------------------------------
+# Render-handler shared state
+# ---------------------------------------------------------------------------
+_NS_RENDER = "anacapa_render_pre_data"
+
+
+def _render_pre_data():
+    if _NS_RENDER not in bpy.app.driver_namespace:
+        bpy.app.driver_namespace[_NS_RENDER] = {
+            'abc_path':       None,
+            'matassign_paths': None,
+            'hidden_curves':  [],
+        }
+    return bpy.app.driver_namespace[_NS_RENDER]
+
+
+def _shutter_interval(settings):
+    s_open, s_close = 0.0, 0.0
+    if getattr(settings, 'use_motion_blur', False):
+        shutter  = getattr(settings, 'motion_blur_shutter', 0.5)
+        position = getattr(settings, 'motion_blur_position', 'CENTER')
+        if shutter > 0:
+            if position == 'START':
+                s_open, s_close = 0.0, shutter
+            elif position == 'END':
+                s_open, s_close = -shutter, 0.0
+            else:
+                s_open, s_close = -shutter / 2.0, shutter / 2.0
+    return s_open, s_close
+
+
+@bpy.app.handlers.persistent
+def _anacapa_render_pre(scene):
+    if scene.render.engine != 'ANACAPA':
+        return
+    d = _render_pre_data()
+    d['abc_path']        = None
+    d['matassign_paths'] = None
+    d['hidden_curves']   = []
+
+    _state()["suppress_dirty"] = True
+
+    # Hair export — safe here: main thread, before engine starts, bpy.ops allowed.
+    ctx = bpy.context
+    hair_objs = get_hair_objects(ctx)
+    if hair_objs:
+        blend_path = bpy.data.filepath
+        if blend_path:
+            frame     = scene.frame_current
+            settings  = scene.anacapa
+            cache_dir = get_cache_dir(blend_path)
+            abc_path  = os.path.join(cache_dir, f"hair.{frame:04d}.abc")
+            s_open, s_close = _shutter_interval(settings)
+            try:
+                matassign_paths = export_hair_abc(abc_path, ctx,
+                                                   shutter_open=s_open,
+                                                   shutter_close=s_close)
+                d['abc_path']        = abc_path
+                d['matassign_paths'] = matassign_paths
+                print(f"[Anacapa] render_pre: hair → {abc_path}")
+            except Exception as e:
+                print(f"[Anacapa] render_pre hair export warning: {e}")
+
+    # Hide CURVES objects to prevent Blender 5.1 SIGSEGV during render.
+    hidden = []
+    for obj in scene.objects:
+        if obj.type == 'CURVES':
+            was_hidden = obj.hide_viewport
+            obj.hide_viewport = True
+            obj["anacapa_hidden_for_render"] = True
+            hidden.append((obj.name, was_hidden))
+    d['hidden_curves'] = hidden
+
+
+def _restore_hidden_curves(scene):
+    d = _render_pre_data()
+    for name, was_hidden in d.get('hidden_curves', []):
+        obj = scene.objects.get(name)
+        if obj:
+            obj.hide_viewport = was_hidden
+            obj.pop("anacapa_hidden_for_render", None)
+    d['hidden_curves'] = []
+
+
+@bpy.app.handlers.persistent
+def _anacapa_render_post(scene):
+    if scene.render.engine != 'ANACAPA':
+        return
+    _restore_hidden_curves(scene)
+    def _reenable():
+        _state()["suppress_dirty"] = False
+    bpy.app.timers.register(_reenable, first_interval=2.0)
+
+
+@bpy.app.handlers.persistent
+def _anacapa_render_cancel(scene):
+    if scene.render.engine != 'ANACAPA':
+        return
+    _restore_hidden_curves(scene)
+    _state()["suppress_dirty"] = False
+
+
+@bpy.app.handlers.persistent
+def _anacapa_load_post(*args, **kwargs):
+    """Restore CURVES left hidden by a crash; sync display_mode with use_viewer."""
+    for scene in bpy.data.scenes:
+        # Restore any CURVES left hidden by a crashed render.
+        for obj in scene.objects:
+            if obj.get("anacapa_hidden_for_render"):
+                obj.hide_viewport = False
+                obj.pop("anacapa_hidden_for_render", None)
+        # Sync render display type so F12 respects use_viewer after file load.
+        if scene.render.engine == 'ANACAPA':
+            settings = getattr(scene, 'anacapa', None)
+            if settings:
+                try:
+                    bpy.context.preferences.view.render_display_type = (
+                        'NONE' if getattr(settings, 'use_viewer', False) else 'WINDOW')
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
