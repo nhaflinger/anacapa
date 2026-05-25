@@ -44,7 +44,23 @@
       "Bash(exr='/private/var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/anacapa_15_mrhw8/textures/air_museum_playground_4k.exr' echo \"=== HDRI Row Averages by Zone ===\" echo \"Top quarter \\(sky\\):\" oiiotool \"$exr\" --crop '4096x512+0+0' --stats)",
       "Bash(cmake /Users/douglascreel/dev/anacapa)",
       "Bash(xargs cat:*)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(cmake --build build/Darwin --target anacapa_scene_export)",
+      "Bash(grep -E \"Linking|Built target anacapa$\")",
+      "Bash(sample 7775 3)",
+      "Bash(sample 7775 5)",
+      "Bash(awk '{s+=$1} END {print \"total samples in rendering:\", s}')",
+      "Bash(cmake --build /Users/douglascreel/dev/anacapa/build/Darwin --target anacapa anacapa_blender)",
+      "Bash(usdcat \"/Users/douglascreel/Documents/Blender/tree_leaves_moss_geo-nodes-demo_scene.usdc\")",
+      "Bash(awk ' *)",
+      "Bash(grep -n 'output\\\\|output_path\\\\|out_path\\\\|$F\\\\|frame\\\\|render_output' /Users/douglascreel/dev/anacapa/tools/anacapa_renderer/export.py)",
+      "Bash(grep -i 'output\\\\|path\\\\|$F')",
+      "Bash(grep -n 'render_output\\\\|output_path\\\\|output_dir\\\\|output_file\\\\|$F' /Users/douglascreel/dev/anacapa/tools/anacapa_renderer/__init__.py)",
+      "Bash(grep -rn 'render_output\\\\|output_path\\\\|output_dir\\\\|output_file\\\\|$F\\\\|substitute_frame' /Users/douglascreel/dev/anacapa/tools/anacapa_renderer/)",
+      "Bash(git -C /Users/douglascreel/dev/anacapa add src/accel/BVHBackend.cpp src/accel/BVHBackend.h include/anacapa/accel/GeometryPool.h src/export/SceneExporter.cpp src/export/SceneFormat.h src/film/Film.cpp src/integrator/PathIntegrator.cpp src/render/RenderSession.cpp src/scene/usd/USDLoader.cpp tools/anacapa_renderer/anacapa_scene_export.py tools/anacapa_renderer/engine.py tools/anacapa_renderer/export.py)",
+      "Bash(git -C /Users/douglascreel/dev/anacapa commit -m ' *)",
+      "Bash(usdcat /Users/douglascreel/Documents/Blender/cupcakes_scene.usdc)",
+      "Bash(grep -E \"error:|warning:|Building|Linking|Built target anacapa$\")"
     ],
     "additionalDirectories": [
       "/private/var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/anacapa_15_mrhw8"
