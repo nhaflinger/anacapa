@@ -179,7 +179,10 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 ./build/Darwin/anacapa \
   --scene            scenes/character.usda   \
   --curves           hair_sim.abc            \
+  --particles        fx/sparks.abc           \
+  --matassign        scenes/caches/character/character.matassign.json \
   --camera           /World/RenderCam        \
+  --frame            42                      \
   --integrator       photon                  \
   --num-photons      500000                  \
   --photon-radius    0.05                    \
@@ -191,8 +194,9 @@ DYLD_LIBRARY_PATH=~/usd/lib \
   --focus-distance   10                      \
   --shutter-open     0                       \
   --shutter-close    1                       \
-  --output           images/render.exr       \
-  --png              images/render.png       \
+  --output           images/render.$F4.exr   \
+  --png              images/render.$F4.png   \
+  --preview-exr      images/preview.exr      \
   --exposure         0.5                     \
   --denoise                                  \
   --write-aovs                               \
@@ -200,6 +204,7 @@ DYLD_LIBRARY_PATH=~/usd/lib \
   --override-materials                       \
   --debug-mesh       -1                      \
   --interactive                              \
+  --display          /tmp/anacapa.sock       \
   --firefly-clamp    10                      \
   --light-angle      2.0                     \
   --filter           mitchell                \
@@ -231,19 +236,25 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 | `--adaptive-base-spp` | `0` | Adaptive base-pass SPP (`0` = auto: `spp/4`, minimum 16) |
 | `--scene` | — | USD/USDA/USDC scene file |
 | `--curves` | — | Alembic `.abc` file containing hair/fur curves |
+| `--particles` | — | Alembic `.abc` file containing camera-facing disc particles (halo geometry) |
 | `--matassign` | — | Material assignment JSON file (repeatable; later files override earlier ones). `<abc>.matassign.json` is always auto-discovered alongside `--curves` |
 | `--camera` | — | USD prim path of camera (e.g. `/World/RenderCam`) |
+| `--frame` | — | Frame number to render; sets the USD time sample and resolves `$F` tokens in output paths |
 | `--env` | — | Equirectangular HDRI environment map (EXR or HDR) |
 | `--env-intensity` | `1.0` | Intensity multiplier for the environment map |
+| `--sky` | — | Path to a Nishita sky JSON config; enables procedural sky lighting in place of an HDRI |
 | `--fstop` | `0` | Lens f-stop; enables DoF when combined with `--focus-distance` |
 | `--focus-distance` | `0` | Distance to focal plane in scene units |
+| `--no-dof` | off | Disable depth of field even when the USD camera prim carries f-stop/focus data |
 | `--shutter-open` | `0` | Shutter open override (0 = `startTimeCode`) |
 | `--shutter-close` | `0` | Shutter close override (1 = `endTimeCode`); leave at 0 to use the scene's time range |
 | `--denoise` | off | Run Intel OIDN denoiser after rendering |
 | `--write-aovs` | off | Include albedo and normals layers in the output EXR |
 | `--interactive` | off | Use GPU backend for fast preview — Metal on Apple Silicon, CUDA on NVIDIA |
 | `--png` | — | Write ACES-tonemapped sRGB PNG alongside the EXR |
+| `--preview-exr` | — | Write a progressive linear EXR preview to this path during rendering (updated per tile batch; includes alpha when transparent-bg is enabled) |
 | `--exposure` | `0` | EV exposure adjustment for `--png` output (stops; positive = brighter) |
+| `--display` | — | Socket path for the live display driver; the Anacapa viewer connects here to receive tiles as they complete |
 | `--filter` | `mitchell` | Pixel reconstruction filter: `box`, `triangle`, `gaussian`, `mitchell`, `blackman-harris`, `catmull-rom`, `lanczos`. Mitchell-Netravali is a balanced default; `blackman-harris` matches Cycles' look |
 | `--filter-width` | `0` (auto) | Filter radius in pixels. `0` = use the filter's default (Box=0.5, Triangle=1.0, Gaussian=1.5, Mitchell=2.0, Blackman-Harris=1.5, Catmull-Rom=2.0, Lanczos=4.0) |
 | `--hair-tess-steps` | `4` | Quads per cubic Bézier hair segment for ribbon tessellation (CPU and GPU). Higher values produce smoother curves at the cost of more triangles and a slower scene commit. `1`–`2` for fast previews; `4` (default) is a good balance; `8`+ for close-up hero shots |
@@ -253,7 +264,9 @@ DYLD_LIBRARY_PATH=~/usd/lib \
 
 `--spp`: 16–32 for quick composition checks; 256+ for final renders.
 
-`--fstop` and `--focus-distance` both must be provided to enable depth of field. They override the USD camera values when present; if neither is set the camera falls back to pinhole.
+`--frame`: selects the USD time sample to render and substitutes the frame number into `$F` (zero-padded four digits) or `$F4`/`$F3`/etc. tokens in `--output` and `--png` paths. Omit to render at the scene's default time.
+
+`--fstop` and `--focus-distance` both must be provided to enable depth of field. They override the USD camera values when present; if neither is set the camera falls back to pinhole. Use `--no-dof` to force pinhole even when the USD camera prim carries lens data.
 
 `--shutter-open`/`--shutter-close` override the motion blur shutter. When omitted, the shutter is derived from the stage's `startTimeCode`, `endTimeCode`, and `timeCodesPerSecond` automatically. Set both to 0 to disable motion blur on an animated scene.
 
