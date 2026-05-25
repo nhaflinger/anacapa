@@ -515,9 +515,17 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
         m_impl->perMeshGasBufs.resize(numMeshes);
         m_impl->perMeshGasHandles.resize(numMeshes, 0);
         size_t totalMeshGasBytes = 0;
+        uint32_t numEmptyMeshes = 0;
         bool   gasOk = true;
         for (uint32_t mi = 0; mi < numMeshes; ++mi) {
             const MeshDesc& mesh = pool.mesh(mi);
+            // Skip empty meshes — OptiX rejects build inputs with
+            // numIndexTriplets == 0.  These pool entries still exist (e.g.
+            // placeholder prims, USD GeomSubset stripped of all faces, or
+            // GN intermediates) but have no triangle geometry to ray-trace.
+            // perMeshGasHandles[mi] stays 0; the IAS-entry loop below skips
+            // them so no IAS slot is wasted on a null traversable.
+            if (mesh.numTriangles() == 0) { ++numEmptyMeshes; continue; }
             const bool motion    = mesh.hasMotion();
             CUdeviceptr vbOpen   = static_cast<CUdeviceptr>(m_impl->posBuffer.devPtr());
             CUdeviceptr vbClose  = static_cast<CUdeviceptr>(m_impl->posBufferClose.devPtr());
@@ -537,10 +545,12 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
         }
         if (!gasOk) return;
 
-        printf("[info]  CudaAccelStructure: %u per-mesh GASes (%s, %u verts, %u tris, %.2f MiB total)\n",
-               numMeshes,
+        printf("[info]  CudaAccelStructure: %u per-mesh GASes (%s, %u verts, %u tris, "
+               "%u empty meshes skipped, %.2f MiB total)\n",
+               numMeshes - numEmptyMeshes,
                m_impl->hasMotion ? "motion-aware (some)" : "static",
                totalVerts, totalTris,
+               numEmptyMeshes,
                totalMeshGasBytes / (1024.0 * 1024.0));
 
         // -------------------------------------------------------------------
@@ -653,13 +663,21 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
         //   [numRegularInst]           hair (optional)
         //   [numRegularInst+1 .. N]    per-instance-group instance entries
         // -------------------------------------------------------------------
+        // Only meshes that actually have a built GAS contribute IAS entries.
+        // Empty meshes (numTriangles==0) were skipped above; prototypes appear
+        // only via per-instance entries below.
         uint32_t numRegularInst = 0;
         for (uint32_t mi = 0; mi < numMeshes; ++mi)
-            if (!pool.isPrototype(mi)) ++numRegularInst;
+            if (!pool.isPrototype(mi) && m_impl->perMeshGasHandles[mi] != 0)
+                ++numRegularInst;
 
         uint32_t numInstGroupInst = 0;
-        for (uint32_t g = 0; g < static_cast<uint32_t>(pool.numInstanceGroups()); ++g)
-            numInstGroupInst += static_cast<uint32_t>(pool.instanceGroup(g).instances.size());
+        for (uint32_t g = 0; g < static_cast<uint32_t>(pool.numInstanceGroups()); ++g) {
+            const InstanceGroupDesc& grp = pool.instanceGroup(g);
+            // Skip groups whose prototype has no GAS (empty mesh).
+            if (m_impl->perMeshGasHandles[grp.protoMeshID] == 0) continue;
+            numInstGroupInst += static_cast<uint32_t>(grp.instances.size());
+        }
 
         const bool     hasHair       = (m_impl->hairGasHandle != 0);
         const uint32_t totalInstances = numRegularInst + (hasHair ? 1u : 0u) + numInstGroupInst;
@@ -701,9 +719,11 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
 
         uint32_t tlasIdx = 0;
 
-        // Regular (non-prototype) meshes — identity transform, geometry world-space
+        // Regular (non-prototype) meshes — identity transform, geometry world-space.
+        // Skip prototypes and empty meshes (perMeshGasHandles[mi] == 0).
         for (uint32_t mi = 0; mi < numMeshes; ++mi) {
             if (pool.isPrototype(mi)) continue;
+            if (m_impl->perMeshGasHandles[mi] == 0) continue;
             OptixInstance& inst = insts[tlasIdx];
             setIdentityXform(inst);
             inst.instanceId        = tlasIdx;
@@ -730,9 +750,11 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
             ++tlasIdx;
         }
 
-        // Per-instance-group instances — actual o2w transforms, prototype GAS
+        // Per-instance-group instances — actual o2w transforms, prototype GAS.
+        // Skip groups whose prototype has no GAS (e.g. empty prototype mesh).
         for (uint32_t g = 0; g < static_cast<uint32_t>(pool.numInstanceGroups()); ++g) {
             const InstanceGroupDesc& grp = pool.instanceGroup(g);
+            if (m_impl->perMeshGasHandles[grp.protoMeshID] == 0) continue;
             for (const InstanceDesc& instDesc : grp.instances) {
                 const Mat4f& o2w = instDesc.keys[0].objectToWorld;
                 const Mat4f& w2o = instDesc.keys[0].worldToObject;
