@@ -16,16 +16,19 @@ class CudaContext;
 // CudaAccelStructure — OptiX acceleration structure over scene triangles
 // and (optionally) tessellated hair ribbons.
 //
-// When the CurvePool argument is non-null and contains strands, hair is
-// tessellated into ribbon quads (matching the Metal backend), built into a
-// second triangle GAS, and exposed alongside the mesh GAS through an IAS.
-// The IAS has two instances: index 0 = mesh GAS, index 1 = hair GAS.  The
-// hairMeshBaseID() accessor returns that hair instance index so raygen can
-// dispatch hits to the Marschner BSDF.
+// Mirrors MetalAccelStructure layout: one GAS per pool mesh, plus an
+// optional hair GAS, all referenced by IAS instances.  Prototype meshes
+// (those referenced by InstanceGroupDesc) live in object space and appear
+// only through per-instance IAS entries carrying actual objectToWorld
+// transforms; other meshes get identity IAS transforms (geometry already
+// baked to world space upstream).  hairMeshBaseID() returns a virtual
+// meshID (= numMeshes) used by the shader to detect hair hits via
+// instanceMeshIDs lookup.
 //
-// When no curves are supplied, the build collapses to a single triangle GAS
-// wrapped in a one-instance IAS — the traversable handle always points at
-// an IAS, which keeps the OptiX pipeline configuration uniform.
+// When no meshes are supplied (particles-only), the build collapses to a
+// single dummy GAS wrapped in a one-instance IAS — the traversable handle
+// always points at an IAS, which keeps the OptiX pipeline configuration
+// uniform.
 // ---------------------------------------------------------------------------
 class CudaAccelStructure {
 public:
@@ -64,7 +67,17 @@ public:
     // within the hair GAS).  The per-material hair-BSDF buffer is owned by
     // CudaPathIntegrator (it depends on scene.materials, not on geometry).
     uint64_t hairTriBuffer()     const;  // device GpuHairTri*
-    uint32_t hairMeshBaseID()    const;  // IAS instance ID, or 0xFFFFFFFF
+    uint32_t hairMeshBaseID()    const;  // virtual hair meshID (= numMeshes), or 0xFFFFFFFF
+
+    // Per-IAS-instance lookup tables — mirror MetalAccelStructure.
+    // instanceMeshIDBuffer: one uint32_t per IAS instance → pool meshID.
+    //   Regular meshes map 1:1; hair gets the virtual ID (= numMeshes);
+    //   per-instance entries from InstanceGroupDesc point at protoMeshID.
+    // instanceNormalMatrixBuffer: 12 floats per IAS instance = rows of
+    //   worldToObject^T.  Identity for regular meshes (geometry world-space),
+    //   actual w2o^T for prototype instances (geometry object-space).
+    uint64_t instanceMeshIDBuffer()       const;  // uint32_t*
+    uint64_t instanceNormalMatrixBuffer() const;  // float*
 
 private:
     struct Impl;

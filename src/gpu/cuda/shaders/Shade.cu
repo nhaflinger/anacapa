@@ -105,17 +105,22 @@ static __forceinline__ __device__ float3 lerp3(float3 a, float3 b, float t) {
 // ---------------------------------------------------------------------------
 // optixTrace wrapper — surface query.  Payload layout:
 //   p0 = hit valid (0 or 1)
-//   p1 = primitive index (global triangle index in our single GAS)
+//   p1 = primitive index local to the per-mesh GAS (or hair GAS)
 //   p2 = barycentric u (bits)
 //   p3 = barycentric v (bits)
 //   p4 = ray-t (bits)
-// On hit, meshID is looked up from params.triMeshIDs[primID] in the caller.
+//   p5 = IAS instance index (= optixGetInstanceId())
+// On hit:
+//   meshID  is looked up via params.instanceMeshIDs[instID] (mirrors Metal).
+//   primID  is globalized for triangle hits using params.meshIndexOffsets so
+//           interpolateNormal / params.indices continue to read the concat
+//           buffers; hair hits keep p1 local so hairTris[primID] works.
 // ---------------------------------------------------------------------------
 struct TraceResult {
     uint32_t valid;
-    uint32_t meshID;       // resolved scene material slot (from triMeshIDs[] for tri hits)
-    uint32_t primID;       // primitive index local to the BLAS instance
-    uint32_t instanceID;   // IAS instance index (0 = mesh GAS, 1 = hair GAS)
+    uint32_t meshID;       // resolved scene material slot (pool meshID, or virtual hairID)
+    uint32_t primID;       // globalized for tri hits; local for hair hits
+    uint32_t instanceID;   // IAS instance index (= optixGetInstanceId())
     float2   bary;
     float    t;
 };
@@ -139,16 +144,24 @@ TraceResult trace(float3 orig, float3 dir, float tMin, float tMax, float rayTime
     TraceResult r{};
     r.valid = p0;
     if (p0) {
-        r.primID     = p1;
         r.bary.x     = __uint_as_float(p2);
         r.bary.y     = __uint_as_float(p3);
         r.t          = __uint_as_float(p4);
         r.instanceID = p5;
-        // Triangle hits (instance 0) look up the per-triangle meshID;
-        // hair hits use the per-strand material index from GpuHairTri.
+        r.meshID     = params.instanceMeshIDs[p5];
+
         const bool isHair = (params.cam.hairMeshBaseID != 0xFFFFFFFFu
-                             && p5 >= params.cam.hairMeshBaseID);
-        r.meshID = isHair ? 0u : params.triMeshIDs[p1];
+                             && r.meshID >= params.cam.hairMeshBaseID);
+        if (isHair) {
+            // Hair: keep primID local to hair GAS for hairTris[] lookup.
+            r.primID = p1;
+        } else {
+            // Triangle hit in a per-mesh GAS — globalize primID so existing
+            // index/normal-buffer reads (which expect a global triangle ID)
+            // work without touching downstream code.
+            uint32_t idxOffElems = params.meshIndexOffsets[r.meshID];
+            r.primID = idxOffElems / 3u + p1;
+        }
     }
     return r;
 }
@@ -169,6 +182,25 @@ float3 interpolateNormal(uint32_t globalPrimId, float2 bary,
     float3 n2 = make3(normals[i2]);
     float w = 1.0f - bary.x - bary.y;
     return normalize(n0 * w + n1 * bary.x + n2 * bary.y);
+}
+
+// Apply per-IAS-instance normal matrix (= worldToObject^T) to an object-space
+// normal, returning the world-space normal.  Identity (no-op) for regular
+// world-space meshes; mirrors MetalAccelStructure setNormalMatrix layout.
+// nMat layout per instance: 3 rows × 4 floats (last per-row element is pad).
+static __forceinline__ __device__
+float3 applyInstanceNormalMat(float3 nObj, uint32_t instID, const float* nMat)
+{
+    if (nMat == nullptr) return nObj;
+    uint32_t base = instID * 12u;
+    float r0x = nMat[base + 0],  r0y = nMat[base + 1],  r0z = nMat[base + 2];
+    float r1x = nMat[base + 4],  r1y = nMat[base + 5],  r1z = nMat[base + 6];
+    float r2x = nMat[base + 8],  r2y = nMat[base + 9],  r2z = nMat[base + 10];
+    float3 w = make_float3(
+        nObj.x*r0x + nObj.y*r0y + nObj.z*r0z,
+        nObj.x*r1x + nObj.y*r1y + nObj.z*r1z,
+        nObj.x*r2x + nObj.y*r2y + nObj.z*r2z);
+    return normalize(w);
 }
 
 // ---------------------------------------------------------------------------
@@ -351,7 +383,7 @@ float3 shadowTransmittance(float3 origin, float3 dir, float tMax, float rayTime)
 
         // Hair is fully opaque to shadow rays (no transmission lobe yet).
         const bool isHair = (params.cam.hairMeshBaseID != 0xFFFFFFFFu
-                              && hit.instanceID >= params.cam.hairMeshBaseID);
+                              && hit.meshID >= params.cam.hairMeshBaseID);
         if (isHair) return make_float3(0.0f, 0.0f, 0.0f);
 
         uint32_t matIdx = (hit.meshID < params.numMaterials) ? hit.meshID : 0u;
@@ -1313,7 +1345,7 @@ extern "C" __global__ void __raygen__photon()
         // Skip hair and other non-mesh hits — caustic photons should land on
         // mesh triangles where they'll be queried by the hash grid.
         const bool isHair = (params.cam.hairMeshBaseID != 0xFFFFFFFFu
-                              && hit.instanceID >= params.cam.hairMeshBaseID);
+                              && hit.meshID >= params.cam.hairMeshBaseID);
         if (isHair) break;
 
         uint32_t matIdx = (hit.meshID < params.numMaterials) ? hit.meshID : 0u;
@@ -1324,6 +1356,10 @@ extern "C" __global__ void __raygen__photon()
         float3 hitPos = rayOrig + rayDir * hit.t;
         float3 geomN  = interpolateNormal(hit.primID, hit.bary,
                                            params.normals, params.indices);
+        // Normal is in mesh-local space (object space for prototype meshes,
+        // world space for regular meshes — instanceNormalMat is identity for
+        // the latter).  Lift to world space.
+        geomN = applyInstanceNormalMat(geomN, hit.instanceID, params.instanceNormalMat);
 
         if (mat.type == kMatGlass) {
             // Delta refract/reflect with Russian-roulette branch.  Throughput
@@ -1642,7 +1678,7 @@ extern "C" __global__ void __raygen__wf_bounce()
     // / params.indices for a hair primID).  Mirrors the megakernel.
     // ----------------------------------------------------------------
     const bool isHair = (params.cam.hairMeshBaseID != 0xFFFFFFFFu
-                          && hit.instanceID >= params.cam.hairMeshBaseID);
+                          && hit.meshID >= params.cam.hairMeshBaseID);
     if (isHair && params.hairTris != nullptr && params.hairMats != nullptr) {
         GpuHairTri ht = params.hairTris[hit.primID];
         float bw = 1.f - hit.bary.x - hit.bary.y;
@@ -1803,6 +1839,7 @@ extern "C" __global__ void __raygen__wf_bounce()
 
     geomN = interpolateNormal(hit.primID, hit.bary,
                               params.normals, params.indices);
+    geomN = applyInstanceNormalMat(geomN, hit.instanceID, params.instanceNormalMat);
     n = geomN;
     if (dot(-1.0f * rayDir, n) < 0.0f) n = -1.0f * n;
 

@@ -749,6 +749,8 @@ void CudaPathIntegrator::Impl::buildPhotonMap(OptixDeviceContext optixCtx)
     params.triMeshIDs          = reinterpret_cast<const uint32_t*>(accel->triMeshIDBuffer());
     params.meshVertexOffsets   = reinterpret_cast<const uint32_t*>(accel->meshVertexOffsetBuffer());
     params.meshIndexOffsets    = reinterpret_cast<const uint32_t*>(accel->meshIndexOffsetBuffer());
+    params.instanceMeshIDs     = reinterpret_cast<const uint32_t*>(accel->instanceMeshIDBuffer());
+    params.instanceNormalMat   = reinterpret_cast<const float*>(accel->instanceNormalMatrixBuffer());
     params.photons             = traceBuf.ptr();   // raygen writes caustic photons here
     params.sssPhotons          = sssTraceBuf.isValid() ? sssTraceBuf.ptr() : nullptr;
     params.sssNumPhotons       = numPhotons;
@@ -1504,6 +1506,8 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.triMeshIDs        = reinterpret_cast<const uint32_t*>(accel->triMeshIDBuffer());
     p.meshVertexOffsets = reinterpret_cast<const uint32_t*>(accel->meshVertexOffsetBuffer());
     p.meshIndexOffsets  = reinterpret_cast<const uint32_t*>(accel->meshIndexOffsetBuffer());
+    p.instanceMeshIDs   = reinterpret_cast<const uint32_t*>(accel->instanceMeshIDBuffer());
+    p.instanceNormalMat = reinterpret_cast<const float*>(accel->instanceNormalMatrixBuffer());
     p.sampleBatch.sampleStart = sampleStart;
     p.sampleBatch.batchSize   = sampleCount;
     p.envTexture        = envTex;

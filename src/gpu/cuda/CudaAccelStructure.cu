@@ -54,18 +54,25 @@ struct CudaAccelStructure::Impl {
     CudaBuffer<uint32_t>      hairIndexBuf;
     CudaBuffer<GpuHairTri>    hairTriBuf;
     uint32_t                  numHairTris    = 0;
-    uint32_t                  hairMeshBase   = 0xFFFFFFFFu;  // IAS instance ID; sentinel = no hair
+    uint32_t                  hairMeshBase   = 0xFFFFFFFFu;  // virtual hair meshID; sentinel = no hair
     bool                      hairHasMotion  = false;
 
 #ifdef ANACAPA_ENABLE_OPTIX
     // OptiX-built AS storage.  Output buffers must outlive the handles.
-    CudaByteBuffer         meshAsBuffer;
-    OptixTraversableHandle meshGasHandle = 0;
+    // One GAS per pool mesh (mirrors Metal's per-mesh BLAS layout); referenced
+    // by IAS instances via traversableHandle.  For particles-only scenes a
+    // single dummy entry is created so the IAS is non-empty.
+    std::vector<CudaByteBuffer>         perMeshGasBufs;
+    std::vector<OptixTraversableHandle> perMeshGasHandles;
     CudaByteBuffer         hairAsBuffer;
     OptixTraversableHandle hairGasHandle = 0;
     CudaByteBuffer         iasBuffer;
     OptixTraversableHandle iasHandle     = 0;
     CudaByteBuffer         iasInstanceBuf;
+
+    // Per-IAS-instance lookup buffers (see header for layout).
+    CudaBuffer<uint32_t>    instanceMeshIDs;
+    CudaBuffer<float>       instanceNormalMat;
 #endif
 
     uint32_t totalVertices  = 0;
@@ -324,13 +331,16 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
         if (optixCtx) {
             CUstream stream = static_cast<CUstream>(ctx.cuStream());
 
+            m_impl->perMeshGasBufs.resize(1);
+            m_impl->perMeshGasHandles.resize(1, 0);
             if (!buildTriangleGAS(optixCtx, stream,
                                   static_cast<CUdeviceptr>(m_impl->posBuffer.devPtr()),
                                   static_cast<CUdeviceptr>(m_impl->posBufferClose.devPtr()),
                                   false, 3,
                                   static_cast<CUdeviceptr>(m_impl->indices.devPtr()),
                                   1,
-                                  m_impl->meshAsBuffer, m_impl->meshGasHandle)) {
+                                  m_impl->perMeshGasBufs[0],
+                                  m_impl->perMeshGasHandles[0])) {
                 fprintf(stderr, "[error] CudaAccelStructure: dummy GAS build failed\n");
                 return;
             }
@@ -341,7 +351,7 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
             inst.sbtOffset         = 0;
             inst.visibilityMask    = 0xFF;
             inst.flags             = OPTIX_INSTANCE_FLAG_NONE;
-            inst.traversableHandle = m_impl->meshGasHandle;
+            inst.traversableHandle = m_impl->perMeshGasHandles[0];
 
             m_impl->iasInstanceBuf = CudaByteBuffer(sizeof(OptixInstance));
             m_impl->iasInstanceBuf.upload(
@@ -371,6 +381,14 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
                 iasSizes.outputSizeInBytes,
                 &m_impl->iasHandle, nullptr, 0));
             CUDA_CHECK(cudaStreamSynchronize(stream));
+
+            // Single IAS instance → mesh ID 0, identity normal matrix
+            m_impl->instanceMeshIDs = CudaBuffer<uint32_t>(1);
+            std::vector<uint32_t> miOne{0u};
+            m_impl->instanceMeshIDs.upload(miOne);
+            m_impl->instanceNormalMat = CudaBuffer<float>(12);
+            std::vector<float> nmIdent{1,0,0,0,  0,1,0,0,  0,0,1,0};
+            m_impl->instanceNormalMat.upload(nmIdent);
 
             printf("[info]  CudaAccelStructure: dummy GAS+IAS built for particles-only scene\n");
         }
@@ -485,22 +503,45 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
         CUstream stream = static_cast<CUstream>(ctx.cuStream());
 
         // -------------------------------------------------------------------
-        // 1) Triangle (mesh) GAS — one GAS over all scene triangles.
-        // Per-mesh material dispatch happens via triMeshIDs in the shader.
+        // 1) Build one triangle GAS per pool mesh — mirrors Metal's
+        // per-mesh BLAS layout (MetalAccelStructure.mm "Build one BLAS per
+        // mesh").  Each GAS slices into the concatenated index buffer at
+        // meshIndexOffsets[mi]; indices are globalized (already include
+        // vBase) so they reference the shared concat position buffer
+        // correctly.  Prototype meshes for InstanceGroupDesc are built the
+        // same way — they live in object space and are referenced by IAS
+        // instances with per-instance objectToWorld transforms.
         // -------------------------------------------------------------------
-        buildTriangleGAS(optixCtx, stream,
-                          static_cast<CUdeviceptr>(m_impl->posBuffer.devPtr()),
-                          static_cast<CUdeviceptr>(m_impl->posBufferClose.devPtr()),
-                          m_impl->hasMotion,
-                          totalVerts,
-                          static_cast<CUdeviceptr>(m_impl->indices.devPtr()),
-                          totalTris,
-                          m_impl->meshAsBuffer, m_impl->meshGasHandle);
+        m_impl->perMeshGasBufs.resize(numMeshes);
+        m_impl->perMeshGasHandles.resize(numMeshes, 0);
+        size_t totalMeshGasBytes = 0;
+        bool   gasOk = true;
+        for (uint32_t mi = 0; mi < numMeshes; ++mi) {
+            const MeshDesc& mesh = pool.mesh(mi);
+            const bool motion    = mesh.hasMotion();
+            CUdeviceptr vbOpen   = static_cast<CUdeviceptr>(m_impl->posBuffer.devPtr());
+            CUdeviceptr vbClose  = static_cast<CUdeviceptr>(m_impl->posBufferClose.devPtr());
+            CUdeviceptr ibSlice  = static_cast<CUdeviceptr>(m_impl->indices.devPtr())
+                                 + static_cast<CUdeviceptr>(indexOffsets[mi]) * sizeof(uint32_t);
+            if (!buildTriangleGAS(optixCtx, stream,
+                                   vbOpen, vbClose, motion,
+                                   totalVerts,
+                                   ibSlice, mesh.numTriangles(),
+                                   m_impl->perMeshGasBufs[mi],
+                                   m_impl->perMeshGasHandles[mi])) {
+                fprintf(stderr, "[error] CudaAccelStructure: per-mesh GAS build failed for mesh %u\n", mi);
+                gasOk = false;
+                break;
+            }
+            totalMeshGasBytes += m_impl->perMeshGasBufs[mi].byteSize();
+        }
+        if (!gasOk) return;
 
-        printf("[info]  CudaAccelStructure: mesh GAS (%s, %u verts, %u tris, %.2f KiB)\n",
-               m_impl->hasMotion ? "motion-aware" : "static",
+        printf("[info]  CudaAccelStructure: %u per-mesh GASes (%s, %u verts, %u tris, %.2f MiB total)\n",
+               numMeshes,
+               m_impl->hasMotion ? "motion-aware (some)" : "static",
                totalVerts, totalTris,
-               m_impl->meshAsBuffer.byteSize() / 1024.0);
+               totalMeshGasBytes / (1024.0 * 1024.0));
 
         // -------------------------------------------------------------------
         // 2) Hair GAS — tessellate strands into ribbon quads and build a
@@ -576,7 +617,9 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
                 if (hairOk) {
                     m_impl->numHairTris   = numHairTris;
                     m_impl->hairHasMotion = anyHairMotion;
-                    m_impl->hairMeshBase  = 1;  // IAS instance ID (mesh = 0, hair = 1)
+                    // Virtual hair meshID = numMeshes; the shader's isHair test
+                    // is now `meshID >= hairMeshBase` (mirrors Metal Shade.metal).
+                    m_impl->hairMeshBase  = numMeshes;
                     printf("[info]  CudaAccelStructure: hair GAS (%s, %zu strands, %u tris, %.2f KiB)\n",
                            anyHairMotion ? "motion-aware" : "static",
                            curvePool->numStrands(), numHairTris,
@@ -598,30 +641,122 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
         }
 
         // -------------------------------------------------------------------
-        // 3) Build an IAS over the (one or two) GASes.  Always wrap the mesh
-        // GAS in an IAS so the rest of the pipeline gets a uniform traversable.
+        // 3) Build the IAS — mirrors MetalAccelStructure.mm TLAS construction.
+        //
+        // Prototype meshes (those referenced by an InstanceGroupDesc) do NOT
+        // get a regular-mesh IAS entry; they appear only through per-instance
+        // entries with actual objectToWorld transforms.  Other meshes get
+        // identity transforms (geometry already in world space).
+        //
+        // IAS layout (order):
+        //   [0 .. numRegularInst-1]    regular (non-prototype) meshes
+        //   [numRegularInst]           hair (optional)
+        //   [numRegularInst+1 .. N]    per-instance-group instance entries
         // -------------------------------------------------------------------
-        const uint32_t numInstances = (m_impl->hairMeshBase != 0xFFFFFFFFu) ? 2u : 1u;
+        uint32_t numRegularInst = 0;
+        for (uint32_t mi = 0; mi < numMeshes; ++mi)
+            if (!pool.isPrototype(mi)) ++numRegularInst;
 
-        const bool iasMotion = m_impl->hasMotion || m_impl->hairHasMotion;
-        std::vector<OptixInstance> insts(numInstances);
-        memset(insts.data(), 0, numInstances * sizeof(OptixInstance));
-        auto fillInstance = [&](OptixInstance& inst, uint32_t id,
-                                 OptixTraversableHandle child) {
-            inst.transform[0]  = 1.f; inst.transform[1] = 0.f; inst.transform[2]  = 0.f; inst.transform[3]  = 0.f;
-            inst.transform[4]  = 0.f; inst.transform[5] = 1.f; inst.transform[6]  = 0.f; inst.transform[7]  = 0.f;
-            inst.transform[8]  = 0.f; inst.transform[9] = 0.f; inst.transform[10] = 1.f; inst.transform[11] = 0.f;
-            inst.instanceId    = id;
-            inst.sbtOffset     = 0;
-            inst.visibilityMask = 0xFF;
-            inst.flags         = OPTIX_INSTANCE_FLAG_NONE;
-            inst.traversableHandle = child;
+        uint32_t numInstGroupInst = 0;
+        for (uint32_t g = 0; g < static_cast<uint32_t>(pool.numInstanceGroups()); ++g)
+            numInstGroupInst += static_cast<uint32_t>(pool.instanceGroup(g).instances.size());
+
+        const bool     hasHair       = (m_impl->hairGasHandle != 0);
+        const uint32_t totalInstances = numRegularInst + (hasHair ? 1u : 0u) + numInstGroupInst;
+        const bool     iasMotion     = m_impl->hasMotion || m_impl->hairHasMotion;
+
+        std::vector<OptixInstance> insts(totalInstances);
+        memset(insts.data(), 0, totalInstances * sizeof(OptixInstance));
+        std::vector<uint32_t> instMeshIDs(totalInstances);
+        std::vector<float>    instNM(totalInstances * 12, 0.f);
+
+        auto setIdentityXform = [](OptixInstance& inst) {
+            inst.transform[0] = 1.f; inst.transform[1] = 0.f; inst.transform[2]  = 0.f; inst.transform[3]  = 0.f;
+            inst.transform[4] = 0.f; inst.transform[5] = 1.f; inst.transform[6]  = 0.f; inst.transform[7]  = 0.f;
+            inst.transform[8] = 0.f; inst.transform[9] = 0.f; inst.transform[10] = 1.f; inst.transform[11] = 0.f;
         };
-        fillInstance(insts[0], 0, m_impl->meshGasHandle);
-        if (numInstances == 2)
-            fillInstance(insts[1], 1, m_impl->hairGasHandle);
+        // OptixInstance::transform is row-major 3x4 = first 3 rows of o2w.
+        auto setXformFromO2W = [](OptixInstance& inst, const Mat4f& o2w) {
+            inst.transform[0]  = o2w.m[0][0]; inst.transform[1]  = o2w.m[0][1];
+            inst.transform[2]  = o2w.m[0][2]; inst.transform[3]  = o2w.m[0][3];
+            inst.transform[4]  = o2w.m[1][0]; inst.transform[5]  = o2w.m[1][1];
+            inst.transform[6]  = o2w.m[1][2]; inst.transform[7]  = o2w.m[1][3];
+            inst.transform[8]  = o2w.m[2][0]; inst.transform[9]  = o2w.m[2][1];
+            inst.transform[10] = o2w.m[2][2]; inst.transform[11] = o2w.m[2][3];
+        };
+        auto setIdentityNM = [&](uint32_t i) {
+            float* m = &instNM[i * 12];
+            m[0]=1.f; m[1]=0.f; m[2] =0.f; m[3] =0.f;
+            m[4]=0.f; m[5]=1.f; m[6] =0.f; m[7] =0.f;
+            m[8]=0.f; m[9]=0.f; m[10]=1.f; m[11]=0.f;
+        };
+        // Store rows of worldToObject^T = columns of worldToObject.
+        // Shader computes geomN_world = normalize({dot(n,row0), dot(n,row1), dot(n,row2)}).
+        auto setNMFromW2O = [&](uint32_t i, const Mat4f& w2o) {
+            float* m = &instNM[i * 12];
+            m[0]  = w2o.m[0][0]; m[1]  = w2o.m[1][0]; m[2]  = w2o.m[2][0]; m[3]  = 0.f;
+            m[4]  = w2o.m[0][1]; m[5]  = w2o.m[1][1]; m[6]  = w2o.m[2][1]; m[7]  = 0.f;
+            m[8]  = w2o.m[0][2]; m[9]  = w2o.m[1][2]; m[10] = w2o.m[2][2]; m[11] = 0.f;
+        };
 
-        const size_t instBytes = numInstances * sizeof(OptixInstance);
+        uint32_t tlasIdx = 0;
+
+        // Regular (non-prototype) meshes — identity transform, geometry world-space
+        for (uint32_t mi = 0; mi < numMeshes; ++mi) {
+            if (pool.isPrototype(mi)) continue;
+            OptixInstance& inst = insts[tlasIdx];
+            setIdentityXform(inst);
+            inst.instanceId        = tlasIdx;
+            inst.sbtOffset         = 0;
+            inst.visibilityMask    = 0xFF;
+            inst.flags             = OPTIX_INSTANCE_FLAG_NONE;
+            inst.traversableHandle = m_impl->perMeshGasHandles[mi];
+            instMeshIDs[tlasIdx]   = mi;
+            setIdentityNM(tlasIdx);
+            ++tlasIdx;
+        }
+
+        // Hair (if present) — virtual meshID = numMeshes
+        if (hasHair) {
+            OptixInstance& inst = insts[tlasIdx];
+            setIdentityXform(inst);
+            inst.instanceId        = tlasIdx;
+            inst.sbtOffset         = 0;
+            inst.visibilityMask    = 0xFF;
+            inst.flags             = OPTIX_INSTANCE_FLAG_NONE;
+            inst.traversableHandle = m_impl->hairGasHandle;
+            instMeshIDs[tlasIdx]   = numMeshes;  // virtual hair ID
+            setIdentityNM(tlasIdx);
+            ++tlasIdx;
+        }
+
+        // Per-instance-group instances — actual o2w transforms, prototype GAS
+        for (uint32_t g = 0; g < static_cast<uint32_t>(pool.numInstanceGroups()); ++g) {
+            const InstanceGroupDesc& grp = pool.instanceGroup(g);
+            for (const InstanceDesc& instDesc : grp.instances) {
+                const Mat4f& o2w = instDesc.keys[0].objectToWorld;
+                const Mat4f& w2o = instDesc.keys[0].worldToObject;
+                OptixInstance& inst = insts[tlasIdx];
+                setXformFromO2W(inst, o2w);
+                inst.instanceId        = tlasIdx;
+                inst.sbtOffset         = 0;
+                inst.visibilityMask    = 0xFF;
+                inst.flags             = OPTIX_INSTANCE_FLAG_NONE;
+                inst.traversableHandle = m_impl->perMeshGasHandles[grp.protoMeshID];
+                instMeshIDs[tlasIdx]   = grp.protoMeshID;
+                setNMFromW2O(tlasIdx, w2o);
+                ++tlasIdx;
+            }
+        }
+
+        // Upload per-instance lookup buffers
+        m_impl->instanceMeshIDs = CudaBuffer<uint32_t>(totalInstances);
+        m_impl->instanceMeshIDs.upload(instMeshIDs);
+        m_impl->instanceNormalMat = CudaBuffer<float>(totalInstances * 12);
+        m_impl->instanceNormalMat.upload(instNM);
+
+        // Upload IAS instance descriptors and build
+        const size_t instBytes = totalInstances * sizeof(OptixInstance);
         m_impl->iasInstanceBuf = CudaByteBuffer(instBytes);
         m_impl->iasInstanceBuf.upload(
             reinterpret_cast<const uint8_t*>(insts.data()), instBytes);
@@ -630,7 +765,7 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
         iasInput.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
         iasInput.instanceArray.instances    =
             static_cast<CUdeviceptr>(m_impl->iasInstanceBuf.devPtr());
-        iasInput.instanceArray.numInstances = numInstances;
+        iasInput.instanceArray.numInstances = totalInstances;
 
         OptixAccelBuildOptions iasOpts{};
         iasOpts.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
@@ -658,9 +793,10 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
             &m_impl->iasHandle, nullptr, 0));
         CUDA_CHECK(cudaStreamSynchronize(stream));
 
-        printf("[info]  CudaAccelStructure: IAS built (%u instance%s, %.2f KiB)\n",
-               numInstances, numInstances == 1 ? "" : "s",
-               m_impl->iasBuffer.byteSize() / 1024.0);
+        printf("[info]  CudaAccelStructure: IAS built (%u instances = %u regular + %u hair + %u inst-group, "
+               "%u prototype meshes, %.2f KiB)\n",
+               totalInstances, numRegularInst, hasHair ? 1u : 0u, numInstGroupInst,
+               numMeshes - numRegularInst, m_impl->iasBuffer.byteSize() / 1024.0);
     }
 #endif
 
@@ -687,6 +823,20 @@ uint64_t CudaAccelStructure::meshIndexOffsetBuffer()  const { return m_impl->mes
 bool     CudaAccelStructure::hasMotion()              const { return m_impl->hasMotion || m_impl->hairHasMotion; }
 uint64_t CudaAccelStructure::hairTriBuffer()          const { return m_impl->hairTriBuf.isValid() ? m_impl->hairTriBuf.devPtr() : 0u; }
 uint32_t CudaAccelStructure::hairMeshBaseID()         const { return m_impl->hairMeshBase; }
+uint64_t CudaAccelStructure::instanceMeshIDBuffer()   const {
+#ifdef ANACAPA_ENABLE_OPTIX
+    return m_impl->instanceMeshIDs.isValid() ? m_impl->instanceMeshIDs.devPtr() : 0u;
+#else
+    return 0u;
+#endif
+}
+uint64_t CudaAccelStructure::instanceNormalMatrixBuffer() const {
+#ifdef ANACAPA_ENABLE_OPTIX
+    return m_impl->instanceNormalMat.isValid() ? m_impl->instanceNormalMat.devPtr() : 0u;
+#else
+    return 0u;
+#endif
+}
 uint64_t CudaAccelStructure::traversableHandle()      const {
 #ifdef ANACAPA_ENABLE_OPTIX
     return static_cast<uint64_t>(m_impl->iasHandle);

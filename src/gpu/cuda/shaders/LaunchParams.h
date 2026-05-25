@@ -17,9 +17,17 @@ struct LaunchParams {
     uint32_t                 numMaterials;
     const GpuFloat3*         normals;         // device ptr — all meshes concatenated
     const uint32_t*          indices;         // device ptr — globalized triangle indices
-    const uint32_t*          triMeshIDs;      // device ptr — per-triangle meshID
+    const uint32_t*          triMeshIDs;      // device ptr — per-triangle meshID (legacy; unused after per-mesh GAS refactor)
     const uint32_t*          meshVertexOffsets; // device ptr — per-mesh vertex base
     const uint32_t*          meshIndexOffsets;  // device ptr — per-mesh index base (elements)
+
+    // Per-IAS-instance lookup (mirrors MetalAccelStructure).
+    // instanceMeshIDs[optixGetInstanceId()] → pool meshID (or virtual hairID).
+    // instanceNormalMat: 12 floats per instance = rows of worldToObject^T.
+    //   Identity for regular world-space meshes; actual w2o^T for prototype
+    //   instances so geomN_world = normalize({dot(n_obj,row0),row1,row2}).
+    const uint32_t*          instanceMeshIDs;
+    const float*             instanceNormalMat;
     GpuSampleBatch           sampleBatch;
     cudaTextureObject_t      envTexture;      // 0 = no texture (use envLe fallback)
 
