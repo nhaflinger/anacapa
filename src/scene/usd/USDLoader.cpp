@@ -1178,7 +1178,7 @@ static std::vector<MotionKey> collectMotionKeys(
     // Log only the shutter-open (t=0) and shutter-close (t=1) keys
     for (const MotionKey& k : keys) {
         if (k.time < 0.001f || (k.time > 0.999f && k.time < 1.001f)) {
-            spdlog::info("USDLoader:   key t={:.3f} translate=({:.3f},{:.3f},{:.3f}) "
+            spdlog::debug("USDLoader:   key t={:.3f} translate=({:.3f},{:.3f},{:.3f}) "
                          "scale=({:.3f},{:.3f},{:.3f})",
                          k.time,
                          k.objectToWorld.m[0][3], k.objectToWorld.m[1][3], k.objectToWorld.m[2][3],
@@ -1786,7 +1786,7 @@ LoadedScene loadUSD(const std::string& path,
                     if (fi >= 0 && fi < (int)faceCoveredBySubset.size())
                         faceCoveredBySubset[fi] = 1;
 
-                spdlog::info("USDLoader: GeomSubset '{}' → meshID={} matIdx={} ({} faces)",
+                spdlog::debug("USDLoader: GeomSubset '{}' → meshID={} matIdx={} ({} faces)",
                              subset.GetPrim().GetPath().GetString(),
                              subMeshID, subMatIdx, subFaceIndices.size());
             }
@@ -2022,6 +2022,7 @@ LoadedScene loadUSD(const std::string& path,
                     GfMatrix4d identityXfm(1.0);  // GfMatrix4d(double s) sets diagonal=s, off-diag=0
                     uint32_t protoMeshID = loadMesh(pm.usdMesh, identityXfm, {}, result.geomPool, zUp);
                     if (protoMeshID == ~0u) continue;
+                    result.geomPool.markPrototype(protoMeshID);
 
                     if (protoMeshID >= result.sceneView.materials.size())
                         result.sceneView.materials.resize(protoMeshID + 1, nullptr);
@@ -2062,7 +2063,7 @@ LoadedScene loadUSD(const std::string& path,
             }
 
             if (groupsAdded > 0) {
-                spdlog::info(
+                spdlog::debug(
                     "USDLoader: instancer '{}' → {} instance group(s), {} instances",
                     prim.GetPath().GetString(), groupsAdded, instanceXforms.size());
             } else {

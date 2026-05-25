@@ -395,7 +395,6 @@ def export_scene_binary(filepath: str, context,
     # -------------------------------------------------------------------------
     seen_non_instance = set()
     mesh_count = 0
-    _inst_total = 0
     # Geometry cache: for GN instances all copies of the same prototype share
     # identical vertex/loop data.  Pack it once to bytes; subsequent instances
     # skip to_mesh() entirely and write the cached blob directly.
@@ -420,10 +419,6 @@ def export_scene_binary(filepath: str, context,
                             # num_inst_groups at offset 20 (in _pad[0]) also 0
 
         for inst in depsgraph.object_instances:
-            _inst_total += 1
-            if _inst_total % 10000 == 0:
-                print(f"[anacapa] export: {_inst_total} instances processed, "
-                      f"{mesh_count} meshes written...")
 
             obj  = inst.object
             orig = obj.original
@@ -614,13 +609,6 @@ def export_scene_binary(filepath: str, context,
                     mat_key = tuple(mat_names)
                     grp_key = (orig.name, mat_key)
                     if grp_key not in _inst_groups:
-                        _mt  = raw_matrix.translation
-                        _owt = orig.matrix_world.translation
-                        print(f"[anacapa] proto '{orig.name}' nv={nv}"
-                              f"  v[0]=({_pos[0]:.3f},{_pos[1]:.3f},{_pos[2]:.3f})"
-                              f"  inst_t=({_mt.x:.3f},{_mt.y:.3f},{_mt.z:.3f})"
-                              f"  orig_mw_t=({_owt.x:.3f},{_owt.y:.3f},{_owt.z:.3f})")
-                        import sys; sys.stdout.flush()
                         _inst_groups[grp_key] = {
                             'proto_name':  orig.name,
                             'nv': nv, 'nl': nl, 'np_': np_, 'nuv': nuv,

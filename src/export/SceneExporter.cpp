@@ -638,7 +638,7 @@ bool exportSceneToUsd(const std::string& blobPath, const std::string& usdPath) {
                 }
             }
 
-            spdlog::info("SceneExporter: instance group '{}' → {} instances", protoName, ni);
+            spdlog::debug("SceneExporter: instance group '{}' → {} instances", protoName, ni);
         }
     }
 

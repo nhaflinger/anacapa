@@ -60,7 +60,9 @@
       "Bash(git -C /Users/douglascreel/dev/anacapa add src/accel/BVHBackend.cpp src/accel/BVHBackend.h include/anacapa/accel/GeometryPool.h src/export/SceneExporter.cpp src/export/SceneFormat.h src/film/Film.cpp src/integrator/PathIntegrator.cpp src/render/RenderSession.cpp src/scene/usd/USDLoader.cpp tools/anacapa_renderer/anacapa_scene_export.py tools/anacapa_renderer/engine.py tools/anacapa_renderer/export.py)",
       "Bash(git -C /Users/douglascreel/dev/anacapa commit -m ' *)",
       "Bash(usdcat /Users/douglascreel/Documents/Blender/cupcakes_scene.usdc)",
-      "Bash(grep -E \"error:|warning:|Building|Linking|Built target anacapa$\")"
+      "Bash(grep -E \"error:|warning:|Building|Linking|Built target anacapa$\")",
+      "Bash(cmake --build /Users/douglascreel/dev/anacapa/build/Darwin --target anacapa_blender -j8)",
+      "Bash(cmake --build /Users/douglascreel/dev/anacapa/build/Darwin --target anacapa anacapa_blender -j8)"
     ],
     "additionalDirectories": [
       "/private/var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/anacapa_15_mrhw8"

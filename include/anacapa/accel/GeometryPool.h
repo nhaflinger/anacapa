@@ -3,6 +3,7 @@
 #include <anacapa/core/Types.h>
 #include <cstdint>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace anacapa {
@@ -158,9 +159,15 @@ public:
 
     const std::vector<InstanceGroupDesc>& instanceGroups() const { return m_instanceGroups; }
 
+    // Mark a mesh as a prototype (object-space, referenced via instance groups).
+    // Prototype meshes must NOT be placed directly in any BVH/TLAS as world-space geometry.
+    void markPrototype(uint32_t meshID) { m_prototypeMeshIDs.insert(meshID); }
+    bool isPrototype(uint32_t meshID)  const { return m_prototypeMeshIDs.count(meshID) > 0; }
+
 private:
     std::vector<MeshDesc>          m_meshes;
     std::vector<InstanceGroupDesc> m_instanceGroups;
+    std::unordered_set<uint32_t>   m_prototypeMeshIDs;
 };
 
 } // namespace anacapa

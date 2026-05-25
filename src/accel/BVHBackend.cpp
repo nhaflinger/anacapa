@@ -31,6 +31,7 @@ void BVHBackend::commit() {
     m_primIndices.clear();
 
     for (uint32_t meshIdx = 0; meshIdx < m_pool.numMeshes(); ++meshIdx) {
+        if (m_pool.isPrototype(meshIdx)) continue;  // object-space; instanced via BLAS/TLAS
         const MeshDesc& mesh = m_pool.mesh(meshIdx);
         const Mat4f xfm = Mat4f::identity();
 
@@ -628,7 +629,7 @@ void BVHBackend::buildBLAS(uint32_t groupID) {
     buildNodes.reserve(2 * numTris);
     buildRecursive(primInfo, 0, numTris, buildNodes, blas.primIndices, state);
     repackBuildTree(buildNodes, blas.nodes);
-    spdlog::info("BVHBackend: BLAS[{}] built — {} tris, {} BVH4 nodes, {} instances",
+    spdlog::debug("BVHBackend: BLAS[{}] built — {} tris, {} BVH4 nodes, {} instances",
                  groupID, numTris, blas.nodes.size(),
                  m_pool.instanceGroup(groupID).instances.size());
 }
@@ -703,7 +704,7 @@ void BVHBackend::buildTLAS() {
     buildRecursive(primInfo, 0, totalInstances, buildNodes, m_tlasPrimIndices, state, kTLASMaxLeafPrims);
     repackBuildTree(buildNodes, m_tlasNodes);
 
-    spdlog::info("BVHBackend: TLAS built — {} instance groups, {} instances total",
+    spdlog::debug("BVHBackend: TLAS built — {} instance groups, {} instances total",
                  m_pool.numInstanceGroups(), totalInstances);
 }
 

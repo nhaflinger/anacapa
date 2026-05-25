@@ -605,13 +605,9 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
     //   [numRegularInst]                 hair (optional)
     //   [numRegularInst+1 .. N]          per-instance-group instance entries
     // -----------------------------------------------------------------------
-    std::unordered_set<uint32_t> protoMeshSet;
-    for (uint32_t g = 0; g < static_cast<uint32_t>(pool.numInstanceGroups()); ++g)
-        protoMeshSet.insert(pool.instanceGroup(g).protoMeshID);
-
     uint32_t numRegularInst = 0;
     for (uint32_t mi = 0; mi < numMeshes; ++mi)
-        if (!protoMeshSet.count(mi)) ++numRegularInst;
+        if (!pool.isPrototype(mi)) ++numRegularInst;
 
     uint32_t numInstGroupInst = 0;
     for (uint32_t g = 0; g < static_cast<uint32_t>(pool.numInstanceGroups()); ++g)
@@ -670,7 +666,7 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
 
     // Regular (non-prototype) mesh instances — identity transform, geometry world-space
     for (uint32_t mi = 0; mi < numMeshes; ++mi) {
-        if (protoMeshSet.count(mi)) continue;
+        if (pool.isPrototype(mi)) continue;
         instDescs[tlasIdx]      = makeIdentityInstance(mi);
         instanceMeshIDs[tlasIdx] = mi;
         setIdentityNM(tlasIdx);
@@ -734,7 +730,7 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
     spdlog::info("MetalAccelStructure: built {} BLAS + TLAS ({} verts, {} tris, {} hair tris, "
                  "{} regular inst, {} instance-group inst, {} proto meshes skipped)",
                  [m_impl->blasArray count], totalVerts, totalTris, numHairTris,
-                 numRegularInst, numInstGroupInst, (uint32_t)protoMeshSet.size());
+                 numRegularInst, numInstGroupInst, numMeshes - numRegularInst);
 }
 
 MetalAccelStructure::~MetalAccelStructure() = default;
