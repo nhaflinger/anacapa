@@ -60,6 +60,13 @@ public:
     // Concatenated index buffer (all meshes)
     void* indexBuffer() const;  // id<MTLBuffer> — uint32_t
 
+    // Per-TLAS-instance lookup buffers (size = total TLAS instance count).
+    // instanceMeshIDBuffer: uint32_t — TLAS instance → pool mesh ID for vertex/index/material lookup
+    // instanceNormalMatrixBuffer: float4[3] per instance = rows of worldToObject^T for normal transform
+    //   Identity for regular world-space meshes; actual transform for prototype mesh instances.
+    void* instanceMeshIDBuffer()         const;  // id<MTLBuffer> — uint32_t
+    void* instanceNormalMatrixBuffer()   const;  // id<MTLBuffer> — float4[3] per instance
+
     uint32_t totalVertices()  const;
     uint32_t totalTriangles() const;
     uint32_t numMeshes()      const;

@@ -552,6 +552,7 @@ static float3 shadowTransmittance(
     const device PackedFloat3*      normals,
     const device uint32_t*          indices,
     const device uint32_t*          meshIndexOffsets,
+    const device uint32_t*          instanceMeshIDs,
     bool                            blockGlass,
     acceleration_structure<instancing, primitive_motion> accelStruct)
 {
@@ -571,7 +572,7 @@ static float3 shadowTransmittance(
 
         if (res.type == intersection_type::none) break;  // clear path
 
-        uint meshID = res.instance_id;
+        uint meshID = instanceMeshIDs[res.instance_id];
         uint matIdx = (meshID < numMaterials) ? meshID : 0;
         GpuMaterial mat = materials[matIdx];
 
@@ -622,6 +623,7 @@ static float3 sampleDirectHair(
     const device PackedFloat3* normals,
     const device uint32_t*     indices,
     const device uint32_t*     meshIndexOffsets,
+    const device uint32_t*     instanceMeshIDs,
     thread uint& rng,
     acceleration_structure<instancing, primitive_motion> accelStruct,
     constant GpuCameraParams& cam,
@@ -690,6 +692,7 @@ static float3 sampleDirectHair(
     float3 Tr = shadowTransmittance(shadowO, wi, tMax, rayTime,
                                     materials, numMaterials,
                                     normals, indices, meshIndexOffsets,
+                                    instanceMeshIDs,
                                     cam.photonMapEnabled != 0,
                                     accelStruct);
     if (max(Tr.x, max(Tr.y, Tr.z)) <= 0.f) return float3(0);
@@ -735,6 +738,7 @@ static float3 sampleDirect(
     const device PackedFloat3*      normals,
     const device uint32_t*          indices,
     const device uint32_t*          meshIndexOffsets,
+    const device uint32_t*          instanceMeshIDs,
     thread uint&                    rng,
     acceleration_structure<instancing, primitive_motion> accelStruct,
     constant GpuCameraParams&       cam,
@@ -824,6 +828,7 @@ static float3 sampleDirect(
     float3 Tr = shadowTransmittance(shadowOrigin, wi, tMax, rayTime,
                                     materials, numMaterials,
                                     normals, indices, meshIndexOffsets,
+                                    instanceMeshIDs,
                                     cam.photonMapEnabled != 0,
                                     accelStruct);
     if (max(Tr.x, max(Tr.y, Tr.z)) <= 0.0f) return float3(0);
@@ -1132,7 +1137,7 @@ kernel void shade(
     constant  uint&                         numMaterials      [[ buffer(5)  ]],
     const device PackedFloat3*              normals           [[ buffer(6)  ]],
     const device uint32_t*                  indices           [[ buffer(7)  ]],
-    const device uint32_t*                  triMeshIDs        [[ buffer(8)  ]],
+    const device uint32_t*                  instanceMeshIDs   [[ buffer(8)  ]],
     const device uint32_t*                  meshVertexOffsets [[ buffer(9)  ]],
     const device uint32_t*                  meshIndexOffsets  [[ buffer(10) ]],
     constant  GpuSampleBatch&               batch             [[ buffer(11) ]],
@@ -1154,6 +1159,7 @@ kernel void shade(
     const device GpuHaloDesc*              halos             [[ buffer(27) ]],
     const device GpuHaloNode*              haloNodes         [[ buffer(28) ]],
     const device uint32_t*                 haloPrimIdx       [[ buffer(29) ]],
+    const device float4*                   instanceNormalMat [[ buffer(30) ]],
     texture2d<float, access::sample>        envTexture        [[ texture(0) ]],
     uint2                                   gid               [[ thread_position_in_grid ]])
 {
@@ -1347,10 +1353,10 @@ kernel void shade(
 
         float3 hitPos = r.origin + r.direction * t;
 
-        // Global triangle index: primID is local within the BLAS instance (mesh)
-        // We need the global triangle index for triMeshIDs lookup.
-        // Since each mesh is one BLAS, instID == meshID.
-        uint meshID = instID;
+        // Look up pool mesh ID for this TLAS instance.
+        // For regular meshes: instanceMeshIDs[instID] == instID (identity mapping).
+        // For prototype mesh instances: instanceMeshIDs[instID] == protoMeshID.
+        uint meshID = instanceMeshIDs[instID];
 
         // ============================================================
         // Hair hit — checked before the standard material table lookup.
@@ -1390,7 +1396,7 @@ kernel void shade(
                     hairMats[ht.matIdx].eta, hp.v, hp.s, hp.alphaR,
                     ribbonN, rayTime,
                     lights, numLights, materials, numMaterials,
-                    normals, indices, meshIndexOffsets,
+                    normals, indices, meshIndexOffsets, instanceMeshIDs,
                     rng, accelStruct, cam, envTexture,
                     envMarginalCdf, envConditionalCdf);
             }
@@ -1490,6 +1496,17 @@ kernel void shade(
 
         float3 geomN = interpolateNormal(primID, bary, normals, indices, idxOff);
 
+        // Apply per-instance normal transform (worldToObject^T * n_object).
+        // For regular world-space meshes the matrix is identity — no-op.
+        // For prototype mesh instances it rotates object-space normals to world space.
+        {
+            uint   nmBase = instID * 3;
+            float3 row0   = instanceNormalMat[nmBase + 0].xyz;
+            float3 row1   = instanceNormalMat[nmBase + 1].xyz;
+            float3 row2   = instanceNormalMat[nmBase + 2].xyz;
+            geomN = normalize(float3(dot(geomN, row0), dot(geomN, row1), dot(geomN, row2)));
+        }
+
         // geomN is the unflipped mesh normal — used by glass to detect entry vs exit.
         // n is flipped to always face the incoming ray for diffuse/specular shading.
         float3 n = geomN;
@@ -1533,6 +1550,7 @@ kernel void shade(
                                           lights, numLights,
                                           materials, numMaterials,
                                           normals, indices, meshIndexOffsets,
+                                          instanceMeshIDs,
                                           rng, accelStruct, cam, envTexture,
                                           envMarginalCdf, envConditionalCdf,
                                           specAlbedoLUT, specAvgAlbedoLUT);
@@ -1795,6 +1813,8 @@ kernel void photonTrace(
     constant GpuPhotonParams&   params           [[ buffer(8) ]],
     acceleration_structure<instancing, primitive_motion> accelStruct [[ buffer(9) ]],
     device GpuPhoton*           sssPhotons       [[ buffer(10) ]],
+    const device uint32_t*      instanceMeshIDs  [[ buffer(11) ]],
+    const device float4*        instanceNormalMat[[ buffer(12) ]],
     uint gid [[ thread_position_in_grid ]])
 {
     if (gid >= params.numPhotons) return;
@@ -1863,13 +1883,21 @@ kernel void photonTrace(
 
         if (res.type == intersection_type::none) break;
 
-        uint  meshID  = res.instance_id;
+        uint  meshID  = instanceMeshIDs[res.instance_id];
         uint  matIdx  = (meshID < numMaterials) ? meshID : 0;
         GpuMaterial mat = materials[matIdx];
 
         float2 bary   = res.triangle_barycentric_coord;
         uint   idxOff = meshIndexOffsets[meshID];
         float3 n      = interpolateNormal(res.primitive_id, bary, normals, indices, idxOff);
+        // Apply per-instance normal transform (identity for world-space meshes)
+        {
+            uint   nmBase = res.instance_id * 3;
+            float3 row0   = instanceNormalMat[nmBase + 0].xyz;
+            float3 row1   = instanceNormalMat[nmBase + 1].xyz;
+            float3 row2   = instanceNormalMat[nmBase + 2].xyz;
+            n = normalize(float3(dot(n, row0), dot(n, row1), dot(n, row2)));
+        }
         float3 hitPos = r.origin + r.direction * res.distance;
 
         if (mat.type == kMatEmissive) break;  // hit emitter — stop

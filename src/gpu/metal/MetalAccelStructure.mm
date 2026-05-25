@@ -13,6 +13,7 @@
 #include <vector>
 #include <cmath>
 #include <cstring>
+#include <unordered_set>
 
 namespace anacapa {
 
@@ -32,6 +33,14 @@ struct MetalAccelStructure::Impl {
     id<MTLBuffer> triMeshIDBuffer         = nil;  // uint32_t per tri
     id<MTLBuffer> meshVertexOffsetBuffer  = nil;  // uint32_t per mesh
     id<MTLBuffer> meshIndexOffsetBuffer   = nil;  // uint32_t per mesh
+
+    // Per-TLAS-instance lookup buffers (size = totalInstances).
+    // instanceMeshIDBuffer: TLAS instance index → pool mesh ID (for vertex/index/material lookup)
+    // instanceNormalMatrixBuffer: 3 × float4 rows per instance = worldToObject^T for normal xfm
+    //   For regular meshes: identity (normals already world-space).
+    //   For prototype instances: actual worldToObject^T rows.
+    id<MTLBuffer> instanceMeshIDBuffer        = nil;
+    id<MTLBuffer> instanceNormalMatrixBuffer  = nil;
 
     uint32_t totalVertices  = 0;
     uint32_t totalTriangles = 0;
@@ -584,10 +593,56 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
     }
 
     // -----------------------------------------------------------------------
-    // Build TLAS with identity transforms (geometry is already world-space).
-    // Instance count = numMeshes + (1 if hair BLAS was built, else 0).
+    // Build TLAS.
+    //
+    // Prototype meshes (those referenced by an InstanceGroupDesc) are NOT given
+    // their own TLAS entry — they appear only through per-instance TLAS entries
+    // with the actual objectToWorld transforms.  Regular meshes keep identity
+    // transforms (geometry already baked to world space).
+    //
+    // TLAS layout (order):
+    //   [0 .. numRegularInst-1]          regular meshes (non-prototype)
+    //   [numRegularInst]                 hair (optional)
+    //   [numRegularInst+1 .. N]          per-instance-group instance entries
     // -----------------------------------------------------------------------
-    uint32_t totalInstances = numMeshes + (m_impl->hairMeshBase != 0xFFFFFFFFu ? 1u : 0u);
+    std::unordered_set<uint32_t> protoMeshSet;
+    for (uint32_t g = 0; g < static_cast<uint32_t>(pool.numInstanceGroups()); ++g)
+        protoMeshSet.insert(pool.instanceGroup(g).protoMeshID);
+
+    uint32_t numRegularInst = 0;
+    for (uint32_t mi = 0; mi < numMeshes; ++mi)
+        if (!protoMeshSet.count(mi)) ++numRegularInst;
+
+    uint32_t numInstGroupInst = 0;
+    for (uint32_t g = 0; g < static_cast<uint32_t>(pool.numInstanceGroups()); ++g)
+        numInstGroupInst += static_cast<uint32_t>(pool.instanceGroup(g).instances.size());
+
+    bool hasHair = (m_impl->hairMeshBase != 0xFFFFFFFFu);
+    uint32_t totalInstances = numRegularInst + (hasHair ? 1u : 0u) + numInstGroupInst;
+
+    // Per-TLAS-instance lookup data (CPU-side, uploaded below)
+    // instanceMeshIDs: TLAS instance → pool mesh ID (hair → numMeshes virtual ID)
+    // instanceNormalMatrix: 3 × float4 = rows of worldToObject^T per TLAS instance
+    std::vector<uint32_t>  instanceMeshIDs       (totalInstances);
+    std::vector<float>     instanceNormalMatrices (totalInstances * 12, 0.f);
+
+    auto setIdentityNM = [&](uint32_t tlasIdx) {
+        float* m = &instanceNormalMatrices[tlasIdx * 12];
+        // rows of identity^T = identity
+        m[0] = 1.f; m[1] = 0.f; m[2] = 0.f; m[3] = 0.f;
+        m[4] = 0.f; m[5] = 1.f; m[6] = 0.f; m[7] = 0.f;
+        m[8] = 0.f; m[9] = 0.f; m[10] = 1.f; m[11] = 0.f;
+    };
+
+    auto setNormalMatrix = [&](uint32_t tlasIdx, const Mat4f& w2o) {
+        // Store rows of worldToObject^T = columns of worldToObject.
+        // Row i = { w2o.m[0][i], w2o.m[1][i], w2o.m[2][i] } (col i of w2o)
+        // In shader: result[i] = dot(n_obj, row[i]) = worldToObject^T * n_obj
+        float* m = &instanceNormalMatrices[tlasIdx * 12];
+        m[0]  = w2o.m[0][0]; m[1]  = w2o.m[1][0]; m[2]  = w2o.m[2][0]; m[3]  = 0.f;
+        m[4]  = w2o.m[0][1]; m[5]  = w2o.m[1][1]; m[6]  = w2o.m[2][1]; m[7]  = 0.f;
+        m[8]  = w2o.m[0][2]; m[9]  = w2o.m[1][2]; m[10] = w2o.m[2][2]; m[11] = 0.f;
+    };
 
     size_t instDescSize = sizeof(MTLAccelerationStructureInstanceDescriptor);
     id<MTLBuffer> instBuf = [device newBufferWithLength:instDescSize * totalInstances
@@ -610,11 +665,58 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
         return d;
     };
 
-    for (uint32_t i = 0; i < numMeshes; ++i)
-        instDescs[i] = makeIdentityInstance(i);
+    // Fill TLAS instances
+    uint32_t tlasIdx = 0;
 
-    if (m_impl->hairMeshBase != 0xFFFFFFFFu)
-        instDescs[numMeshes] = makeIdentityInstance(numMeshes);
+    // Regular (non-prototype) mesh instances — identity transform, geometry world-space
+    for (uint32_t mi = 0; mi < numMeshes; ++mi) {
+        if (protoMeshSet.count(mi)) continue;
+        instDescs[tlasIdx]      = makeIdentityInstance(mi);
+        instanceMeshIDs[tlasIdx] = mi;
+        setIdentityNM(tlasIdx);
+        ++tlasIdx;
+    }
+
+    // Hair instance (after all regular meshes so hairMeshBase can be detected by meshID)
+    if (hasHair) {
+        instDescs[tlasIdx]       = makeIdentityInstance(numMeshes);
+        instanceMeshIDs[tlasIdx] = numMeshes;  // virtual hair ID
+        setIdentityNM(tlasIdx);
+        ++tlasIdx;
+    }
+
+    // Per-instance-group instances — actual objectToWorld transforms, prototype BLAS
+    for (uint32_t g = 0; g < static_cast<uint32_t>(pool.numInstanceGroups()); ++g) {
+        const InstanceGroupDesc& grp = pool.instanceGroup(g);
+        for (const InstanceDesc& inst : grp.instances) {
+            const Mat4f& o2w = inst.keys[0].objectToWorld;
+            const Mat4f& w2o = inst.keys[0].worldToObject;
+
+            MTLAccelerationStructureInstanceDescriptor d;
+            memset(&d, 0, sizeof(d));
+            // MTLPackedFloat4x3 stores columns; col j = { m[0][j], m[1][j], m[2][j] }
+            d.transformationMatrix.columns[0] = {o2w.m[0][0], o2w.m[1][0], o2w.m[2][0]};
+            d.transformationMatrix.columns[1] = {o2w.m[0][1], o2w.m[1][1], o2w.m[2][1]};
+            d.transformationMatrix.columns[2] = {o2w.m[0][2], o2w.m[1][2], o2w.m[2][2]};
+            d.transformationMatrix.columns[3] = {o2w.m[0][3], o2w.m[1][3], o2w.m[2][3]};
+            d.options                          = MTLAccelerationStructureInstanceOptionOpaque;
+            d.mask                             = 0xFF;
+            d.intersectionFunctionTableOffset  = 0;
+            d.accelerationStructureIndex       = grp.protoMeshID;
+            instDescs[tlasIdx]       = d;
+            instanceMeshIDs[tlasIdx] = grp.protoMeshID;
+            setNormalMatrix(tlasIdx, w2o);
+            ++tlasIdx;
+        }
+    }
+
+    // Upload lookup buffers
+    m_impl->instanceMeshIDBuffer = makeSharedBuffer(
+        device, instanceMeshIDs.data(),
+        totalInstances * sizeof(uint32_t), "instanceMeshIDs");
+    m_impl->instanceNormalMatrixBuffer = makeSharedBuffer(
+        device, instanceNormalMatrices.data(),
+        totalInstances * 12 * sizeof(float), "instanceNormalMatrix");
 
     MTLInstanceAccelerationStructureDescriptor* tlasDesc =
         [MTLInstanceAccelerationStructureDescriptor descriptor];
@@ -629,8 +731,10 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
     }
 
     m_impl->valid = true;
-    spdlog::info("MetalAccelStructure: built {} BLAS + TLAS ({} verts, {} tris, {} hair tris)",
-                 totalInstances, totalVerts, totalTris, numHairTris);
+    spdlog::info("MetalAccelStructure: built {} BLAS + TLAS ({} verts, {} tris, {} hair tris, "
+                 "{} regular inst, {} instance-group inst, {} proto meshes skipped)",
+                 [m_impl->blasArray count], totalVerts, totalTris, numHairTris,
+                 numRegularInst, numInstGroupInst, (uint32_t)protoMeshSet.size());
 }
 
 MetalAccelStructure::~MetalAccelStructure() = default;
@@ -663,7 +767,9 @@ void* MetalAccelStructure::uvBuffer()              const { return (__bridge void
 void* MetalAccelStructure::triMeshIDBuffer()       const { return (__bridge void*)m_impl->triMeshIDBuffer; }
 void* MetalAccelStructure::meshVertexOffsetBuffer() const { return (__bridge void*)m_impl->meshVertexOffsetBuffer; }
 void* MetalAccelStructure::meshIndexOffsetBuffer()  const { return (__bridge void*)m_impl->meshIndexOffsetBuffer; }
-void* MetalAccelStructure::indexBuffer()            const { return (__bridge void*)m_impl->indexBuffer; }
+void* MetalAccelStructure::indexBuffer()                  const { return (__bridge void*)m_impl->indexBuffer; }
+void* MetalAccelStructure::instanceMeshIDBuffer()         const { return (__bridge void*)m_impl->instanceMeshIDBuffer; }
+void* MetalAccelStructure::instanceNormalMatrixBuffer()   const { return (__bridge void*)m_impl->instanceNormalMatrixBuffer; }
 
 } // namespace anacapa
 

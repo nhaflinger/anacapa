@@ -135,7 +135,9 @@ struct MetalPathIntegrator::Impl {
                         id<MTLBuffer> lightBufMTL, uint32_t nLights,
                         id<MTLBuffer> matBufMTL,   uint32_t nMats,
                         id<MTLBuffer> normalBuf, id<MTLBuffer> indexBuf,
-                        id<MTLBuffer> meshIdxOffBuf);
+                        id<MTLBuffer> meshIdxOffBuf,
+                        id<MTLBuffer> instMeshIDsBuf,
+                        id<MTLBuffer> instNormalMatBuf);
 
     // Ensure the persistent accum buffer is allocated and sized for (w x h).
     // Zeros the buffer if it had to be (re)allocated.
@@ -502,7 +504,9 @@ void MetalPathIntegrator::Impl::buildPhotonMap(
     id<MTLBuffer>               matBufMTL,   uint32_t nMats,
     id<MTLBuffer>               normalBuf,
     id<MTLBuffer>               indexBuf,
-    id<MTLBuffer>               meshIdxOffBuf)
+    id<MTLBuffer>               meshIdxOffBuf,
+    id<MTLBuffer>               instMeshIDsBuf,
+    id<MTLBuffer>               instNormalMatBuf)
 {
     if (!psoPhotonTrace || numPhotons == 0) return;
 
@@ -539,10 +543,12 @@ void MetalPathIntegrator::Impl::buildPhotonMap(
     [enc setBuffer:normalBuf     offset:0 atIndex:4];
     [enc setBuffer:indexBuf      offset:0 atIndex:5];
     [enc setBuffer:meshIdxOffBuf offset:0 atIndex:6];
-    [enc setBuffer:photonBuf     offset:0 atIndex:7];
-    [enc setBuffer:paramsBuf     offset:0 atIndex:8];
+    [enc setBuffer:photonBuf       offset:0 atIndex:7];
+    [enc setBuffer:paramsBuf       offset:0 atIndex:8];
     [enc setAccelerationStructure:tlas atBufferIndex:9];
-    [enc setBuffer:sssPhotonBuf  offset:0 atIndex:10];
+    [enc setBuffer:sssPhotonBuf    offset:0 atIndex:10];
+    [enc setBuffer:instMeshIDsBuf  offset:0 atIndex:11];
+    [enc setBuffer:instNormalMatBuf offset:0 atIndex:12];
     [enc useResource:tlas usage:MTLResourceUsageRead];
     for (void* blasVoid : accel->blasHandles())
         [enc useResource:(__bridge id<MTLAccelerationStructure>)blasVoid usage:MTLResourceUsageRead];
@@ -985,7 +991,9 @@ void MetalPathIntegrator::prepare(const SceneView& scene) {
             (__bridge id<MTLBuffer>)m_impl->matBuf->handle(),   m_impl->numMaterials,
             (__bridge id<MTLBuffer>)m_impl->accel->normalBuffer(),
             (__bridge id<MTLBuffer>)m_impl->accel->indexBuffer(),
-            (__bridge id<MTLBuffer>)m_impl->accel->meshIndexOffsetBuffer());
+            (__bridge id<MTLBuffer>)m_impl->accel->meshIndexOffsetBuffer(),
+            (__bridge id<MTLBuffer>)m_impl->accel->instanceMeshIDBuffer(),
+            (__bridge id<MTLBuffer>)m_impl->accel->instanceNormalMatrixBuffer());
     }
 
     m_impl->preparedOnce = true;
@@ -1152,11 +1160,11 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
         [enc setBuffer:numLightsMTL  offset:0 atIndex:3];
         [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->matBuf->handle()   offset:0 atIndex:4];
         [enc setBuffer:numMatsMTL    offset:0 atIndex:5];
-        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->normalBuffer()           offset:0 atIndex:6];
-        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->indexBuffer()            offset:0 atIndex:7];
-        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->triMeshIDBuffer()        offset:0 atIndex:8];
-        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->meshVertexOffsetBuffer() offset:0 atIndex:9];
-        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->meshIndexOffsetBuffer()  offset:0 atIndex:10];
+        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->normalBuffer()              offset:0 atIndex:6];
+        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->indexBuffer()               offset:0 atIndex:7];
+        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->instanceMeshIDBuffer()      offset:0 atIndex:8];
+        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->meshVertexOffsetBuffer()    offset:0 atIndex:9];
+        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->meshIndexOffsetBuffer()     offset:0 atIndex:10];
         [enc setBuffer:batchMTL      offset:0 atIndex:11];
         [enc setAccelerationStructure:tlas atBufferIndex:12];
         // HDRI importance sampling CDF tables (nil when no dome light loaded)
@@ -1188,6 +1196,7 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
         if (m_impl->haloDescBuf)   [enc setBuffer:m_impl->haloDescBuf    offset:0 atIndex:27];
         if (m_impl->haloNodeBuf)   [enc setBuffer:m_impl->haloNodeBuf    offset:0 atIndex:28];
         if (m_impl->haloPrimIdxBuf)[enc setBuffer:m_impl->haloPrimIdxBuf offset:0 atIndex:29];
+        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->instanceNormalMatrixBuffer() offset:0 atIndex:30];
         [enc setTexture:envTex atIndex:0];
         [enc useResource:tlas usage:MTLResourceUsageRead];
         for (void* blasVoid : m_impl->accel->blasHandles())
@@ -1360,7 +1369,7 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
         setB (5,  numMatsMTL);
         setBV(6,  m_impl->accel->normalBuffer());
         setBV(7,  m_impl->accel->indexBuffer());
-        setBV(8,  m_impl->accel->triMeshIDBuffer());
+        setBV(8,  m_impl->accel->instanceMeshIDBuffer());
         setBV(9,  m_impl->accel->meshVertexOffsetBuffer());
         setBV(10, m_impl->accel->meshIndexOffsetBuffer());
         setB (11, sampleIdxMTL);
@@ -1402,6 +1411,8 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
         if (m_impl->haloDescBuf)   [enc setBuffer:m_impl->haloDescBuf    offset:0 atIndex:27];
         if (m_impl->haloNodeBuf)   [enc setBuffer:m_impl->haloNodeBuf    offset:0 atIndex:28];
         if (m_impl->haloPrimIdxBuf)[enc setBuffer:m_impl->haloPrimIdxBuf offset:0 atIndex:29];
+        // Instance normal matrix — always present (identity for non-instanced scenes)
+        setBV(30, m_impl->accel->instanceNormalMatrixBuffer());
 
         // Environment texture (index 0); fallback 1×1 white if no HDRI loaded
         id<MTLTexture> envTex = m_impl->envTexture
