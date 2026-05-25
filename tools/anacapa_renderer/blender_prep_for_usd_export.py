@@ -956,6 +956,12 @@ def apply_modifiers() -> Tuple[int, List[str]]:
             # the exception handler would then remove the modifier entirely.
             if mod.type == 'NODES':
                 continue
+            # Sync viewport subdivision level to render level so the exported
+            # mesh matches what Cycles renders (viewport level is often lower).
+            if mod.type == 'SUBSURF':
+                if mod.levels < mod.render_levels:
+                    log(f"  '{obj.name}' Subsurf: viewport={mod.levels} → render={mod.render_levels}")
+                    mod.levels = mod.render_levels
             try:
                 bpy.ops.object.modifier_apply(modifier=mod.name)
                 applied += 1

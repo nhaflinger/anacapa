@@ -956,12 +956,14 @@ void BVHBackend::fillSurfaceInteraction(const BVHTriTrav& trav,
     si.uv = attrib.uv0 * w + attrib.uv1 * u + attrib.uv2 * v;
 
     if (worldXfm) {
-        si.p  = worldXfm->transformPoint(trav.v0 + trav.e1 * u + trav.e2 * v);
-        si.ng = safeNormalize(worldXfm->transformNormal(attrib.n));
-        si.n  = safeNormalize(worldXfm->transformNormal(
-                    attrib.sn0 * w + attrib.sn1 * u + attrib.sn2 * v));
+        si.p             = worldXfm->transformPoint(trav.v0 + trav.e1 * u + trav.e2 * v);
         si.objectToWorld = *worldXfm;
         si.worldToObject = worldXfm->inverse();
+        // Normals transform by the inverse-transpose of objectToWorld.
+        // worldToObject^T == (objectToWorld^{-1})^T — correct for any affine xfm.
+        si.ng = safeNormalize(si.worldToObject.transformNormal(attrib.n));
+        si.n  = safeNormalize(si.worldToObject.transformNormal(
+                    attrib.sn0 * w + attrib.sn1 * u + attrib.sn2 * v));
     } else {
         si.p  = trav.v0 + trav.e1 * u + trav.e2 * v;
         si.ng = attrib.n;
