@@ -69,9 +69,14 @@ class AnacapaRenderEngine(bpy.types.RenderEngine):
             class _Ctx:
                 pass
             ctx = _Ctx()
-            ctx.scene       = scene
-            ctx.view_layer  = depsgraph.view_layer
-            ctx.preferences = bpy.context.preferences
+            ctx.scene                  = scene
+            ctx.view_layer             = depsgraph.view_layer
+            ctx.preferences            = bpy.context.preferences
+            # Motion-blur sub-frame depsgraphs are obtained by calling
+            # context.evaluated_depsgraph_get() after scene.frame_set().
+            # bpy.context is valid inside render() (main thread), so
+            # delegate to it so the sub-frame scenes are correctly evaluated.
+            ctx.evaluated_depsgraph_get = bpy.context.evaluated_depsgraph_get
 
             # Force re-export so the render-mode depsgraph is always used.
             state = export_mod._state()
