@@ -961,7 +961,8 @@ static void collectLobes(const OSL::ClosureColor* c,
             lobe.kind   = OslLobe::Kind::Diffuse;
             lobe.albedo = w * Spectrum{p->albedo[0], p->albedo[1], p->albedo[2]};
             lobe.weight = lobe.albedo;
-            lobe.normal = {p->N[0], p->N[1], p->N[2]};
+            // anisotropic_vdf carries no surface normal; leave lobe.normal zeroed
+            // so lobe_normal_or_ctx() falls back to the shading context normal.
             out.push_back(lobe);
             break;
         }
