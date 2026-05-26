@@ -232,7 +232,8 @@ def _collect_instance_transforms(depsgraph):
 def export_scene_binary(filepath: str, context,
                         shutter_open: float = 0.0,
                         shutter_close: float = 0.0,
-                        depsgraph_override=None) -> None:
+                        depsgraph_override=None,
+                        motion_xf=None) -> None:
     """
     Evaluate the scene via the depsgraph and write the binary scene blob to
     filepath.  The live Blender scene is never modified except for temporary
@@ -248,7 +249,10 @@ def export_scene_binary(filepath: str, context,
     depsgraph for the main frame instead of context.evaluated_depsgraph_get().
     This lets the render engine pass the render-mode depsgraph so GN instance
     counts reflect the full render density rather than the viewport guide count.
-    Motion-blur sub-frame depsgraphs still come from context.
+
+    motion_xf: pre-collected transform dict (from _collect_motion_xf in render_pre).
+    When provided, skip viewport frame-seeking — scene.frame_set() inside
+    RenderEngine.render() invalidates the render-mode depsgraph and drops all meshes.
     """
     depsgraph = depsgraph_override if depsgraph_override is not None \
                 else context.evaluated_depsgraph_get()
@@ -256,6 +260,13 @@ def export_scene_binary(filepath: str, context,
     current_frame = scene.frame_current
 
     do_motion_blur = shutter_close > shutter_open + 1e-5
+    # In the render-engine path (depsgraph_override set), scene.frame_set() is
+    # unsafe (corrupts the render depsgraph and causes SIGSEGV with CURVES).
+    # If motion transforms were not pre-collected (motion_xf is None — e.g.
+    # because CURVES are in the scene and _collect_motion_xf was skipped),
+    # disable motion blur for meshes rather than falling back to frame-seeking.
+    if do_motion_blur and depsgraph_override is not None and motion_xf is None:
+        do_motion_blur = False
 
     light_data = []
     camera     = None
@@ -356,8 +367,24 @@ def export_scene_binary(filepath: str, context,
     # BEFORE the main write loop so they're available during streaming.
     # Only non-instanced and collection-instance objects get per-instance keys;
     # GN instances fall back to the current-frame matrix for both keys.
+    #
+    # In the render-engine path (depsgraph_override set), scene.frame_set()
+    # invalidates the render-mode depsgraph — obj.evaluated_get(depsgraph)
+    # then returns an unevaluated object whose to_mesh() fails, silently
+    # dropping every mesh from the export.  Skip viewport frame-seeking in
+    # that path; mesh transforms use the current-frame matrix for both keys
+    # (static, no motion blur).  Hair motion blur is unaffected because it
+    # is exported via Alembic open/close frames in render_pre.
     # -------------------------------------------------------------------------
-    if do_motion_blur:
+    if do_motion_blur and motion_xf is not None:
+        # render-engine path: transforms were pre-collected in _anacapa_render_pre
+        # before scene.frame_set() restrictions apply.  Use them directly.
+        xf_open       = motion_xf['xf_open']
+        xf_close      = motion_xf['xf_close']
+        xf_inst_open  = motion_xf['xf_inst_open']
+        xf_inst_close = motion_xf['xf_inst_close']
+        motion_times  = motion_xf['motion_times']
+    elif do_motion_blur:
         motion_times = [
             float(current_frame) + shutter_open,
             float(current_frame) + shutter_close,
@@ -407,6 +434,18 @@ def export_scene_binary(filepath: str, context,
     # overrides (GN "Set Material") form separate groups.
     _inst_groups = {}  # (proto_name, mat_key) → group dict
 
+    # Diagnostic: summarize what the depsgraph contains before writing.
+    _diag_types = {}
+    _diag_meshes = []
+    for _di in depsgraph.object_instances:
+        t = _di.object.type
+        _diag_types[t] = _diag_types.get(t, 0) + 1
+        if t == 'MESH' and not _di.is_instance and not _di.object.original.hide_render:
+            _diag_meshes.append(_di.object.original.name)
+    print(f"[anacapa] depsgraph object types: {_diag_types}")
+    print(f"[anacapa] non-instanced renderable meshes ({len(_diag_meshes)}): "
+          f"{_diag_meshes[:30]}")
+
     with open(filepath, 'wb') as f:
 
         # SceneHeader v5 — all counts are placeholders patched at the end.
@@ -428,7 +467,18 @@ def export_scene_binary(filepath: str, context,
 
             # ---- MESH --------------------------------------------------------
             if obj.type == 'MESH':
-                is_inst = inst.is_instance
+                # Collection instance members (EMPTY with instance_type='COLLECTION')
+                # must be written as individual MeshRecords, not InstanceGroupRecords.
+                # They appear as is_instance=True in the depsgraph but are unique
+                # placements, not GN scatter — the PointInstancer path drops their
+                # materials and normals.  GN instances (non-collection parent) still
+                # go through the InstanceGroupRecord path.
+                _par = inst.parent
+                _is_coll_inst_member = (
+                    inst.is_instance and _par is not None and
+                    getattr(getattr(_par, 'original', _par), 'instance_type', '') == 'COLLECTION'
+                )
+                is_inst = inst.is_instance and not _is_coll_inst_member
 
                 raw_matrix = inst.matrix_world
                 if is_inst:
@@ -437,7 +487,12 @@ def export_scene_binary(filepath: str, context,
 
                 # Motion matrices (no mesh needed)
                 if do_motion_blur:
-                    if not is_inst:
+                    if _is_coll_inst_member and _par is not None:
+                        # Collection instance: keyed by (parent_name, pid) in xf_inst_*
+                        key = (_par.name, tuple(inst.persistent_id))
+                        mo = xf_inst_open.get(key,  mat_world)
+                        mc = xf_inst_close.get(key, mat_world)
+                    elif not is_inst:
                         mo = xf_open.get(orig.name,  mat_world)
                         mc = xf_close.get(orig.name, mat_world)
                     elif inst.parent is not None:
@@ -462,6 +517,8 @@ def export_scene_binary(filepath: str, context,
                     eval_obj = obj.evaluated_get(depsgraph)
                     mesh = eval_obj.to_mesh()
                     if mesh is None or len(mesh.polygons) == 0:
+                        print(f"[anacapa] WARNING: {orig.name} to_mesh() returned "
+                              f"{'None' if mesh is None else '0 polygons'} — skipping")
                         eval_obj.to_mesh_clear()
                         continue
 

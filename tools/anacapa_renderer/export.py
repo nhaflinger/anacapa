@@ -172,11 +172,14 @@ _NS_RENDER = "anacapa_render_pre_data"
 def _render_pre_data():
     if _NS_RENDER not in bpy.app.driver_namespace:
         bpy.app.driver_namespace[_NS_RENDER] = {
-            'abc_path':       None,
+            'abc_path':        None,
             'matassign_paths': None,
-            'hidden_curves':  [],
+            'hidden_curves':   [],
+            'motion_xf':       None,  # pre-collected open/close transforms
         }
-    return bpy.app.driver_namespace[_NS_RENDER]
+    d = bpy.app.driver_namespace[_NS_RENDER]
+    d.setdefault('motion_xf', None)
+    return d
 
 
 def _shutter_interval(settings):
@@ -194,6 +197,174 @@ def _shutter_interval(settings):
     return s_open, s_close
 
 
+def _collect_motion_xf(scene, s_open, s_close):
+    """Collect object transforms at shutter open and close sub-frames.
+
+    When CURVES are present, delegates to a background subprocess (same pattern
+    as hair export) so that scene.frame_set() never runs in the main process —
+    avoiding the Blender 5.1 SIGSEGV from in-process CURVES evaluation.
+    Falls back to direct frame-seeking when no CURVES are in the scene.
+
+    Returns a dict with keys xf_open, xf_close, xf_inst_open, xf_inst_close,
+    motion_times, or None on failure.
+    """
+    import math, json, subprocess, tempfile
+    from mathutils import Matrix
+
+    current_frame = scene.frame_current
+    t_open  = float(current_frame) + s_open
+    t_close = float(current_frame) + s_close
+
+    # Check for VISIBLE CURVES only — by the time render_pre calls this,
+    # all CURVES are already hidden (hide_render=True), so the direct
+    # scene.frame_set() path is safe and uses the same depsgraph state as
+    # export_scene_binary (matching persistent_id keys for collection instances).
+    has_curves = any(obj.type == 'CURVES' and not obj.hide_render
+                     for obj in scene.objects)
+
+    def _parse_result(data):
+        """Reconstruct xf dicts from JSON-serialised matrices."""
+        def _to_mat(flat):
+            return Matrix([flat[r*4:(r+1)*4] for r in range(4)])
+
+        xf_open      = {k: _to_mat(v) for k, v in data['xf_open'].items()}
+        xf_close     = {k: _to_mat(v) for k, v in data['xf_close'].items()}
+        # Instance keys were encoded as "parent_name|||p0,p1,..."
+        xf_inst_open = {}
+        for k, v in data['xf_inst_open'].items():
+            pname, pids = k.split('|||')
+            pid = tuple(int(x) for x in pids.split(',')) if pids else ()
+            xf_inst_open[(pname, pid)] = _to_mat(v)
+        xf_inst_close = {}
+        for k, v in data['xf_inst_close'].items():
+            pname, pids = k.split('|||')
+            pid = tuple(int(x) for x in pids.split(',')) if pids else ()
+            xf_inst_close[(pname, pid)] = _to_mat(v)
+        return xf_open, xf_close, xf_inst_open, xf_inst_close
+
+    if has_curves:
+        # Subprocess path: avoids frame_set() in main process.
+        blend_path = bpy.data.filepath
+        if not blend_path:
+            print("[Anacapa] motion xf subprocess: blend file not saved — skipping")
+            return None
+
+        blender_exe = bpy.app.binary_path
+        out_path    = blend_path + ".motion_xf.json"
+
+        script = f"""\
+import bpy, json, math
+from mathutils import Matrix
+
+scene = bpy.context.scene
+
+_ZUP_TO_YUP = Matrix((
+    (1,  0,  0,  0),
+    (0,  0,  1,  0),
+    (0, -1,  0,  0),
+    (0,  0,  0,  1),
+))
+
+def to_yup(m):
+    return _ZUP_TO_YUP @ m
+
+def mat_flat(m):
+    return [m[r][c] for r in range(4) for c in range(4)]
+
+def collect(t):
+    fi = int(math.floor(t))
+    scene.frame_set(fi, subframe=t - fi)
+    dg = bpy.context.evaluated_depsgraph_get()
+    xf = {{}}
+    xi = {{}}
+    for inst in dg.object_instances:
+        obj  = inst.object
+        orig = obj.original
+        if orig.hide_render:
+            continue
+        mat = to_yup(inst.matrix_world)
+        if not inst.is_instance:
+            if obj.type in ('MESH', 'LIGHT', 'CAMERA'):
+                xf[orig.name] = mat_flat(mat)
+        elif obj.type == 'MESH':
+            par = inst.parent
+            if par is None:
+                continue
+            op = par.original if hasattr(par, 'original') else par
+            if getattr(op, 'instance_type', '') != 'COLLECTION':
+                continue
+            pid_str = ','.join(str(x) for x in inst.persistent_id)
+            xi[par.name + '|||' + pid_str] = mat_flat(mat)
+    return xf, xi
+
+xo, xio = collect({t_open!r})
+xc, xic = collect({t_close!r})
+
+import json
+with open({out_path!r}, 'w') as fh:
+    json.dump({{'xf_open': xo, 'xf_close': xc,
+               'xf_inst_open': xio, 'xf_inst_close': xic}}, fh)
+"""
+
+        script_path = blend_path + ".motion_xf_eval.py"
+        try:
+            with open(script_path, 'w') as fh:
+                fh.write(script)
+            proc = subprocess.run(
+                [blender_exe, "--background", blend_path,
+                 "--python", script_path],
+                capture_output=True, text=True, timeout=60)
+            if proc.returncode != 0 or not os.path.exists(out_path):
+                print(f"[Anacapa] motion xf subprocess failed "
+                      f"(code {proc.returncode}) — mesh motion blur skipped")
+                return None
+            with open(out_path) as fh:
+                data = json.load(fh)
+            xf_open, xf_close, xf_inst_open, xf_inst_close = _parse_result(data)
+        except Exception as e:
+            print(f"[Anacapa] motion xf subprocess error: {e} — skipping")
+            return None
+        finally:
+            for p in (script_path, out_path):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+    else:
+        # Direct path: no CURVES, scene.frame_set() is safe.
+        scene_mod = _load_scene_export_module()
+        if scene_mod is None:
+            return None
+
+        def _fs(t):
+            fi = int(math.floor(t))
+            scene.frame_set(fi, subframe=t - fi)
+
+        try:
+            _fs(t_open)
+            dg_open = bpy.context.evaluated_depsgraph_get()
+            xf_open      = scene_mod._collect_transforms(dg_open)
+            xf_inst_open = scene_mod._collect_instance_transforms(dg_open)
+
+            _fs(t_close)
+            dg_close = bpy.context.evaluated_depsgraph_get()
+            xf_close      = scene_mod._collect_transforms(dg_close)
+            xf_inst_close = scene_mod._collect_instance_transforms(dg_close)
+        except Exception as e:
+            print(f"[Anacapa] motion transform collection warning: {e}")
+            return None
+        finally:
+            scene.frame_set(current_frame)
+
+    return {
+        'xf_open':       xf_open,
+        'xf_close':      xf_close,
+        'xf_inst_open':  xf_inst_open,
+        'xf_inst_close': xf_inst_close,
+        'motion_times':  [t_open, t_close],
+    }
+
+
 @bpy.app.handlers.persistent
 def _anacapa_render_pre(scene):
     if scene.render.engine != 'ANACAPA':
@@ -202,47 +373,76 @@ def _anacapa_render_pre(scene):
     d['abc_path']        = None
     d['matassign_paths'] = None
     d['hidden_curves']   = []
+    d['motion_xf']       = None
 
     _state()["suppress_dirty"] = True
 
-    # Hair export — safe here: main thread, before engine starts, bpy.ops allowed.
+    settings = scene.anacapa
+    s_open, s_close = _shutter_interval(settings)
+
     ctx = bpy.context
+
+    # Detect hair objects BEFORE hiding CURVES (get_hair_objects filters by hide_render).
     hair_objs = get_hair_objects(ctx)
+
+    # Hide CURVES immediately — before any subprocess or frame_set call.
+    # The close-frame subprocess in export_hair_abc releases the GIL; Blender's
+    # background evaluation thread can then touch CURVES data → SIGSEGV.
+    # Hiding with both flags suppresses viewport and render evaluation.
+    # Hair export receives the pre-found hair_objs list so it doesn't need to
+    # re-detect (which would return empty now that hide_render is True).
+    hidden = []
+    for obj in scene.objects:
+        if obj.type == 'CURVES':
+            was_vp     = obj.hide_viewport
+            was_render = obj.hide_render
+            obj.hide_viewport = True
+            obj.hide_render   = True
+            obj["anacapa_hidden_for_render"] = True
+            hidden.append((obj.name, was_vp, was_render))
+    d['hidden_curves'] = hidden
+    if hidden:
+        print(f"[Anacapa] render_pre: hiding {len(hidden)} CURVES objects "
+              f"(viewport+render) to prevent Blender 5.1 SIGSEGV")
+
+    # Hair export — subprocesses are now safe because CURVES are hidden.
     if hair_objs:
         blend_path = bpy.data.filepath
         if blend_path:
             frame     = scene.frame_current
-            settings  = scene.anacapa
             cache_dir = get_cache_dir(blend_path)
             abc_path  = os.path.join(cache_dir, f"hair.{frame:04d}.abc")
-            s_open, s_close = _shutter_interval(settings)
             try:
                 matassign_paths = export_hair_abc(abc_path, ctx,
                                                    shutter_open=s_open,
-                                                   shutter_close=s_close)
+                                                   shutter_close=s_close,
+                                                   hair_objs=hair_objs)
                 d['abc_path']        = abc_path
                 d['matassign_paths'] = matassign_paths
                 print(f"[Anacapa] render_pre: hair → {abc_path}")
             except Exception as e:
                 print(f"[Anacapa] render_pre hair export warning: {e}")
 
-    # Hide CURVES objects to prevent Blender 5.1 SIGSEGV during render.
-    hidden = []
-    for obj in scene.objects:
-        if obj.type == 'CURVES':
-            was_hidden = obj.hide_viewport
-            obj.hide_viewport = True
-            obj["anacapa_hidden_for_render"] = True
-            hidden.append((obj.name, was_hidden))
-    d['hidden_curves'] = hidden
+    # Pre-collect mesh/light/camera transforms at shutter open and close.
+    # When CURVES are present, _collect_motion_xf uses a background subprocess
+    # so scene.frame_set() never runs in the main process (avoids SIGSEGV).
+    if s_open < s_close - 1e-5:
+        d['motion_xf'] = _collect_motion_xf(scene, s_open, s_close)
+        if d['motion_xf']:
+            print(f"[Anacapa] render_pre: motion transforms collected "
+                  f"(open={s_open:+.3f}, close={s_close:+.3f})")
 
 
 def _restore_hidden_curves(scene):
     d = _render_pre_data()
-    for name, was_hidden in d.get('hidden_curves', []):
+    for entry in d.get('hidden_curves', []):
+        name = entry[0]
+        was_vp     = entry[1]
+        was_render = entry[2] if len(entry) > 2 else False
         obj = scene.objects.get(name)
         if obj:
-            obj.hide_viewport = was_hidden
+            obj.hide_viewport = was_vp
+            obj.hide_render   = was_render
             obj.pop("anacapa_hidden_for_render", None)
     d['hidden_curves'] = []
 
@@ -273,6 +473,7 @@ def _anacapa_load_post(*args, **kwargs):
         for obj in scene.objects:
             if obj.get("anacapa_hidden_for_render"):
                 obj.hide_viewport = False
+                obj.hide_render   = False
                 obj.pop("anacapa_hidden_for_render", None)
         # Sync render display type so F12 respects use_viewer after file load.
         if scene.render.engine == 'ANACAPA':
@@ -389,7 +590,8 @@ def _frame_subframe(total):
     return int_frame, sub
 
 
-def export_hair_abc(abc_path, context, shutter_open=0.0, shutter_close=0.0):
+def export_hair_abc(abc_path, context, shutter_open=0.0, shutter_close=0.0,
+                    hair_objs=None):
     """
     Export all visible hair/curve objects to an Alembic file.
 
@@ -442,7 +644,8 @@ def export_hair_abc(abc_path, context, shutter_open=0.0, shutter_close=0.0):
             return paths if paths else None
         return None
 
-    hair_objs = get_hair_objects(context)
+    if hair_objs is None:
+        hair_objs = get_hair_objects(context)
     if not hair_objs:
         return None
 
@@ -1085,11 +1288,16 @@ def _anacapa_export_scene(usd_path, context, executable,
         except Exception as e:
             print(f"[Anacapa] Halo particle collection warning: {e}")
 
-    # 2. Write binary blob from depsgraph (motion blur keys sampled when enabled)
+    # 2. Write binary blob from depsgraph (motion blur keys sampled when enabled).
+    # In the render-engine path, pass pre-collected transforms from render_pre so
+    # export_scene_binary doesn't need to call scene.frame_set() internally.
+    rdata = _render_pre_data()
+    motion_xf = rdata.get('motion_xf') if depsgraph_override is not None else None
     scene_mod.export_scene_binary(blob_path, context,
                                   shutter_open=shutter_open,
                                   shutter_close=shutter_close,
-                                  depsgraph_override=depsgraph_override)
+                                  depsgraph_override=depsgraph_override,
+                                  motion_xf=motion_xf)
 
     # 3. C++ converts blob → USD
     result = subprocess.run(
@@ -1103,8 +1311,10 @@ def _anacapa_export_scene(usd_path, context, executable,
     if result.stdout:
         print(result.stdout, end="")
 
-    # 4. Inject halo particles as UsdGeomPoints into the written USD
-    # Skip in render engine path (depsgraph_override set) — same reason as step 1.
+    # 4. Inject halo particles as UsdGeomPoints into the written USD.
+    # Skip in render engine path (depsgraph_override set): collect_halo_particles
+    # was not called (bpy.ops calls in that function crash/corrupt state inside
+    # RenderEngine.render), so the stash is empty or stale.
     if prep is not None and depsgraph_override is None:
         try:
             prep._inject_halo_particles(usd_path, shutter_close=shutter_close)
