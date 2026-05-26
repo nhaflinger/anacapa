@@ -62,7 +62,8 @@
       "Bash(usdcat /Users/douglascreel/Documents/Blender/cupcakes_scene.usdc)",
       "Bash(grep -E \"error:|warning:|Building|Linking|Built target anacapa$\")",
       "Bash(cmake --build /Users/douglascreel/dev/anacapa/build/Darwin --target anacapa_blender -j8)",
-      "Bash(cmake --build /Users/douglascreel/dev/anacapa/build/Darwin --target anacapa anacapa_blender -j8)"
+      "Bash(cmake --build /Users/douglascreel/dev/anacapa/build/Darwin --target anacapa anacapa_blender -j8)",
+      "Bash(grep -rn \"1.f, 0.f, 1.f\\\\|pink\\\\|error.*color\\\\|{1,0,1}\\\\|magenta\\\\|errorMat\\\\|fallback.*color\" /Users/douglascreel/dev/anacapa/src/ --include=\"*.cpp\" --include=\"*.h\")"
     ],
     "additionalDirectories": [
       "/private/var/folders/x_/k9zq_d1x7g79w9h3hw_rhnx00000gn/T/anacapa_15_mrhw8"
