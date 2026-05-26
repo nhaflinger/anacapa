@@ -664,6 +664,7 @@ struct OslLobe {
     float    ior        = 1.5f;
     Spectrum albedo     = {0.8f, 0.8f, 0.8f};   // diffuse albedo
     Spectrum emittance  = {};
+    Vec3f    normal     = {0,0,0};              // world-space bump normal from OSL closure; zero = use ctx.n
 
     // MarschnerHair kind only: params for the C++ Marschner implementation
     struct MarschnerParams {
@@ -760,6 +761,7 @@ static void collectLobes(const OSL::ClosureColor* c,
             lobe.kind   = OslLobe::Kind::Diffuse;
             lobe.weight = w;
             lobe.albedo = w;
+            lobe.normal = {p->N[0], p->N[1], p->N[2]};
             out.push_back(lobe);
             break;
         }
@@ -769,14 +771,17 @@ static void collectLobes(const OSL::ClosureColor* c,
             lobe.kind   = OslLobe::Kind::DiffuseTrans;
             lobe.weight = w;
             lobe.albedo = w;
+            lobe.normal = {p->N[0], p->N[1], p->N[2]};
             out.push_back(lobe);
             break;
         }
         case OSL_CID_OREN_NAYAR: {
+            const auto* p = cur->as_comp()->as<OslOrenNayarParams>();
             OslLobe lobe;
             lobe.kind   = OslLobe::Kind::Diffuse;
             lobe.weight = w;
             lobe.albedo = w;
+            lobe.normal = {p->N[0], p->N[1], p->N[2]};
             out.push_back(lobe);
             break;
         }
@@ -788,16 +793,18 @@ static void collectLobes(const OSL::ClosureColor* c,
             Spectrum alb = { p->albedo[0], p->albedo[1], p->albedo[2] };
             lobe.albedo  = w * alb;
             lobe.weight  = lobe.albedo;
+            lobe.normal  = {p->N[0], p->N[1], p->N[2]};
             out.push_back(lobe);
             break;
         }
         case OSL_CID_MX_TRANSLUCENT: {
-            const auto* p = cur->as_comp()->as<OslMxONDParams>();
+            const auto* p = cur->as_comp()->as<OslMxTranslucentParams>();
             OslLobe lobe;
             lobe.kind   = OslLobe::Kind::DiffuseTrans;
             Spectrum alb = { p->albedo[0], p->albedo[1], p->albedo[2] };
             lobe.albedo  = w * alb;
             lobe.weight  = lobe.albedo;
+            lobe.normal  = {p->N[0], p->N[1], p->N[2]};
             out.push_back(lobe);
             break;
         }
@@ -818,6 +825,7 @@ static void collectLobes(const OSL::ClosureColor* c,
             lobe.kind    = (p->refract == 1) ? OslLobe::Kind::GGXTrans
                          : (p->refract == 2) ? OslLobe::Kind::GGXBoth
                                              : OslLobe::Kind::GGXRefl;
+            lobe.normal  = {p->N[0], p->N[1], p->N[2]};
             out.push_back(lobe);
             break;
         }
@@ -832,6 +840,7 @@ static void collectLobes(const OSL::ClosureColor* c,
             lobe.f0      = { f0s, f0s, f0s };
             lobe.f90     = {1,1,1};
             lobe.schlickExp = 5.f;
+            lobe.normal  = {p->N[0], p->N[1], p->N[2]};
             out.push_back(lobe);
             break;
         }
@@ -842,6 +851,7 @@ static void collectLobes(const OSL::ClosureColor* c,
             lobe.weight  = w;
             lobe.alpha2  = 1e-6f;
             lobe.ior     = p->eta;
+            lobe.normal  = {p->N[0], p->N[1], p->N[2]};
             out.push_back(lobe);
             break;
         }
@@ -867,6 +877,7 @@ static void collectLobes(const OSL::ClosureColor* c,
             lobe.kind = hasRefr ? (hasRefl ? OslLobe::Kind::GGXBoth
                                            : OslLobe::Kind::GGXTrans)
                                 : OslLobe::Kind::GGXRefl;
+            lobe.normal = {p->N[0], p->N[1], p->N[2]};
             out.push_back(lobe);
             break;
         }
@@ -890,6 +901,7 @@ static void collectLobes(const OSL::ClosureColor* c,
                              condF0(p->ior[2], p->extinction[2]) };
             lobe.f90    = {1,1,1};
             lobe.schlickExp = 5.f;
+            lobe.normal = {p->N[0], p->N[1], p->N[2]};
             out.push_back(lobe);
             break;
         }
@@ -917,6 +929,7 @@ static void collectLobes(const OSL::ClosureColor* c,
             lobe.kind = hasRefr ? (hasRefl ? OslLobe::Kind::GGXBoth
                                            : OslLobe::Kind::GGXTrans)
                                 : OslLobe::Kind::GGXRefl;
+            lobe.normal = {p->N[0], p->N[1], p->N[2]};
             out.push_back(lobe);
             break;
         }
@@ -927,6 +940,7 @@ static void collectLobes(const OSL::ClosureColor* c,
             lobe.kind   = OslLobe::Kind::Diffuse;
             lobe.albedo = w * Spectrum{p->albedo[0], p->albedo[1], p->albedo[2]};
             lobe.weight = lobe.albedo;
+            lobe.normal = {p->N[0], p->N[1], p->N[2]};
             out.push_back(lobe);
             break;
         }
@@ -936,6 +950,7 @@ static void collectLobes(const OSL::ClosureColor* c,
             lobe.kind   = OslLobe::Kind::Diffuse;
             lobe.albedo = w * Spectrum{p->albedo[0], p->albedo[1], p->albedo[2]};
             lobe.weight = lobe.albedo;
+            lobe.normal = {p->N[0], p->N[1], p->N[2]};
             out.push_back(lobe);
             break;
         }
@@ -946,6 +961,7 @@ static void collectLobes(const OSL::ClosureColor* c,
             lobe.kind   = OslLobe::Kind::Diffuse;
             lobe.albedo = w * Spectrum{p->albedo[0], p->albedo[1], p->albedo[2]};
             lobe.weight = lobe.albedo;
+            lobe.normal = {p->N[0], p->N[1], p->N[2]};
             out.push_back(lobe);
             break;
         }
@@ -1411,7 +1427,6 @@ public:
     // ---------- sample ----------
     BSDFSample sample(const ShadingContext& ctx,
                       Vec3f wo, Vec2f u, float uComp) const override {
-        Vec3f woLocal = ctx.toLocal(wo);
         auto lobes = evalClosure(ctx, wo);
         mergeGGXPairs(lobes);
         applySssLobeTint(lobes);
@@ -1448,21 +1463,28 @@ public:
                     return mat.sample(ctx, wo, u, uComp);
                 }
 
+                // Use per-lobe ShadingContext so the bump-perturbed normal
+                // determines the local frame for sampling and evaluation.
+                ShadingContext lctx = makeLobeCtx(ctx, lobe);
+                Vec3f woLocal = lctx.toLocal(wo);
                 BSDFSample s = sampleLobe(lobe, woLocal, u, uFresnel);
                 if (!s.isValid()) return {};
 
-                // Convert to world space
-                s.wi  = ctx.toWorld(s.wi);
+                // Convert sampled direction to world space using this lobe's frame
+                s.wi  = lctx.toWorld(s.wi);
                 // Scale pdf by lobe selection probability
                 s.pdf    *= selPdf;
                 s.pdfRev *= selPdf;
 
-                // Add contributions from other lobes (MIS accumulation)
-                Vec3f wiLocal = ctx.toLocal(s.wi);
+                // Add contributions from other lobes (MIS accumulation),
+                // each evaluated in its own per-lobe local frame.
                 for (size_t j = 0; j < lobes.size(); ++j) {
                     if (j == i || lobes[j].kind == OslLobe::Kind::Emission)
                         continue;
-                    auto ev = evalLobe(lobes[j], woLocal, wiLocal);
+                    ShadingContext lctxJ = makeLobeCtx(ctx, lobes[j]);
+                    Vec3f woLocalJ = lctxJ.toLocal(wo);
+                    Vec3f wiLocalJ = lctxJ.toLocal(s.wi);
+                    auto ev = evalLobe(lobes[j], woLocalJ, wiLocalJ);
                     if (ev.pdf > 0.f) {
                         float wj = lobeSelLum(lobes[j]) / total;
                         s.f   = s.f + ev.f;
@@ -1478,9 +1500,13 @@ public:
     // ---------- evaluate ----------
     BSDFEval evaluate(const ShadingContext& ctx,
                        Vec3f wo, Vec3f wi) const override {
-        Vec3f woLocal = ctx.toLocal(wo);
-        Vec3f wiLocal = ctx.toLocal(wi);
-        if (woLocal.z <= 0.f && wiLocal.z <= 0.f) return {};
+        // Pre-check using the geometric (unperturbed) frame to quickly reject
+        // directions that are on the same side for all lobes.
+        {
+            Vec3f woL = ctx.toLocal(wo);
+            Vec3f wiL = ctx.toLocal(wi);
+            if (woL.z <= 0.f && wiL.z <= 0.f) return {};
+        }
 
         auto lobes = evalClosure(ctx, wo);
         mergeGGXPairs(lobes);
@@ -1503,6 +1529,10 @@ public:
                 result.pdfRev += ev.pdfRev * selPdf;
                 continue;
             }
+            // Evaluate each lobe in its own bump-perturbed local frame.
+            ShadingContext lctx = makeLobeCtx(ctx, lobe);
+            Vec3f woLocal = lctx.toLocal(wo);
+            Vec3f wiLocal = lctx.toLocal(wi);
             auto ev = evalLobe(lobe, woLocal, wiLocal);
             result.f      = result.f + ev.f;
             result.pdf    += ev.pdf * selPdf;
@@ -1543,6 +1573,24 @@ private:
     // the normal-based GGX path (which is meaningless on ribbon/curve geometry).
     MarschnerHairMaterial       m_hairFallback{MarschnerHairMaterial::Params{}};
 
+    // Build a per-lobe ShadingContext whose shading normal is the bump-perturbed
+    // normal stored in the lobe.  Falls back to ctx unchanged when lobe.normal
+    // is zero (i.e. no bump node contributed to this lobe).
+    static ShadingContext makeLobeCtx(const ShadingContext& ctx,
+                                      const OslLobe& lobe) {
+        float len2 = lobe.normal.x * lobe.normal.x
+                   + lobe.normal.y * lobe.normal.y
+                   + lobe.normal.z * lobe.normal.z;
+        if (len2 < 1e-6f) return ctx;
+        ShadingContext lctx = ctx;
+        float invLen = 1.f / std::sqrt(len2);
+        lctx.n  = {lobe.normal.x * invLen,
+                   lobe.normal.y * invLen,
+                   lobe.normal.z * invLen};
+        buildOrthonormalBasis(lctx.n, lctx.t, lctx.bt);
+        return lctx;
+    }
+
     // Execute the shader and collect lobes.  Each call obtains its own
     // ShadingContext from the ShadingSystem (thread-safe).
     std::vector<OslLobe> evalClosure(const ShadingContext& ctx,
@@ -1570,8 +1618,27 @@ private:
         sg.object2common = static_cast<OSL::TransformationPtr>(&ctx);
         // dPdv carries the fiber tangent for curve hits; OSL hair shaders can
         // read it directly or via getattribute("hair_tangent", ...).
-        if (ctx.isCurve)
+        if (ctx.isCurve) {
             sg.dPdv = OSL::Vec3(ctx.t.x, ctx.t.y, ctx.t.z);
+        } else {
+            // Provide tangent/bitangent as dPdu/dPdv so mx_normalmap_float can
+            // reconstruct the tangent-space basis (it reads sg.dPdu and sg.dPdv
+            // for its T and B inputs from shader globals).
+            sg.dPdu = OSL::Vec3(ctx.t.x,  ctx.t.y,  ctx.t.z);
+            sg.dPdv = OSL::Vec3(ctx.bt.x, ctx.bt.y, ctx.bt.z);
+
+            // Set screen-space UV and position derivatives so mx_heighttonormal_vector3
+            // gets non-zero values from Dx()/Dy().  The convention: dPdx = t * dudx
+            // and dPdy = bt * dvdy means "one UV unit = one tangent-space unit", which
+            // makes the height gradient (dH/du, dH/dv) equal to the noise gradient
+            // projected onto (t, bt) — physically correct for object-space textures.
+            // The epsilon value cancels in the final cross-product normalization.
+            constexpr float kDuv = 1e-3f;
+            sg.dudx = kDuv;
+            sg.dvdy = kDuv;
+            sg.dPdx = OSL::Vec3(ctx.t.x  * kDuv, ctx.t.y  * kDuv, ctx.t.z  * kDuv);
+            sg.dPdy = OSL::Vec3(ctx.bt.x * kDuv, ctx.bt.y * kDuv, ctx.bt.z * kDuv);
+        }
 
         OSL::PerThreadInfo* ti = OslShadingSystem::instance().threadInfo();
         OSL::ShadingContext* oslCtx = s->get_context(ti);

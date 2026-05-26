@@ -2801,8 +2801,11 @@ class _MtlxBuilder:
 
     def _socket_color3(self, bl_socket, default=(0.5, 0.5, 0.5)):
         """Wire a color3 input from a socket. Returns (mx_output_or_None, const_value)."""
+        if bl_socket is None:
+            return None, default
         out = self._get_input_output(bl_socket)
         if out:
+            out = self._to_color3(out)  # coerce float/vector3 → color3
             return out, None
         dv = bl_socket.default_value
         try:
@@ -2812,6 +2815,8 @@ class _MtlxBuilder:
 
     def _socket_float(self, bl_socket, default=0.0):
         """Wire a float input from a socket."""
+        if bl_socket is None:
+            return None, default
         out = self._get_input_output(bl_socket)
         if out:
             out = self._to_float(out)  # coerce color3/vector3 → float via luminance
@@ -2822,8 +2827,11 @@ class _MtlxBuilder:
             return None, default
 
     def _socket_vector3(self, bl_socket, default=(0.0, 0.0, 0.0)):
+        if bl_socket is None:
+            return None, default
         out = self._get_input_output(bl_socket)
         if out:
+            out = self._to_vector3(out)  # coerce float/color3 → vector3
             return out, None
         dv = bl_socket.default_value
         try:
@@ -2871,6 +2879,41 @@ class _MtlxBuilder:
             for ch in ('in1', 'in2', 'in3'):
                 self._connect(comb.addInput(ch, 'float'), src_out)
             return comb.addOutput('out', 'color3')
+        if src_type == 'vector3':
+            # Reinterpret vector3 as color3 (same memory layout, just semantic cast)
+            comb = self._ng.addNode('combine3', self._uid('v2c'), 'color3')
+            for i, ch in enumerate(('in1', 'in2', 'in3')):
+                ext = self._ng.addNode('extract', self._uid('vext'), 'float')
+                self._connect(ext.addInput('in', 'vector3'), src_out)
+                ext.addInput('index', 'integer').setValue(i)
+                self._connect(comb.addInput(ch, 'float'), ext.addOutput('out', 'float'))
+            return comb.addOutput('out', 'color3')
+        return src_out
+
+    def _to_vector3(self, src_out):
+        """Ensure src_out is a vector3 Output.
+        If it is already vector3, return unchanged.
+        If it is float, replicate to all three components.
+        If it is color3, reinterpret as vector3."""
+        try:
+            src_type = src_out.getType()
+        except Exception:
+            return src_out
+        if src_type == 'vector3':
+            return src_out
+        if src_type == 'float':
+            comb = self._ng.addNode('combine3', self._uid('f2v'), 'vector3')
+            for ch in ('in1', 'in2', 'in3'):
+                self._connect(comb.addInput(ch, 'float'), src_out)
+            return comb.addOutput('out', 'vector3')
+        if src_type == 'color3':
+            comb = self._ng.addNode('combine3', self._uid('c2v'), 'vector3')
+            for i, ch in enumerate(('in1', 'in2', 'in3')):
+                ext = self._ng.addNode('extract', self._uid('cext'), 'float')
+                self._connect(ext.addInput('in', 'color3'), src_out)
+                ext.addInput('index', 'integer').setValue(i)
+                self._connect(comb.addInput(ch, 'float'), ext.addOutput('out', 'float'))
+            return comb.addOutput('out', 'vector3')
         return src_out
 
     def _wire_input(self, mx_node, inp_name, inp_type, bl_socket, default_val):
@@ -3675,11 +3718,18 @@ class _MtlxBuilder:
         fac_out,  fac_c  = self._socket_float(n.inputs[f_name], 0.5) \
                            if f_name in n.inputs else (None, 0.5)
 
+        # Compositing blend ops use fg/bg (no mix param); arithmetic ops use in1/in2.
+        _COMPOSITING_OPS = {'screen', 'overlay', 'dodge', 'burn', 'exclusion', 'difference'}
         if mx_op == 'mix':
             mx_node = self._ng.addNode('mix', self._uid('mix'), 'color3')
             bg = mx_node.addInput('bg', 'color3')
             fg = mx_node.addInput('fg', 'color3')
             fc = mx_node.addInput('mix', 'float')
+        elif mx_op in _COMPOSITING_OPS:
+            mx_node = self._ng.addNode(mx_op, self._uid(mx_op), 'color3')
+            bg = mx_node.addInput('bg', 'color3')
+            fg = mx_node.addInput('fg', 'color3')
+            fc = None
         else:
             mx_node = self._ng.addNode(mx_op, self._uid(mx_op), 'color3')
             bg = mx_node.addInput('in1', 'color3')
@@ -4292,9 +4342,6 @@ class _MtlxBuilder:
             self._connect(ci, col_out)
         else:
             ci.setValueString(f'{col_c[0]}, {col_c[1]}, {col_c[2]}')
-        # strength: scatter lobe width read by USDLoader as the 'scatter' param.
-        # Blender's Translucent BSDF has no native strength slider, so default to 0.5.
-        trans.addInput('strength', 'float').setValue(0.5)
         surf = self._ng.addNode('surface', self._uid('surface'), 'surfaceshader')
         surf.addInput('bsdf', 'BSDF').setNodeName(trans.getName())
         return surf.addOutput('out', 'surfaceshader')
@@ -4472,6 +4519,21 @@ class _MtlxBuilder:
         vec_out, vec_c = self._socket_vector3(n.inputs.get('Vector'), (0.0, 0.0, 0.0))
         angle_out, angle_c = self._socket_float(n.inputs.get('Angle'), 0.0)
         axis_out, axis_c = self._socket_vector3(n.inputs.get('Axis'), (0.0, 0.0, 1.0))
+        # If the Vector input is typed vector2 (e.g., a UV map), promote it to
+        # vector3 by combining with a 0 z-component so mx_rotate_vector3 doesn't
+        # receive a vector2 (which causes an OSL compile error).
+        if vec_out is not None and vec_out.getType() == 'vector2':
+            cvt = self._ng.addNode('combine3', self._uid('v2tov3'), 'vector3')
+            x_node = self._ng.addNode('extract', self._uid('v2x'), 'float')
+            xi = x_node.addInput('in', 'vector2'); self._connect(xi, vec_out)
+            x_node.addInput('index', 'integer').setValue(0)
+            y_node = self._ng.addNode('extract', self._uid('v2y'), 'float')
+            yi = y_node.addInput('in', 'vector2'); self._connect(yi, vec_out)
+            y_node.addInput('index', 'integer').setValue(1)
+            self._connect(cvt.addInput('in1', 'float'), x_node.addOutput('out', 'float'))
+            self._connect(cvt.addInput('in2', 'float'), y_node.addOutput('out', 'float'))
+            cvt.addInput('in3', 'float').setValue(0.0)
+            vec_out = cvt.addOutput('out', 'vector3')
         rot = self._ng.addNode('rotate3d', self._uid('rot3d'), 'vector3')
         v = rot.addInput('in', 'vector3')
         if vec_out: self._connect(v, vec_out)
@@ -4990,6 +5052,28 @@ void NG_place2d_vector2(
 }
 """
 
+        # NG_overlay_color3 has no genosl implementation in the stdlib.
+        # The overlay blend formula: if bg < 0.5 → 2*fg*bg, else 1-2*(1-fg)*(1-bg).
+        # genosl codegen calls this as (fg, bg, mix, result) — same convention as
+        # mx_burn_color3 / mx_dodge_color3.  A float fg overload handles bark_oak's
+        # type-mismatched connection where an extract node feeds a float into fg.
+        overlay_impl = r"""
+// ---- NG_overlay_color3 (no genosl counterpart in stdlib) ----
+void NG_overlay_color3(color fg, color bg, float mix, output color result)
+{
+    color blended = color(
+        bg[0] < 0.5 ? 2.0*fg[0]*bg[0] : 1.0 - 2.0*(1.0-fg[0])*(1.0-bg[0]),
+        bg[1] < 0.5 ? 2.0*fg[1]*bg[1] : 1.0 - 2.0*(1.0-fg[1])*(1.0-bg[1]),
+        bg[2] < 0.5 ? 2.0*fg[2]*bg[2] : 1.0 - 2.0*(1.0-fg[2])*(1.0-bg[2])
+    );
+    result = mix*(blended - bg) + bg;
+}
+void NG_overlay_color3(float fg, color bg, float mix, output color result)
+{
+    NG_overlay_color3(color(fg, fg, fg), bg, mix, result);
+}
+"""
+
         # Read the Anacapa OSL library shipped with the addon.
         acl_src = ''
         acl_path = os.path.join(os.path.dirname(__file__), 'osl', 'anacapa_lib.h')
@@ -5005,6 +5089,7 @@ void NG_place2d_vector2(
                 f.write('\n// ---- mx_*.osl function definitions ----\n')
                 f.writelines(genosl_extras)
             f.write(place2d_impl)
+            f.write(overlay_impl)
             if acl_src:
                 f.write(acl_src)
         shared_header = '_mx_stdlib.h'
