@@ -791,7 +791,53 @@ static float3 sampleDirectHair(
     float3 f = evalMarschnerLobes(sinThetaO, cosThetaO, sinThetaI, cosThetaI,
                                    phi, h, sigma_a, eta, v, s, alphaR);
     float hairCos = cosThetaI;
-    return f * hairCos * Li * Tr / pdfL;
+
+    // MIS weight against the Marschner BSDF-sampling strategy — mirrors the
+    // non-hair sampleDirect() fix above and CPU's estimateDirect(). Directional
+    // lights are always delta (see DirectionalLight.h), so no competing
+    // strategy: weight=1.
+    float weight = 1.0f;
+    if (light.type != kLightDirectional) {
+        float bsdfPdf = evalMarschnerPdf(sinThetaO, cosThetaO, sinThetaI, cosThetaI,
+                                          phi, h, sigma_a, eta, v, s, alphaR);
+        weight = powerHeuristic(pdfL, bsdfPdf);
+    }
+
+    return f * hairCos * Li * Tr * weight / pdfL;
+}
+
+// BSDF pdf of sampling direction `wi` from `wo` — mirrors the exact mixed
+// specular/diffuse pdf formula used by the bounce sampler below (kMatGGX
+// branch: pSpec*ggxPdf + pDiff*cosPdf; everything else: cosine-hemisphere).
+// Needed so sampleDirect() (NEE) can compute a proper MIS weight against the
+// BSDF-sampling strategy — mirrors CPU's estimateDirect() (PathIntegrator.cpp),
+// which evaluates mat.evaluate(...).pdf for the same purpose. Without this,
+// GPU double-counts light energy whenever a bounce ray happens to hit a light
+// NEE already sampled at that vertex (NEE always had weight=1, and the
+// bounce-hit path already applies its own MIS weight) — the resulting
+// systematic overbrightening is worst for glossy surfaces near area/dome lights.
+static float bsdfPdfEval(float3 wo, float3 wi, float3 n, uint matType,
+                          float3 baseColor, float roughness, float metalness) {
+    float cosI = dot(n, wi);
+    if (cosI <= 0.0f) return 0.0f;
+    if (matType == kMatGGX && roughness < 0.95f) {
+        float alpha  = roughness * roughness;
+        float alpha2 = alpha * alpha;
+        float3 F0    = mix(float3(0.04f), baseColor, metalness);
+        float lumSpec = (F0.x + F0.y + F0.z) / 3.0f;
+        float lumDiff = (1.0f - metalness) * (baseColor.x + baseColor.y + baseColor.z) / 3.0f;
+        float pSpec   = lumSpec / max(1e-4f, lumSpec + lumDiff);
+        float pDiff   = 1.0f - pSpec;
+
+        float3 wh    = normalize(wo + wi);
+        float  cosH  = max(0.0f, dot(n, wh));
+        float  D     = ggxD(cosH, alpha2);
+        float  ggxPdf = D * cosH / max(1e-7f, 4.0f * dot(wo, wh));
+        float  cosPdf = cosI / M_PI_F;
+        return pSpec * ggxPdf + pDiff * cosPdf;
+    }
+    // Lambertian, or very rough GGX: cosine hemisphere only (matches bounce sampler).
+    return cosI / M_PI_F;
 }
 
 static float3 sampleDirect(
@@ -916,7 +962,17 @@ static float3 sampleDirect(
     }
     // Glass is delta — no area PDF can be evaluated, skip direct lighting
 
-    return f * Li * Tr * cosI / pdfL;
+    // MIS weight against the BSDF-sampling strategy (matches CPU's
+    // estimateDirect()). Directional lights are always treated as delta
+    // (isDelta==true even with cone-jitter soft shadows — see
+    // DirectionalLight.h) so they have no competing BSDF strategy: weight=1.
+    float weight = 1.0f;
+    if (light.type != kLightDirectional) {
+        float bsdfPdf = bsdfPdfEval(wo, wi, n, matType, baseColor, roughness, metalness);
+        weight = powerHeuristic(pdfL, bsdfPdf);
+    }
+
+    return f * Li * Tr * cosI * weight / pdfL;
 }
 
 // ---------------------------------------------------------------------------
@@ -1663,7 +1719,12 @@ kernel void shade(
                 baseColor = mxArgs.mxFunctions[disp.baseColorFunc](mxArgs.uniformData, disp.baseColorOffset, texUV, objPos).xyz;
             }
             if (disp.roughnessFunc != kMxNoFunction) {
-                mat.roughness = mxArgs.mxFunctions[disp.roughnessFunc](mxArgs.uniformData, disp.roughnessOffset, texUV, objPos).x;
+                // Floor at 0.25, matching OslMaterial::roughness()'s probed-roughness
+                // floor (OslMaterial.cpp) — GPU has no MIS, so unclamped near-zero
+                // roughness from procedural noise produces bright firefly-like hot
+                // spots wherever the noise dips low (e.g. wood-grain/plaster ramps
+                // driving specular_roughness directly from <fractal3d> noise).
+                mat.roughness = max(0.25f, mxArgs.mxFunctions[disp.roughnessFunc](mxArgs.uniformData, disp.roughnessOffset, texUV, objPos).x);
             }
             if (disp.metalnessFunc != kMxNoFunction) {
                 mat.metalness = mxArgs.mxFunctions[disp.metalnessFunc](mxArgs.uniformData, disp.metalnessOffset, texUV, objPos).x;

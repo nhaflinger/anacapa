@@ -789,6 +789,40 @@ float evalMarschnerPdf(
     return fmaxf(0.f, pdf);
 }
 
+// BSDF pdf of sampling direction `wi` from `wo` — mirrors the exact mixed
+// specular/diffuse pdf formula used by the bounce sampler (kMatGGX branch:
+// pSpec*ggxPdf + pDiff*cosPdf; everything else: cosine-hemisphere). Needed so
+// sampleDirect() (NEE) can compute a proper MIS weight against the
+// BSDF-sampling strategy — mirrors the Metal backend's identical fix and
+// CPU's estimateDirect() (PathIntegrator.cpp). Without this, GPU
+// double-counts light energy whenever a bounce ray happens to hit a light
+// NEE already sampled at that vertex.
+static __forceinline__ __device__
+float bsdfPdfEval(float3 wo, float3 wi, float3 n, uint32_t matType,
+                   float3 baseColor, float roughness, float metalness)
+{
+    float cosI = dot(n, wi);
+    if (cosI <= 0.0f) return 0.0f;
+    if (matType == kMatGGX && roughness < 0.95f) {
+        float  alpha  = roughness * roughness;
+        float  alpha2 = alpha * alpha;
+        float3 F0     = lerp3(make_float3(0.04f, 0.04f, 0.04f), baseColor, metalness);
+        float lumSpec = (F0.x + F0.y + F0.z) / 3.0f;
+        float lumDiff = (1.0f - metalness) * (baseColor.x + baseColor.y + baseColor.z) / 3.0f;
+        float pSpec   = lumSpec / fmaxf(1e-4f, lumSpec + lumDiff);
+        float pDiff   = 1.0f - pSpec;
+
+        float3 wh    = normalize(wo + wi);
+        float  cosH  = fmaxf(0.0f, dot(n, wh));
+        float  D     = ggxD(cosH, alpha2);
+        float  ggxPdf = D * cosH / fmaxf(1e-7f, 4.0f * dot(wo, wh));
+        float  cosPdf = cosI / CUDART_PI_F;
+        return pSpec * ggxPdf + pDiff * cosPdf;
+    }
+    // Lambertian, or very rough GGX: cosine hemisphere only (matches bounce sampler).
+    return cosI / CUDART_PI_F;
+}
+
 // ---------------------------------------------------------------------------
 // Hair NEE — Marschner × Li / pdfL from a single sampled light direction.
 // ---------------------------------------------------------------------------
@@ -885,7 +919,19 @@ float3 sampleDirectHair(float3 hitPos, float3 wo, float3 hairT, float h,
 
     float3 f = evalMarschnerLobes(sinThetaO, cosThetaO, sinThetaI, cosThetaI,
                                    phi, h, sigma_a, eta, v, s, alphaR);
-    return f * cosThetaI * Li * Tr * (1.f / pdfL);
+
+    // MIS weight against the Marschner BSDF-sampling strategy — mirrors the
+    // non-hair sampleDirect() fix below and CPU's estimateDirect(). Directional
+    // lights are always delta (see DirectionalLight.h), so no competing
+    // strategy: weight=1.
+    float weight = 1.0f;
+    if (light.type != kLightDirectional) {
+        float bsdfPdf = evalMarschnerPdf(sinThetaO, cosThetaO, sinThetaI, cosThetaI,
+                                          phi, h, sigma_a, eta, v, s, alphaR);
+        weight = powerHeuristic(pdfL, bsdfPdf);
+    }
+
+    return f * cosThetaI * Li * Tr * weight * (1.f / pdfL);
 }
 
 // ---------------------------------------------------------------------------
@@ -980,7 +1026,18 @@ float3 sampleDirect(float3 hitPos, float3 n, float3 wo,
         f = evalLayeredBSDF(wo, wi, n, baseColor, roughness, metalness, specular);
     }
 
-    return f * Li * Tr * cosI * (1.0f / pdfL);
+    // MIS weight against the BSDF-sampling strategy (matches CPU's
+    // estimateDirect() and the Metal backend's identical fix). Directional
+    // lights are always treated as delta (isDelta==true even with cone-jitter
+    // soft shadows — see DirectionalLight.h) so they have no competing BSDF
+    // strategy: weight=1.
+    float weight = 1.0f;
+    if (light.type != kLightDirectional) {
+        float bsdfPdf = bsdfPdfEval(wo, wi, n, matType, baseColor, roughness, metalness);
+        weight = powerHeuristic(pdfL, bsdfPdf);
+    }
+
+    return f * Li * Tr * cosI * weight * (1.0f / pdfL);
 }
 
 // ---------------------------------------------------------------------------
@@ -1957,7 +2014,11 @@ extern "C" __global__ void __raygen__wf_bounce()
         if (disp.roughnessFunc != kMxNoFunction) {
             float4 r = optixDirectCall<float4, const float*, unsigned int, float2, float3>(
                 disp.roughnessFunc, params.mxUniforms, disp.roughnessOffset, texUV, objPos);
-            mat.roughness = r.x;
+            // Floor at 0.25, matching OslMaterial::roughness()'s probed-roughness
+            // floor and the Metal backend's identical fix — GPU has no MIS, so
+            // unclamped near-zero procedural roughness produces bright firefly-like
+            // hot spots wherever noise-driven specular_roughness dips low.
+            mat.roughness = fmaxf(0.25f, r.x);
         }
         if (disp.metalnessFunc != kMxNoFunction) {
             float4 m = optixDirectCall<float4, const float*, unsigned int, float2, float3>(
