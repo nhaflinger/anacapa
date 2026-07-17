@@ -16,6 +16,8 @@ struct LaunchParams {
     const GpuMaterial*       materials;       // device ptr
     uint32_t                 numMaterials;
     const GpuFloat3*         normals;         // device ptr — all meshes concatenated
+    const GpuFloat2*         uvs;             // device ptr — all meshes concatenated
+    const GpuFloat4*         tangents;        // device ptr — xyz=tangent, w=handedness; all meshes concatenated
     const uint32_t*          indices;         // device ptr — globalized triangle indices
     const uint32_t*          triMeshIDs;      // device ptr — per-triangle meshID (legacy; unused after per-mesh GAS refactor)
     const uint32_t*          meshVertexOffsets; // device ptr — per-mesh vertex base
@@ -28,8 +30,23 @@ struct LaunchParams {
     //   instances so geomN_world = normalize({dot(n_obj,row0),row1,row2}).
     const uint32_t*          instanceMeshIDs;
     const float*             instanceNormalMat;
+    // Tangents are ordinary directions, not normals — transformed by the
+    // plain objectToWorld rotation (12 floats/instance), not w2o^T.
+    const float*             instanceTangentMat;
+    // instancePositionMat: 12 floats per instance = rows of plain worldToObject
+    // (translation included) — recovers object-space hit position for
+    // MaterialX <position space="object"> nodes. NOT identity for regular
+    // world-space meshes (unlike normal/tangent) — each mesh's real
+    // worldToObject is still needed even though geometry is pre-baked to
+    // world space at export time.
+    const float*             instancePositionMat;
     GpuSampleBatch           sampleBatch;
     cudaTextureObject_t      envTexture;      // 0 = no texture (use envLe fallback)
+
+    // Per-material texture atlas (base color / normal maps). Index-aligned
+    // with GpuMaterial::baseColorTexIdx / normalMapTexIdx. Fixed-size device
+    // array of texture handles, kMaxGpuTextures long; unused slots are 0.
+    const cudaTextureObject_t* materialTextures;
 
     // HDRI importance-sampling CDFs (when present — see cam.envMapWidth/Height).
     // marginal:    H+1 floats sampling the latitude (theta) axis
@@ -104,4 +121,15 @@ struct LaunchParams {
     // to CudaAccelStructure::traversableHandle().  Read in raygen / shadow
     // calls of optixTrace.
     unsigned long long       handle;
+
+    // MaterialX GPU codegen — populated when the scene has at least one
+    // kMatMaterialX material (see CudaPathIntegrator.cu's
+    // buildMaterialXCallables() and Shade.cu's kMatMaterialX resolve block).
+    // mxDispatch[GpuMaterial::mxDispatchIdx] gives the per-material function
+    // indices; mxUniforms holds every material's packed uniform floats back
+    // to back. Both nullptr when the scene has no MaterialX materials —
+    // callers must never dereference them without checking mxDispatchIdx >= 0
+    // first (mirrors the Metal backend's safety invariant).
+    const MxDispatchEntry*   mxDispatch;
+    const float*             mxUniforms;
 };

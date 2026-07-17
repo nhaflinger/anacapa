@@ -491,19 +491,26 @@ def _anacapa_load_post(*args, **kwargs):
 # ---------------------------------------------------------------------------
 
 def _load_prep_module():
-    if _load_prep_module._mod is not None:
-        return _load_prep_module._mod
     script_path = os.path.join(os.path.dirname(__file__),
                                "blender_prep_for_usd_export.py")
     if not os.path.exists(script_path):
         return None
+    mtime = os.path.getmtime(script_path)
+    # Re-read from disk whenever the file has changed since the cached copy
+    # was loaded (e.g. addon reinstalled without a full Blender restart) —
+    # a plain module-level cache would otherwise silently keep serving a
+    # stale in-memory copy for the rest of the process lifetime.
+    if _load_prep_module._mod is not None and _load_prep_module._mtime == mtime:
+        return _load_prep_module._mod
     spec = importlib.util.spec_from_file_location("anacapa_prep", script_path)
     mod  = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    _load_prep_module._mod = mod
+    _load_prep_module._mod   = mod
+    _load_prep_module._mtime = mtime
     return mod
 
-_load_prep_module._mod = None
+_load_prep_module._mod   = None
+_load_prep_module._mtime = None
 
 
 # ---------------------------------------------------------------------------

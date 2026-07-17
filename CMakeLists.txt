@@ -18,6 +18,14 @@ option(ANACAPA_ENABLE_OPTIX   "Build CUDA backend with OptiX hardware RT (Phase 
 option(ANACAPA_ENABLE_ASAN    "Build with AddressSanitizer"                         OFF)
 option(ANACAPA_ENABLE_OIDN    "Build with Intel OpenImageDenoise support"           ON)
 option(ANACAPA_ENABLE_VIEWER  "Build SDL2+ImGui progressive render viewer"          OFF)
+option(ANACAPA_ENABLE_MATERIALX "Build MaterialX GPU codegen (procedural shaders on GPU)" OFF)
+
+# MaterialX GPU codegen is only useful when a GPU backend exists to run the
+# generated shaders on — auto-enable unless the user explicitly opted out.
+if((ANACAPA_ENABLE_METAL OR ANACAPA_ENABLE_CUDA) AND NOT ANACAPA_ENABLE_MATERIALX)
+    message(STATUS "Auto-enabling ANACAPA_ENABLE_MATERIALX (a GPU backend is ON)")
+    set(ANACAPA_ENABLE_MATERIALX ON CACHE BOOL "Build MaterialX GPU codegen (procedural shaders on GPU)" FORCE)
+endif()
 
 # ---------------------------------------------------------------------------
 # Dependencies (all header-only except OpenImageIO)
@@ -95,6 +103,25 @@ if(ANACAPA_ENABLE_OSL)
     )
     target_compile_definitions(anacapa_lib PUBLIC
         ANACAPA_MX_STDLIB_DIR="${CMAKE_BINARY_DIR}"
+    )
+endif()
+
+if(ANACAPA_ENABLE_MATERIALX)
+    target_link_libraries(anacapa_lib PUBLIC
+        MaterialXCore
+        MaterialXFormat
+        MaterialXGenShader
+        MaterialXGenGlsl
+        MaterialXGenMsl
+    )
+    target_compile_definitions(anacapa_lib PUBLIC ANACAPA_ENABLE_MATERIALX)
+
+    # MaterialX's stdlib .mtlx documents (nodedefs, nodegraphs, target defs)
+    # must be loadable at runtime by MaterialXCodegen — point at the fetched
+    # source tree's libraries/ directory rather than copying it.
+    FetchContent_GetProperties(materialx SOURCE_DIR MATERIALX_SOURCE_DIR)
+    target_compile_definitions(anacapa_lib PUBLIC
+        ANACAPA_MATERIALX_LIBRARIES_DIR="${MATERIALX_SOURCE_DIR}/libraries"
     )
 endif()
 

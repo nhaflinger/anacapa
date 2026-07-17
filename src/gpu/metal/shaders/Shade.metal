@@ -25,6 +25,42 @@ using namespace raytracing;
 // ---------------------------------------------------------------------------
 struct PackedFloat3 { float x, y, z; };
 struct PackedFloat2 { float x, y; };
+struct PackedFloat4 { float x, y, z, w; };
+// Packed UV + tangent (xyz=tangent, w=handedness) — combined into one buffer
+// to stay within Metal's 31-buffer-argument limit (buffer(9) reused; the
+// per-mesh vertex-offset buffer it replaced was unused by this kernel since
+// the index buffer already carries globalized vertex indices).
+struct VertexExtra { PackedFloat2 uv; PackedFloat4 tangent; };
+
+// ---------------------------------------------------------------------------
+// MaterialX GPU codegen dispatch — argument buffer bound at the slot freed
+// by merging numLights/numMaterials into GpuCounts (see SharedTypes.h and
+// project memory project_materialx_codegen). mxFunctions is populated by
+// MetalPathIntegrator at scene load from runtime-compiled MSL: one
+// [[visible]] wrapper per procedural surface input, all sharing this exact
+// signature so one table can dispatch to any of them.
+// ---------------------------------------------------------------------------
+struct MxMaterialArgs {
+    // Third argument is the per-fragment UV (texcoord_0); fourth is the
+    // object-space hit position (positionObject) — MaterialX node graphs
+    // commonly drive patterns from <texcoord> or object-space <position>
+    // (e.g. procedural wood grain fed by object-space noise), and every
+    // table entry must share one signature, so both are always passed even
+    // when a given material's graph doesn't use one of them.
+    visible_function_table<float4(const device float*, uint, float2, float3)> mxFunctions [[id(0)]];
+    const device float*            uniformData [[id(1)]];
+    const device MxDispatchEntry*  dispatch    [[id(2)]];
+};
+
+// Always occupies visible_function_table index 0 (compiled into the base
+// precompiled metallib, unlike the per-scene runtime-compiled generated
+// functions). Guarantees the table is never empty even when a scene has
+// zero MaterialX materials — MxDispatchEntry sentinels (kMxNoFunction) never
+// reference index 0, so this is never actually invoked; it only exists so
+// PSO/table creation always has at least one linked function to work with.
+[[visible]] float4 anacapa_mx_dummy(const device float* uniformData, uint offset, float2 uv, float3 objPos) {
+    return float4(0.0);
+}
 
 // ---------------------------------------------------------------------------
 // PCG random
@@ -57,6 +93,43 @@ static float3 interpolateNormal(
     float3 n2 = float3(normals[i2].x, normals[i2].y, normals[i2].z);
     float w = 1.0f - bary.x - bary.y;
     return normalize(n0 * w + n1 * bary.x + n2 * bary.y);
+}
+
+static float2 interpolateUV(
+    uint   primID,
+    float2 bary,
+    const device VertexExtra* extra,
+    const device uint32_t*    indices,
+    uint   indexOffset)
+{
+    uint i0 = indices[indexOffset + primID * 3 + 0];
+    uint i1 = indices[indexOffset + primID * 3 + 1];
+    uint i2 = indices[indexOffset + primID * 3 + 2];
+    float2 uv0 = float2(extra[i0].uv.x, extra[i0].uv.y);
+    float2 uv1 = float2(extra[i1].uv.x, extra[i1].uv.y);
+    float2 uv2 = float2(extra[i2].uv.x, extra[i2].uv.y);
+    float w = 1.0f - bary.x - bary.y;
+    return uv0 * w + uv1 * bary.x + uv2 * bary.y;
+}
+
+// xyz = interpolated tangent (not yet normalized/orthogonalized), w = handedness sign
+static float4 interpolateTangent(
+    uint   primID,
+    float2 bary,
+    const device VertexExtra* extra,
+    const device uint32_t*    indices,
+    uint   indexOffset)
+{
+    uint i0 = indices[indexOffset + primID * 3 + 0];
+    uint i1 = indices[indexOffset + primID * 3 + 1];
+    uint i2 = indices[indexOffset + primID * 3 + 2];
+    PackedFloat4 t0 = extra[i0].tangent, t1 = extra[i1].tangent, t2 = extra[i2].tangent;
+    float w = 1.0f - bary.x - bary.y;
+    float3 t = float3(t0.x, t0.y, t0.z) * w
+             + float3(t1.x, t1.y, t1.z) * bary.x
+             + float3(t2.x, t2.y, t2.z) * bary.y;
+    float sign = (t0.w + t1.w + t2.w) >= 0.0f ? 1.0f : -1.0f;
+    return float4(t, sign);
 }
 
 // ---------------------------------------------------------------------------
@@ -1132,13 +1205,13 @@ kernel void shade(
     constant  GpuCameraParams&              cam               [[ buffer(0)  ]],
     device    GpuAccumPixel*                accum             [[ buffer(1)  ]],
     const device GpuLight*                  lights            [[ buffer(2)  ]],
-    constant  uint&                         numLights         [[ buffer(3)  ]],
+    constant  GpuCounts&                    counts            [[ buffer(3)  ]],
     const device GpuMaterial*               materials         [[ buffer(4)  ]],
-    constant  uint&                         numMaterials      [[ buffer(5)  ]],
+    constant  MxMaterialArgs&               mxArgs            [[ buffer(5)  ]],
     const device PackedFloat3*              normals           [[ buffer(6)  ]],
     const device uint32_t*                  indices           [[ buffer(7)  ]],
     const device uint32_t*                  instanceMeshIDs   [[ buffer(8)  ]],
-    const device uint32_t*                  meshVertexOffsets [[ buffer(9)  ]],
+    const device VertexExtra*               vertexExtra       [[ buffer(9)  ]],  // per-vertex uv + tangent
     const device uint32_t*                  meshIndexOffsets  [[ buffer(10) ]],
     constant  GpuSampleBatch&               batch             [[ buffer(11) ]],
     acceleration_structure<instancing, primitive_motion> accelStruct [[ buffer(12) ]],
@@ -1159,10 +1232,16 @@ kernel void shade(
     const device GpuHaloDesc*              halos             [[ buffer(27) ]],
     const device GpuHaloNode*              haloNodes         [[ buffer(28) ]],
     const device uint32_t*                 haloPrimIdx       [[ buffer(29) ]],
+    // 6 rows per instance: [0-2] = worldToObject^T (normals), [3-5] = plain
+    // objectToWorld rotation (tangents — ordinary directions, not inverse-transpose)
     const device float4*                   instanceNormalMat [[ buffer(30) ]],
     texture2d<float, access::sample>        envTexture        [[ texture(0) ]],
+    array<texture2d<float, access::sample>, kMaxGpuTextures> materialTextures [[ texture(1) ]],
     uint2                                   gid               [[ thread_position_in_grid ]])
 {
+    uint numLights    = counts.numLights;
+    uint numMaterials = counts.numMaterials;
+
     uint px = cam.tileX0 + gid.x;
     uint py = cam.tileY0 + gid.y;
     if (px >= cam.imageWidth || py >= cam.imageHeight) return;
@@ -1499,8 +1578,9 @@ kernel void shade(
         // Apply per-instance normal transform (worldToObject^T * n_object).
         // For regular world-space meshes the matrix is identity — no-op.
         // For prototype mesh instances it rotates object-space normals to world space.
+        // Rows [0-2] of the 9-row-per-instance buffer (see kernel param comment).
         {
-            uint   nmBase = instID * 3;
+            uint   nmBase = instID * 9;
             float3 row0   = instanceNormalMat[nmBase + 0].xyz;
             float3 row1   = instanceNormalMat[nmBase + 1].xyz;
             float3 row2   = instanceNormalMat[nmBase + 2].xyz;
@@ -1517,6 +1597,79 @@ kernel void shade(
         GpuMaterial mat = materials[matIdx];
         float3 baseColor = float3(mat.baseColor.x, mat.baseColor.y, mat.baseColor.z);
         float3 emissive  = float3(mat.emissive.x,  mat.emissive.y,  mat.emissive.z);
+
+        float2 hitUV = interpolateUV(primID, bary, vertexExtra, indices, idxOff);
+
+        // V is flipped to match CPU TextureSampler's convention (USD/OpenGL
+        // bottom-left UV origin sampled against a top-left-origin raster image).
+        float2 texUV = float2(hitUV.x, 1.0f - hitUV.y);
+
+        if (mat.baseColorTexIdx >= 0 && mat.baseColorTexIdx < int32_t(kMaxGpuTextures)) {
+            constexpr sampler texSampler(s_address::repeat, t_address::repeat,
+                                          filter::linear, coord::normalized);
+            float4 texel = materialTextures[mat.baseColorTexIdx].sample(texSampler, texUV);
+            baseColor = texel.xyz;
+        }
+
+        if (mat.normalMapTexIdx >= 0 && mat.normalMapTexIdx < int32_t(kMaxGpuTextures)) {
+            constexpr sampler texSampler(s_address::repeat, t_address::repeat,
+                                          filter::linear, coord::normalized);
+            float4 sample = materialTextures[mat.normalMapTexIdx].sample(texSampler, texUV);
+            float3 nts = sample.xyz * mat.normalScale + mat.normalBias;
+
+            float4 tanW = interpolateTangent(primID, bary, vertexExtra, indices, idxOff);
+            float3 t = tanW.xyz;
+            {
+                // Rows [3-5] of instanceNormalMat carry the plain objectToWorld
+                // rotation for tangents (see the 9-row layout comment above).
+                uint   tmBase = instID * 9 + 3;
+                float3 row0   = instanceNormalMat[tmBase + 0].xyz;
+                float3 row1   = instanceNormalMat[tmBase + 1].xyz;
+                float3 row2   = instanceNormalMat[tmBase + 2].xyz;
+                t = float3(dot(t, row0), dot(t, row1), dot(t, row2));
+            }
+            // Re-orthogonalize against the (possibly flipped) shading normal.
+            t = t - n * dot(n, t);
+            float tLen = length(t);
+            if (tLen > 1e-8f) {
+                t /= tLen;
+                float3 bt = normalize(cross(n, t)) * tanW.w;
+                float3 nWorld = normalize(t * nts.x + bt * nts.y + n * nts.z);
+                n = nWorld;
+            }
+        }
+
+        // MaterialX-generated procedural surface params — resolve base_color/
+        // roughness/metalness via the runtime-compiled visible functions, then
+        // reclassify as kMatGGX so every downstream branch (direct lighting,
+        // caustic query, evalLayeredBSDF calls) needs no MaterialX-specific
+        // code of its own — it already handles kMatGGX correctly.
+        if (mat.type == kMatMaterialX && mat.mxDispatchIdx >= 0) {
+            // Object-space hit position (rows [6-8] of the 9-row-per-instance
+            // buffer) — for <position space="object"> nodes, e.g. object-space
+            // noise driving procedural wood grain.
+            float3 objPos;
+            {
+                uint   pmBase = instID * 9 + 6;
+                float4 row0   = instanceNormalMat[pmBase + 0];
+                float4 row1   = instanceNormalMat[pmBase + 1];
+                float4 row2   = instanceNormalMat[pmBase + 2];
+                objPos = float3(dot(row0.xyz, hitPos) + row0.w,
+                                 dot(row1.xyz, hitPos) + row1.w,
+                                 dot(row2.xyz, hitPos) + row2.w);
+            }
+            MxDispatchEntry disp = mxArgs.dispatch[mat.mxDispatchIdx];
+            if (disp.baseColorFunc != kMxNoFunction) {
+                baseColor = mxArgs.mxFunctions[disp.baseColorFunc](mxArgs.uniformData, disp.baseColorOffset, texUV, objPos).xyz;
+            }
+            if (disp.roughnessFunc != kMxNoFunction) {
+                mat.roughness = mxArgs.mxFunctions[disp.roughnessFunc](mxArgs.uniformData, disp.roughnessOffset, texUV, objPos).x;
+            }
+            if (disp.metalnessFunc != kMxNoFunction) {
+                mat.metalness = mxArgs.mxFunctions[disp.metalnessFunc](mxArgs.uniformData, disp.metalnessOffset, texUV, objPos).x;
+            }
+            mat.type = kMatGGX;
+        }
 
         // Emitter Le — add with MIS weight against the NEE light-sampling PDF.
         // prevWasDelta=true on first hit and after any delta bounce → weight=1.
@@ -1891,8 +2044,10 @@ kernel void photonTrace(
         uint   idxOff = meshIndexOffsets[meshID];
         float3 n      = interpolateNormal(res.primitive_id, bary, normals, indices, idxOff);
         // Apply per-instance normal transform (identity for world-space meshes)
+        // instanceNormalMat is now 9 rows/instance ([0-2]=normal, [3-5]=tangent,
+        // [6-8]=position); photonTrace only needs the normal rows.
         {
-            uint   nmBase = res.instance_id * 3;
+            uint   nmBase = res.instance_id * 9;
             float3 row0   = instanceNormalMat[nmBase + 0].xyz;
             float3 row1   = instanceNormalMat[nmBase + 1].xyz;
             float3 row2   = instanceNormalMat[nmBase + 2].xyz;

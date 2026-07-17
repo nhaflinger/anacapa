@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<materialx version="1.39">
+  <nodegraph name="NG_literal">
+    <open_pbr_surface name="openpbr1" type="surfaceshader">
+      <input name="base_color" type="color3" value="0.8, 0.2, 0.1" />
+      <input name="base_weight" type="float" value="1" />
+      <input name="base_metalness" type="float" value="1" />
+      <input name="specular_roughness" type="float" value="0.1" />
+      <output name="out" type="surfaceshader" />
+    </open_pbr_surface>
+    <output name="surface" type="surfaceshader" nodename="openpbr1" />
+  </nodegraph>
+  <surfacematerial name="M_literal" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodegraph="NG_literal" output="surface" />
+  </surfacematerial>
+</materialx>

@@ -46,7 +46,9 @@ public:
     // Layout: one entry per VERTEX across all meshes, in mesh order.
     void* positionBuffer() const;   // id<MTLBuffer> — packed_float3
     void* normalBuffer()   const;   // id<MTLBuffer> — packed_float3
-    void* uvBuffer()       const;   // id<MTLBuffer> — float2
+    // uv + tangent share one buffer (see VertexExtra in Shade.metal /
+    // MetalAccelStructure.mm) — Metal's shade kernel is at its 31-buffer-argument cap.
+    void* vertexExtraBuffer() const;  // id<MTLBuffer> — VertexExtra { packed_float2 uv; packed_float4 tangent; }
 
     // Per-triangle meshID: triGlobalIdx → meshID
     void* triMeshIDBuffer() const;  // id<MTLBuffer> — uint32_t
@@ -62,10 +64,17 @@ public:
 
     // Per-TLAS-instance lookup buffers (size = total TLAS instance count).
     // instanceMeshIDBuffer: uint32_t — TLAS instance → pool mesh ID for vertex/index/material lookup
-    // instanceNormalMatrixBuffer: float4[3] per instance = rows of worldToObject^T for normal transform
-    //   Identity for regular world-space meshes; actual transform for prototype mesh instances.
+    // instanceNormalMatrixBuffer: float4[9] per instance —
+    //   rows [0-2] = worldToObject^T (normal transform)
+    //   rows [3-5] = plain objectToWorld rotation (tangent transform)
+    //   rows [6-8] = plain worldToObject, translation included (object-space
+    //                position reconstruction for MaterialX <position space="object">)
+    //   Rows [0-5] are identity for regular world-space meshes (geometry
+    //   pre-baked to world space); rows [6-8] are NOT identity even for those
+    //   meshes — each carries its own real worldToObject. Rows [0-8] all carry
+    //   the actual transform for prototype mesh instances.
     void* instanceMeshIDBuffer()         const;  // id<MTLBuffer> — uint32_t
-    void* instanceNormalMatrixBuffer()   const;  // id<MTLBuffer> — float4[3] per instance
+    void* instanceNormalMatrixBuffer()   const;  // id<MTLBuffer> — float4[9] per instance
 
     uint32_t totalVertices()  const;
     uint32_t totalTriangles() const;

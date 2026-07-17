@@ -43,6 +43,8 @@ struct CudaAccelStructure::Impl {
     CudaByteBuffer        posBuffer;       // packed float3, world-space at shutter-open
     CudaByteBuffer        posBufferClose;  // packed float3, world-space at shutter-close
     CudaBuffer<GpuFloat3> normals;
+    CudaBuffer<GpuFloat2> uvs;
+    CudaBuffer<GpuFloat4> tangents;
     CudaBuffer<uint32_t>  indices;
     CudaBuffer<uint32_t>  triMeshIDs;
     CudaBuffer<uint32_t>  meshVertexOffsets;
@@ -73,6 +75,8 @@ struct CudaAccelStructure::Impl {
     // Per-IAS-instance lookup buffers (see header for layout).
     CudaBuffer<uint32_t>    instanceMeshIDs;
     CudaBuffer<float>       instanceNormalMat;
+    CudaBuffer<float>       instanceTangentMat;
+    CudaBuffer<float>       instancePositionMat;
 #endif
 
     uint32_t totalVertices  = 0;
@@ -310,6 +314,12 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
         std::vector<GpuFloat3> dummyN{ GpuFloat3{0.f, 1.f, 0.f} };
         m_impl->normals.upload(dummyN);
 
+        m_impl->uvs = CudaBuffer<GpuFloat2>(1);
+        m_impl->uvs.upload(std::vector<GpuFloat2>{ GpuFloat2{0.f, 0.f} });
+
+        m_impl->tangents = CudaBuffer<GpuFloat4>(1);
+        m_impl->tangents.upload(std::vector<GpuFloat4>{ GpuFloat4{1.f, 0.f, 0.f, 1.f} });
+
         m_impl->indices = CudaBuffer<uint32_t>(3);
         m_impl->indices.upload(std::vector<uint32_t>(di, di + 3));
 
@@ -389,6 +399,10 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
             m_impl->instanceNormalMat = CudaBuffer<float>(12);
             std::vector<float> nmIdent{1,0,0,0,  0,1,0,0,  0,0,1,0};
             m_impl->instanceNormalMat.upload(nmIdent);
+            m_impl->instanceTangentMat = CudaBuffer<float>(12);
+            m_impl->instanceTangentMat.upload(nmIdent);  // identity, same layout
+            m_impl->instancePositionMat = CudaBuffer<float>(12);
+            m_impl->instancePositionMat.upload(nmIdent);  // identity, same layout
 
             printf("[info]  CudaAccelStructure: dummy GAS+IAS built for particles-only scene\n");
         }
@@ -415,6 +429,8 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
     std::vector<float>     positions     (totalVerts * 3);  // world-space @ shutterOpen
     std::vector<float>     positionsClose(totalVerts * 3);  // world-space @ shutterClose
     std::vector<GpuFloat3> normals  (totalVerts);
+    std::vector<GpuFloat2> uvs      (totalVerts);
+    std::vector<GpuFloat4> tangents (totalVerts);
     std::vector<uint32_t>  indices  (totalTris * 3);
     std::vector<uint32_t>  triMeshIDs   (totalTris);
     std::vector<uint32_t>  vertexOffsets(numMeshes);
@@ -456,6 +472,23 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
                 if (len > 1e-6f) n = n * (1.f / len);
             }
             normals[vBase + v] = GpuFloat3{n.x, n.y, n.z};
+
+            uvs[vBase + v] = v < m.uvs.size()
+                ? GpuFloat2{m.uvs[v].x, m.uvs[v].y}
+                : GpuFloat2{0.f, 0.f};
+
+            Vec4f tan = v < m.tangents.size() ? m.tangents[v] : Vec4f{1.f, 0.f, 0.f, 1.f};
+            if (meshMotion) {
+                // Tangents are ordinary directions — transform by the plain
+                // linear part of objectToWorld, same convention as positions
+                // (baked at shutter-open).
+                Vec3f tw = xfOpen.transformVector(tan.xyz());
+                float len = tw.length();
+                if (len > 1e-6f) tw = tw * (1.f / len);
+                tangents[vBase + v] = GpuFloat4{tw.x, tw.y, tw.z, tan.w};
+            } else {
+                tangents[vBase + v] = GpuFloat4{tan.x, tan.y, tan.z, tan.w};
+            }
         }
         for (uint32_t t = 0; t < m.numTriangles(); ++t) {
             indices[(tBase + t) * 3 + 0] = vBase + m.indices[t * 3 + 0];
@@ -483,6 +516,12 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
 
     m_impl->normals = CudaBuffer<GpuFloat3>(totalVerts);
     m_impl->normals.upload(normals);
+
+    m_impl->uvs = CudaBuffer<GpuFloat2>(totalVerts);
+    m_impl->uvs.upload(uvs);
+
+    m_impl->tangents = CudaBuffer<GpuFloat4>(totalVerts);
+    m_impl->tangents.upload(tangents);
 
     m_impl->indices = CudaBuffer<uint32_t>(totalTris * 3);
     m_impl->indices.upload(indices);
@@ -687,6 +726,8 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
         memset(insts.data(), 0, totalInstances * sizeof(OptixInstance));
         std::vector<uint32_t> instMeshIDs(totalInstances);
         std::vector<float>    instNM(totalInstances * 12, 0.f);
+        std::vector<float>    instTM(totalInstances * 12, 0.f);
+        std::vector<float>    instPM(totalInstances * 12, 0.f);
 
         auto setIdentityXform = [](OptixInstance& inst) {
             inst.transform[0] = 1.f; inst.transform[1] = 0.f; inst.transform[2]  = 0.f; inst.transform[3]  = 0.f;
@@ -716,6 +757,35 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
             m[4]  = w2o.m[0][1]; m[5]  = w2o.m[1][1]; m[6]  = w2o.m[2][1]; m[7]  = 0.f;
             m[8]  = w2o.m[0][2]; m[9]  = w2o.m[1][2]; m[10] = w2o.m[2][2]; m[11] = 0.f;
         };
+        auto setIdentityTM = [&](uint32_t i) {
+            float* m = &instTM[i * 12];
+            m[0]=1.f; m[1]=0.f; m[2] =0.f; m[3] =0.f;
+            m[4]=0.f; m[5]=1.f; m[6] =0.f; m[7] =0.f;
+            m[8]=0.f; m[9]=0.f; m[10]=1.f; m[11]=0.f;
+        };
+        // Tangents are ordinary directions, not normals — transform by the
+        // plain linear part of objectToWorld, not its inverse-transpose.
+        auto setTMFromO2W = [&](uint32_t i, const Mat4f& o2w) {
+            float* m = &instTM[i * 12];
+            m[0]  = o2w.m[0][0]; m[1]  = o2w.m[0][1]; m[2]  = o2w.m[0][2]; m[3]  = 0.f;
+            m[4]  = o2w.m[1][0]; m[5]  = o2w.m[1][1]; m[6]  = o2w.m[1][2]; m[7]  = 0.f;
+            m[8]  = o2w.m[2][0]; m[9]  = o2w.m[2][1]; m[10] = o2w.m[2][2]; m[11] = 0.f;
+        };
+        auto setIdentityPM = [&](uint32_t i) {
+            float* m = &instPM[i * 12];
+            m[0]=1.f; m[1]=0.f; m[2] =0.f; m[3] =0.f;
+            m[4]=0.f; m[5]=1.f; m[6] =0.f; m[7] =0.f;
+            m[8]=0.f; m[9]=0.f; m[10]=1.f; m[11]=0.f;
+        };
+        // Full worldToObject (translation included) — row i = {w2o.m[i][0..3]},
+        // so objPos[i] = dot(row[i].xyz, worldPos) + row[i].w. Used to recover
+        // object-space hit position for MaterialX <position space="object">.
+        auto setPMFromW2O = [&](uint32_t i, const Mat4f& w2o) {
+            float* m = &instPM[i * 12];
+            m[0]  = w2o.m[0][0]; m[1]  = w2o.m[0][1]; m[2]  = w2o.m[0][2]; m[3]  = w2o.m[0][3];
+            m[4]  = w2o.m[1][0]; m[5]  = w2o.m[1][1]; m[6]  = w2o.m[1][2]; m[7]  = w2o.m[1][3];
+            m[8]  = w2o.m[2][0]; m[9]  = w2o.m[2][1]; m[10] = w2o.m[2][2]; m[11] = w2o.m[2][3];
+        };
 
         uint32_t tlasIdx = 0;
 
@@ -733,6 +803,11 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
             inst.traversableHandle = m_impl->perMeshGasHandles[mi];
             instMeshIDs[tlasIdx]   = mi;
             setIdentityNM(tlasIdx);
+            setIdentityTM(tlasIdx);
+            // Real per-mesh worldToObject — NOT identity, even though the
+            // mesh's geometry is pre-baked to world space (see setPMFromW2O
+            // comment above and MetalAccelStructure.mm's mirror of this).
+            setPMFromW2O(tlasIdx, pool.mesh(mi).staticWorldToObject);
             ++tlasIdx;
         }
 
@@ -747,6 +822,8 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
             inst.traversableHandle = m_impl->hairGasHandle;
             instMeshIDs[tlasIdx]   = numMeshes;  // virtual hair ID
             setIdentityNM(tlasIdx);
+            setIdentityTM(tlasIdx);
+            setIdentityPM(tlasIdx);
             ++tlasIdx;
         }
 
@@ -767,6 +844,8 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
                 inst.traversableHandle = m_impl->perMeshGasHandles[grp.protoMeshID];
                 instMeshIDs[tlasIdx]   = grp.protoMeshID;
                 setNMFromW2O(tlasIdx, w2o);
+                setTMFromO2W(tlasIdx, o2w);
+                setPMFromW2O(tlasIdx, w2o);
                 ++tlasIdx;
             }
         }
@@ -776,6 +855,10 @@ CudaAccelStructure::CudaAccelStructure(CudaContext& ctx, const GeometryPool& poo
         m_impl->instanceMeshIDs.upload(instMeshIDs);
         m_impl->instanceNormalMat = CudaBuffer<float>(totalInstances * 12);
         m_impl->instanceNormalMat.upload(instNM);
+        m_impl->instanceTangentMat = CudaBuffer<float>(totalInstances * 12);
+        m_impl->instanceTangentMat.upload(instTM);
+        m_impl->instancePositionMat = CudaBuffer<float>(totalInstances * 12);
+        m_impl->instancePositionMat.upload(instPM);
 
         // Upload IAS instance descriptors and build
         const size_t instBytes = totalInstances * sizeof(OptixInstance);
@@ -838,6 +921,8 @@ uint32_t CudaAccelStructure::numMeshes()      const { return m_impl->numMeshes_;
 uint64_t CudaAccelStructure::positionBuffer()         const { return m_impl->posBuffer.devPtr(); }
 uint64_t CudaAccelStructure::positionBufferClose()    const { return m_impl->posBufferClose.devPtr(); }
 uint64_t CudaAccelStructure::normalBuffer()           const { return m_impl->normals.devPtr(); }
+uint64_t CudaAccelStructure::uvBuffer()               const { return m_impl->uvs.devPtr(); }
+uint64_t CudaAccelStructure::tangentBuffer()          const { return m_impl->tangents.devPtr(); }
 uint64_t CudaAccelStructure::indexBuffer()            const { return m_impl->indices.devPtr(); }
 uint64_t CudaAccelStructure::triMeshIDBuffer()        const { return m_impl->triMeshIDs.devPtr(); }
 uint64_t CudaAccelStructure::meshVertexOffsetBuffer() const { return m_impl->meshVertexOffsets.devPtr(); }
@@ -855,6 +940,20 @@ uint64_t CudaAccelStructure::instanceMeshIDBuffer()   const {
 uint64_t CudaAccelStructure::instanceNormalMatrixBuffer() const {
 #ifdef ANACAPA_ENABLE_OPTIX
     return m_impl->instanceNormalMat.isValid() ? m_impl->instanceNormalMat.devPtr() : 0u;
+#else
+    return 0u;
+#endif
+}
+uint64_t CudaAccelStructure::instanceTangentMatrixBuffer() const {
+#ifdef ANACAPA_ENABLE_OPTIX
+    return m_impl->instanceTangentMat.isValid() ? m_impl->instanceTangentMat.devPtr() : 0u;
+#else
+    return 0u;
+#endif
+}
+uint64_t CudaAccelStructure::instancePositionMatrixBuffer() const {
+#ifdef ANACAPA_ENABLE_OPTIX
+    return m_impl->instancePositionMat.isValid() ? m_impl->instancePositionMat.devPtr() : 0u;
 #else
     return 0u;
 #endif

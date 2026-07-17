@@ -380,7 +380,8 @@ void RenderSession::appendAlembicCurves_() {
                          range.objectName,
                          entry.type == MatAssignType::Marschner ? "marschner" :
                          entry.type == MatAssignType::Chiang    ? "chiang"    :
-                         entry.type == MatAssignType::Usd       ? "usd"       : "osl");
+                         entry.type == MatAssignType::Usd       ? "usd"       :
+                         entry.type == MatAssignType::Mtlx      ? "mtlx"      : "osl");
         } else {
             spdlog::info("appendAlembicCurves: '{}' not in matassign → default hair",
                          range.objectName);

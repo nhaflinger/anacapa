@@ -33,6 +33,10 @@ struct MeshDesc {
     std::vector<Vec3f>   positions;
     std::vector<Vec3f>   normals;
     std::vector<Vec2f>   uvs;
+    // xyz = UV-derivative tangent (orthonormalized against the vertex normal),
+    // w = bitangent handedness sign. Populated by computeTangents() below;
+    // empty until then.
+    std::vector<Vec4f>   tangents;
 
     // Indices: every 3 consecutive indices form a triangle
     std::vector<uint32_t> indices;
@@ -84,6 +88,68 @@ struct MeshDesc {
 };
 
 // ---------------------------------------------------------------------------
+// computeTangents — fills MeshDesc::tangents from position/normal/uv data
+// (Lengyel per-triangle UV-derivative method). Call once after a mesh's
+// positions/normals/uvs/indices are fully populated. Safe to call on meshes
+// with no UVs (or degenerate/duplicate UVs) — falls back to an arbitrary
+// per-vertex orthonormal basis in that case.
+// ---------------------------------------------------------------------------
+inline void computeTangents(MeshDesc& mesh) {
+    const size_t numVerts = mesh.positions.size();
+    mesh.tangents.assign(numVerts, Vec4f{1.f, 0.f, 0.f, 1.f});
+    if (numVerts == 0 || mesh.indices.size() < 3) return;
+
+    std::vector<Vec3f> tanAccum(numVerts, Vec3f{0.f, 0.f, 0.f});
+    std::vector<Vec3f> bitanAccum(numVerts, Vec3f{0.f, 0.f, 0.f});
+
+    const bool hasUVs = mesh.uvs.size() == numVerts;
+    if (hasUVs) {
+        const size_t numTris = mesh.indices.size() / 3;
+        for (size_t t = 0; t < numTris; ++t) {
+            uint32_t i0 = mesh.indices[t * 3 + 0];
+            uint32_t i1 = mesh.indices[t * 3 + 1];
+            uint32_t i2 = mesh.indices[t * 3 + 2];
+
+            Vec3f e1 = mesh.positions[i1] - mesh.positions[i0];
+            Vec3f e2 = mesh.positions[i2] - mesh.positions[i0];
+            float duv1x = mesh.uvs[i1].x - mesh.uvs[i0].x;
+            float duv1y = mesh.uvs[i1].y - mesh.uvs[i0].y;
+            float duv2x = mesh.uvs[i2].x - mesh.uvs[i0].x;
+            float duv2y = mesh.uvs[i2].y - mesh.uvs[i0].y;
+
+            float r = duv1x * duv2y - duv2x * duv1y;
+            if (std::abs(r) < 1e-12f) continue;  // degenerate UV triangle
+            float invR = 1.f / r;
+
+            Vec3f tangent   = (e1 * duv2y - e2 * duv1y) * invR;
+            Vec3f bitangent = (e2 * duv1x - e1 * duv2x) * invR;
+
+            tanAccum[i0] += tangent;   tanAccum[i1] += tangent;   tanAccum[i2] += tangent;
+            bitanAccum[i0] += bitangent; bitanAccum[i1] += bitangent; bitanAccum[i2] += bitangent;
+        }
+    }
+
+    const bool hasNormals = mesh.normals.size() == numVerts;
+    for (size_t i = 0; i < numVerts; ++i) {
+        const Vec3f n = hasNormals ? mesh.normals[i] : Vec3f{0.f, 0.f, 1.f};
+
+        // Gram-Schmidt orthogonalize the accumulated tangent against the normal.
+        Vec3f t = tanAccum[i] - n * dot(n, tanAccum[i]);
+        if (t.lengthSq() < 1e-12f) {
+            // No UVs, or degenerate accumulation (e.g. all-zero UVs): fall back
+            // to an arbitrary but consistent per-vertex basis.
+            Vec3f tArb, btArb;
+            buildOrthonormalBasis(n, tArb, btArb);
+            mesh.tangents[i] = Vec4f{tArb, 1.f};
+            continue;
+        }
+        t = normalize(t);
+        float handedness = dot(cross(n, t), bitanAccum[i]) < 0.f ? -1.f : 1.f;
+        mesh.tangents[i] = Vec4f{t, handedness};
+    }
+}
+
+// ---------------------------------------------------------------------------
 // InstanceDesc — one instance of a prototype mesh.
 // Static instances have exactly one key; motion-blur instances have >= 2.
 // ---------------------------------------------------------------------------
@@ -131,6 +197,7 @@ struct InstanceGroupDesc {
 class GeometryPool {
 public:
     uint32_t addMesh(MeshDesc mesh) {
+        computeTangents(mesh);
         uint32_t id = static_cast<uint32_t>(m_meshes.size());
         m_meshes.push_back(std::move(mesh));
         return id;
@@ -143,6 +210,7 @@ public:
     // Used by the USD loader to remove GeomSubset faces from the parent mesh
     // after extracting them into separate per-material submeshes.
     void replaceMesh(uint32_t id, MeshDesc replacement) {
+        computeTangents(replacement);
         m_meshes[id] = std::move(replacement);
     }
 

@@ -17,19 +17,30 @@
 #include "../../shading/Lambertian.h"
 #include "../../shading/SoftParticle.h"
 #include "../../shading/StandardSurface.h"
+#include "../../shading/Texture.h"
 #include "../../shading/MarschnerHair.h"
 #include "../../shading/ChiangHair.h"
 #include "../../shading/lights/AreaLight.h"
 #include "../../shading/lights/DirectionalLight.h"
 #include "../../shading/lights/DomeLight.h"
 #include "../../sky/SkyLight.h"
+#include "../../shading/OslMaterial.h"
+#ifdef ANACAPA_ENABLE_MATERIALX
+#include "../../shading/MaterialXMaterial.h"
+#include "../../shading/MaterialXMslAdapter.h"
+#endif
 
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 
+#include <OpenImageIO/imageio.h>
+
 #include <spdlog/spdlog.h>
 #include <vector>
 #include <cstring>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace anacapa {
 
@@ -42,9 +53,26 @@ struct MetalPathIntegrator::Impl {
 
     id<MTLComputePipelineState> psoShade  = nil;
 
+    // MaterialX GPU codegen — rebuilt every prepare() call alongside psoShade
+    // (the set of generated functions the PSO links depends on the scene's
+    // materials). See project memory project_materialx_codegen (Phase 2).
+    id<MTLVisibleFunctionTable> mxFuncTable     = nil;
+    id<MTLBuffer>                mxUniformDataBuf = nil;
+    id<MTLBuffer>                mxDispatchBuf    = nil;
+    id<MTLBuffer>                mxArgsBuf        = nil;
+    std::vector<id<MTLLibrary>>  mxLibraries;   // keep runtime-compiled libraries alive
+
     // GPU-side scene data (uploaded once in prepare())
     std::unique_ptr<MetalBuffer<GpuMaterial>> matBuf;
     std::unique_ptr<MetalBuffer<GpuLight>>    lightBuf;
+
+    // Per-material texture atlas — base-color / normal-map images referenced by
+    // StandardSurfaceMaterial. Index-aligned with GpuMaterial::baseColorTexIdx /
+    // normalMapTexIdx. Capped at kMaxGpuTextures (Metal buffer-argument limit
+    // constrains this to a fixed-size array bound as consecutive texture slots).
+    std::vector<id<MTLTexture>>              materialTextures;
+    std::unordered_map<std::string, int32_t> textureCache;  // resolved path -> atlas index (-1 = failed/capped)
+    id<MTLTexture>                           dummyMaterialTex = nil;  // fills unused atlas slots (fixed-size array argument)
 
     // HDRI environment texture (RGBA32Float, or 1x1 white fallback)
     id<MTLTexture> envTexture     = nil;
@@ -177,6 +205,268 @@ static id<MTLComputePipelineState> makePSO(id<MTLDevice> device,
     return pso;
 }
 
+#ifdef ANACAPA_ENABLE_MATERIALX
+// ---------------------------------------------------------------------------
+// MaterialX GPU codegen — rebuilds psoShade with one runtime-compiled
+// [[visible]] wrapper function per procedural surface input actually used
+// by this scene's materials, linked alongside the always-present
+// anacapa_mx_dummy (visible_function_table index 0 — guarantees the table
+// is never empty, even for scenes with zero MaterialX materials).
+//
+// See project memory project_materialx_codegen (Phase 2) for the full
+// design: MaterialX's MSL generator emits a full fragment shader, not a
+// callable device function, so MaterialXMslAdapter wraps the useful part
+// (GlobalContext::FragmentMain()) in a plain function with a shared
+// signature — one visible_function_table can then dispatch to any of them.
+// ---------------------------------------------------------------------------
+struct MxSceneBuild {
+    id<MTLComputePipelineState> pso    = nil;
+    id<MTLVisibleFunctionTable> table  = nil;
+    id<MTLBuffer>                uniformDataBuf = nil;
+    id<MTLBuffer>                dispatchBuf    = nil;
+    id<MTLBuffer>                argBuf         = nil;
+    std::vector<id<MTLLibrary>>  libraries;   // keep runtime-compiled libraries alive
+    // scene.materials[] index -> index into the dispatch buffer. Only
+    // MaterialXMaterial entries appear here.
+    std::unordered_map<uint32_t, uint32_t> dispatchIndexForMaterial;
+};
+
+static MxSceneBuild buildMaterialXShading(id<MTLDevice> dev, id<MTLLibrary> baseLibrary,
+                                           id<MTLFunction> shadeFn,
+                                           const std::vector<const IMaterial*>& materials) {
+    MxSceneBuild build;
+
+    // Match the base metallib's -std=metal3.0 compile flag on all
+    // runtime-compiled libraries.
+    MTLCompileOptions* mxCompileOpts = [MTLCompileOptions new];
+    mxCompileOpts.languageVersion = MTLLanguageVersion3_0;
+
+    id<MTLFunction> dummyFn = [baseLibrary newFunctionWithName:@"anacapa_mx_dummy"];
+    NSMutableArray<id<MTLFunction>>* allFns = [NSMutableArray arrayWithObject:dummyFn];
+
+    std::vector<float>           allUniformData;
+    std::vector<MxDispatchEntry> dispatchEntries;
+    std::unordered_map<const MaterialXMaterial*, uint32_t> dispatchIndexForMxMat;
+
+    // Compiles one procedural input's generated shader into its own small
+    // library (sidesteps struct-name collisions between materials — each
+    // generated GlobalContext/PixelOutputs/etc. only needs to be unique
+    // within its own translation unit, not scene-wide), registers its
+    // wrapper function in the shared table, and appends its default uniform
+    // values. Returns (funcIndex, uniformOffset), or (kMxNoFunction, 0) for
+    // anything that isn't procedural or fails to compile.
+    auto compileAndRegister = [&](const MxGeneratedShader* gen, const char* baseName,
+                                   uint32_t materialIdx) -> std::pair<uint32_t, uint32_t> {
+        if (!gen || !gen->valid) return {ANACAPA_MX_NO_FUNCTION, 0u};
+
+        std::string wrapperName = "anacapa_mx_m" + std::to_string(materialIdx) + "_" + baseName;
+        MxAdapterResult adapted = buildMslAdapter(*gen, wrapperName);
+        if (!adapted.valid) return {ANACAPA_MX_NO_FUNCTION, 0u};
+
+        NSString* src = [NSString stringWithUTF8String:adapted.source.c_str()];
+        NSError*  err = nil;
+        id<MTLLibrary> unitLib = [dev newLibraryWithSource:src options:mxCompileOpts error:&err];
+        if (!unitLib) {
+            spdlog::warn("MetalPathIntegrator: MaterialX MSL compile failed for '{}': {}",
+                         wrapperName, err ? [[err localizedDescription] UTF8String] : "?");
+            return {ANACAPA_MX_NO_FUNCTION, 0u};
+        }
+        build.libraries.push_back(unitLib);
+
+        id<MTLFunction> fn = [unitLib newFunctionWithName:[NSString stringWithUTF8String:wrapperName.c_str()]];
+        if (!fn) return {ANACAPA_MX_NO_FUNCTION, 0u};
+
+        uint32_t funcIndex = static_cast<uint32_t>(allFns.count);
+        [allFns addObject:fn];
+
+        uint32_t uniformOffset = static_cast<uint32_t>(allUniformData.size());
+        allUniformData.insert(allUniformData.end(),
+                              adapted.defaultUniformData.begin(), adapted.defaultUniformData.end());
+        return {funcIndex, uniformOffset};
+    };
+
+    for (uint32_t i = 0; i < materials.size(); ++i) {
+        const MaterialXMaterial* mxMat = dynamic_cast<const MaterialXMaterial*>(materials[i]);
+#ifdef ANACAPA_ENABLE_OSL
+        if (!mxMat) {
+            // OslMaterial with an attached MaterialX GPU counterpart (OSL
+            // succeeded for CPU; see USDLoader.cpp Phase 4b) — same dispatch
+            // registration as a direct MaterialXMaterial, keyed by the same
+            // materialIdx extractGpuMaterial() uses for this scene.materials[i].
+            // Only counts when at least one input is actually procedural —
+            // must match extractGpuMaterial()'s identical gate exactly, or
+            // materials it decides NOT to reclassify would still consume a
+            // dispatch slot here for nothing.
+            if (const IMaterial* counterpart = oslGetMaterialXCounterpart(materials[i])) {
+                if (const auto* cp = dynamic_cast<const MaterialXMaterial*>(counterpart)) {
+                    if (cp->generated("base_color") || cp->generated("specular_roughness") ||
+                        cp->generated("base_metalness")) {
+                        mxMat = cp;
+                    }
+                }
+            }
+        }
+#endif
+        if (!mxMat) continue;
+
+        // Dedup by the MaterialXMaterial's own identity, not the scene.materials[]
+        // slot index — the same material (e.g. a repeated furniture/wall material)
+        // is referenced by one scene.materials[] slot per mesh instance that uses
+        // it, all pointing at the SAME MaterialXMaterial (resolveMaterial() caches
+        // by USD material path). Without this, a scene with a handful of unique
+        // procedural materials applied to thousands of mesh instances would
+        // recompile and re-register the identical generated MSL once per
+        // instance — real scenes have hit 900+ redundant compiles this way,
+        // ballooning the visible_function_table far past what's actually needed
+        // and causing GPU-side breakage (widespread black regions/noise) at scale.
+        auto dedupIt = dispatchIndexForMxMat.find(mxMat);
+        if (dedupIt != dispatchIndexForMxMat.end()) {
+            build.dispatchIndexForMaterial[i] = dedupIt->second;
+            continue;
+        }
+
+        MxDispatchEntry entry{};
+        entry.baseColorFunc = entry.roughnessFunc = entry.metalnessFunc = ANACAPA_MX_NO_FUNCTION;
+
+        std::tie(entry.baseColorFunc, entry.baseColorOffset) =
+            compileAndRegister(mxMat->generated("base_color"), "base_color", i);
+        std::tie(entry.roughnessFunc, entry.roughnessOffset) =
+            compileAndRegister(mxMat->generated("specular_roughness"), "roughness", i);
+        std::tie(entry.metalnessFunc, entry.metalnessOffset) =
+            compileAndRegister(mxMat->generated("base_metalness"), "metalness", i);
+
+        dispatchIndexForMxMat[mxMat] = static_cast<uint32_t>(dispatchEntries.size());
+        build.dispatchIndexForMaterial[i] = static_cast<uint32_t>(dispatchEntries.size());
+        dispatchEntries.push_back(entry);
+    }
+
+    // Functions reached only dynamically through a visible_function_table
+    // must be linked via .functions, NOT .privateFunctions — private
+    // functions are inlined/statically resolved at link time and cannot
+    // have a function handle created for them (functionHandleWithFunction:
+    // silently returns nil for them).
+    MTLLinkedFunctions* linked = [MTLLinkedFunctions new];
+    linked.functions = allFns;
+    MTLComputePipelineDescriptor* desc = [MTLComputePipelineDescriptor new];
+    desc.computeFunction   = shadeFn;
+    desc.linkedFunctions   = linked;
+    NSError* err = nil;
+    build.pso = [dev newComputePipelineStateWithDescriptor:desc
+                                                    options:MTLPipelineOptionNone
+                                                 reflection:nil
+                                                      error:&err];
+    if (!build.pso) {
+        spdlog::error("MetalPathIntegrator: shade PSO (MaterialX linked functions) failed: {}",
+                     err ? [[err localizedDescription] UTF8String] : "?");
+        return build;
+    }
+
+    MTLVisibleFunctionTableDescriptor* tblDesc = [MTLVisibleFunctionTableDescriptor new];
+    tblDesc.functionCount = allFns.count;
+    build.table = [build.pso newVisibleFunctionTableWithDescriptor:tblDesc];
+    for (uint32_t i = 0; i < allFns.count; ++i) {
+        id<MTLFunctionHandle> handle = [build.pso functionHandleWithFunction:allFns[i]];
+        [build.table setFunction:handle atIndex:i];
+    }
+
+    // Metal disallows zero-length buffers — pad with one inert entry.
+    if (allUniformData.empty()) allUniformData.push_back(0.f);
+    if (dispatchEntries.empty()) {
+        dispatchEntries.push_back(MxDispatchEntry{
+            ANACAPA_MX_NO_FUNCTION, 0u, ANACAPA_MX_NO_FUNCTION, 0u, ANACAPA_MX_NO_FUNCTION, 0u});
+    }
+    build.uniformDataBuf = [dev newBufferWithBytes:allUniformData.data()
+                                             length:allUniformData.size() * sizeof(float)
+                                            options:MTLResourceStorageModeShared];
+    build.dispatchBuf = [dev newBufferWithBytes:dispatchEntries.data()
+                                          length:dispatchEntries.size() * sizeof(MxDispatchEntry)
+                                         options:MTLResourceStorageModeShared];
+
+    // Encode the MxMaterialArgs argument buffer bound at the shade kernel's
+    // [[buffer(5)]] — layout (visible_function_table, 2 buffer pointers) is
+    // derived directly from the compiled kernel's declared signature.
+    id<MTLArgumentEncoder> argEnc = [shadeFn newArgumentEncoderWithBufferIndex:5];
+    build.argBuf = [dev newBufferWithLength:argEnc.encodedLength options:MTLResourceStorageModeShared];
+    [argEnc setArgumentBuffer:build.argBuf offset:0];
+    [argEnc setVisibleFunctionTable:build.table atIndex:0];
+    [argEnc setBuffer:build.uniformDataBuf offset:0 atIndex:1];
+    [argEnc setBuffer:build.dispatchBuf    offset:0 atIndex:2];
+
+    spdlog::info("MetalPathIntegrator: MaterialX GPU shading — {} generated function(s), "
+                 "{} material(s) using procedural inputs",
+                 allFns.count - 1, build.dispatchIndexForMaterial.size());
+
+    return build;
+}
+#endif // ANACAPA_ENABLE_MATERIALX
+
+// Load an image file into the GPU texture atlas, or return the cached index if
+// already loaded. Mirrors CPU TextureSampler's decode (Texture.cpp): raw pixel
+// values from OIIO (no gamma applied), sRGB->linear applied manually for color
+// textures only (linearize=false for normal/roughness/etc maps). Returns -1 on
+// missing path, load failure, or once the atlas cap is reached.
+static int32_t loadOrCacheTexture(id<MTLDevice> dev, const std::string& path, bool linearize,
+                                   std::vector<id<MTLTexture>>& textures,
+                                   std::unordered_map<std::string, int32_t>& cache) {
+    if (path.empty()) return -1;
+    auto it = cache.find(path);
+    if (it != cache.end()) return it->second;
+
+    if (textures.size() >= kMaxGpuTextures) {
+        static std::unordered_set<std::string> s_warned;
+        if (s_warned.insert(path).second)
+            spdlog::warn("MetalPathIntegrator: texture atlas cap ({}) reached — "
+                         "'{}' falls back to a flat constant color", kMaxGpuTextures, path);
+        cache[path] = -1;
+        return -1;
+    }
+
+    auto in = OIIO::ImageInput::open(path);
+    if (!in) {
+        spdlog::warn("MetalPathIntegrator: failed to open texture '{}'", path);
+        cache[path] = -1;
+        return -1;
+    }
+    const OIIO::ImageSpec& spec = in->spec();
+    int w = spec.width, h = spec.height, nchans = spec.nchannels;
+    std::vector<float> pixels(size_t(w) * size_t(h) * size_t(nchans));
+    bool ok = in->read_image(0, 0, 0, nchans, OIIO::TypeDesc::FLOAT, pixels.data());
+    in->close();
+    if (!ok || w <= 0 || h <= 0) {
+        spdlog::warn("MetalPathIntegrator: failed to read texture '{}'", path);
+        cache[path] = -1;
+        return -1;
+    }
+
+    std::vector<float> rgba(size_t(w) * size_t(h) * 4);
+    for (size_t p = 0; p < size_t(w) * size_t(h); ++p) {
+        float r = pixels[p * nchans + 0];
+        float g = nchans > 1 ? pixels[p * nchans + 1] : r;
+        float b = nchans > 2 ? pixels[p * nchans + 2] : r;
+        float a = nchans > 3 ? pixels[p * nchans + 3] : 1.f;
+        if (linearize) {
+            Spectrum lin = srgbToLinear(Spectrum{r, g, b});
+            r = lin.x; g = lin.y; b = lin.z;
+        }
+        rgba[p * 4 + 0] = r; rgba[p * 4 + 1] = g; rgba[p * 4 + 2] = b; rgba[p * 4 + 3] = a;
+    }
+
+    MTLTextureDescriptor* td = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
+        width:w height:h mipmapped:NO];
+    td.usage = MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> tex = [dev newTextureWithDescriptor:td];
+    tex.label = [NSString stringWithUTF8String:path.c_str()];
+    [tex replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0
+              withBytes:rgba.data() bytesPerRow:size_t(w) * 4 * sizeof(float)];
+
+    int32_t idx = static_cast<int32_t>(textures.size());
+    textures.push_back(tex);
+    cache[path] = idx;
+    return idx;
+}
+
 // Attempt to read base_color / emission from a CPU IMaterial*.
 // Returns defaults for unknown types.
 // Populate SSS fields in a GpuMaterial from the CPU IMaterial's subsurfaceParams().
@@ -192,7 +482,11 @@ static void fillSSSFields(GpuMaterial& gm, const IMaterial* mat) {
     gm.subsurfaceStrength  = sss.strength;
 }
 
-static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
+static GpuMaterial extractGpuMaterial(const IMaterial* mat, id<MTLDevice> dev,
+                                       std::vector<id<MTLTexture>>& atlas,
+                                       std::unordered_map<std::string, int32_t>& texCache,
+                                       uint32_t materialIdx = 0,
+                                       const std::unordered_map<uint32_t, uint32_t>* mxDispatchMap = nullptr) {
     GpuMaterial gm{};
     gm.baseColor  = {0.5f, 0.5f, 0.5f};
     gm.emissive   = {0.f,  0.f,  0.f};
@@ -202,6 +496,11 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
     gm.specular    = 0.5f;   // matches MaterialX standard_surface default
     gm.type = kMatLambertian;
     gm.causticGenerator = 0u;
+    gm.baseColorTexIdx = -1;
+    gm.normalMapTexIdx = -1;
+    gm.normalScale = 1.f;
+    gm.normalBias  = -1.f;
+    gm.mxDispatchIdx = -1;
 
     if (!mat) return gm;
     gm.causticGenerator = mat->isCausticGenerator() ? 1u : 0u;
@@ -281,6 +580,66 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
         }
     }
 
+#ifdef ANACAPA_ENABLE_MATERIALX
+    // MaterialX-codegen'd procedural surface params — either mat IS a
+    // MaterialXMaterial directly (OSL unavailable for this material; see
+    // USDLoader.cpp's Phase 4a fallback), or mat is an OslMaterial with a
+    // MaterialX GPU counterpart attached (OSL succeeded for CPU, but this
+    // gives GPU real per-pixel procedural shading instead of OslMaterial's
+    // single flat-probed color — see USDLoader.cpp's Phase 4b and
+    // OslMaterial.h's oslGetMaterialXCounterpart()). Checked after emission/
+    // translucent/glass so those still take priority using mat's real
+    // Le()/transmittanceColor() — a pure MaterialXMaterial can never match
+    // any of those (Le()==0, transmittanceColor()==black by construction),
+    // so this placement doesn't change its own classification.
+    {
+        const MaterialXMaterial* mxMat = dynamic_cast<const MaterialXMaterial*>(mat);
+#ifdef ANACAPA_ENABLE_OSL
+        if (!mxMat) {
+            // OSL-counterpart materials: only worth using when at least one
+            // of base_color/roughness/metalness is actually procedural.
+            // Otherwise every value MaterialXMaterial would supply is just
+            // that input's literal from the .mtlx file — strictly worse than
+            // OslMaterial's own probed reflectance/roughness/metalness
+            // (a real evaluation of the executed shader, texture maps
+            // included), and for materials where the .mtlx literal happens
+            // to diverge from what OSL actually renders (e.g. a texture-
+            // driven roughness flattened to a single literal in the .mtlx),
+            // silently swapping to it caused a real regression — most
+            // materials in a real scene have a .mtlx sidecar exported
+            // whether or not anything in it is actually procedural, so
+            // treating "has a counterpart" as sufficient reclassified far
+            // more materials than intended, wrongly overriding correct OSL
+            // values with the .mtlx's now-inconsistent literal snapshot.
+            if (const IMaterial* counterpart = oslGetMaterialXCounterpart(mat)) {
+                if (const auto* cp = dynamic_cast<const MaterialXMaterial*>(counterpart)) {
+                    if (cp->generated("base_color") || cp->generated("specular_roughness") ||
+                        cp->generated("base_metalness")) {
+                        mxMat = cp;
+                    }
+                }
+            }
+        }
+#endif
+        if (mxMat) {
+            gm.type = kMatMaterialX;
+            SurfaceInteraction si; si.n = si.ng = {0,0,1};
+            ShadingContext ctx(si, {0,0,1});
+            Spectrum alb = mxMat->reflectance(ctx);
+            gm.baseColor = {alb.x, alb.y, alb.z};
+            gm.roughness = mxMat->roughness();
+            gm.metalness = mxMat->metalness();
+            if (mxDispatchMap) {
+                auto it = mxDispatchMap->find(materialIdx);
+                if (it != mxDispatchMap->end())
+                    gm.mxDispatchIdx = static_cast<int32_t>(it->second);
+            }
+            fillSSSFields(gm, mat);
+            return gm;
+        }
+    }
+#endif
+
     // StandardSurfaceMaterial — promote to kMatGGX (including diffuse-flagged
     // ones like Cornell walls) so the layered eval picks up Disney retro-reflection,
     // spec/diff balance, and Kulla-Conty multi-scatter compensation on the GPU.
@@ -296,6 +655,18 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
             gm.metalness   = ssm->params().metalness.value;
             gm.specular    = ssm->params().specular.value;
             gm.specularIOR = ssm->params().specular_IOR;
+
+            if (ssm->params().base_color.hasTexture()) {
+                gm.baseColorTexIdx = loadOrCacheTexture(
+                    dev, ssm->params().base_color.path, /*linearize=*/true, atlas, texCache);
+            }
+            if (ssm->params().has_normal_map && ssm->params().normal_map.hasTexture()) {
+                gm.normalMapTexIdx = loadOrCacheTexture(
+                    dev, ssm->params().normal_map.path, /*linearize=*/false, atlas, texCache);
+                gm.normalScale = ssm->params().normal_scale;
+                gm.normalBias  = ssm->params().normal_bias;
+            }
+
             fillSSSFields(gm, mat);
             return gm;
         }
@@ -811,13 +1182,57 @@ void MetalPathIntegrator::prepare(const SceneView& scene) {
                      gpuHalos.size(), nodes.size());
     }
 
+    // Rebuild psoShade with any MaterialX-generated functions this scene's
+    // materials need, linked alongside the always-present dummy function.
+    // Runs unconditionally (even for zero-MaterialX scenes) so psoShade
+    // always has the linked-functions form the kernel's mxArgs binding
+    // expects. On failure, keep the plain PSO built at construction time —
+    // it still declares the buffer(5) argument, just with an unencoded
+    // argument buffer, which is safe as long as no material resolves to
+    // kMatMaterialX (mxDispatchIdx stays -1 for everything below).
+    std::unordered_map<uint32_t, uint32_t> mxDispatchMap;
+#ifdef ANACAPA_ENABLE_MATERIALX
+    {
+        id<MTLLibrary>  baseLib = (__bridge id<MTLLibrary>)m_impl->ctx->library();
+        id<MTLFunction> shadeFn = [baseLib newFunctionWithName:@"shade"];
+        MxSceneBuild build = buildMaterialXShading(dev, baseLib, shadeFn, scene.materials);
+        if (build.pso) {
+            m_impl->psoShade         = build.pso;
+            m_impl->mxFuncTable      = build.table;
+            m_impl->mxUniformDataBuf = build.uniformDataBuf;
+            m_impl->mxDispatchBuf    = build.dispatchBuf;
+            m_impl->mxArgsBuf        = build.argBuf;
+            m_impl->mxLibraries      = std::move(build.libraries);
+            mxDispatchMap            = std::move(build.dispatchIndexForMaterial);
+        } else {
+            spdlog::warn("MetalPathIntegrator: MaterialX PSO rebuild failed — "
+                         "procedural materials will render with literal fallback values");
+        }
+    }
+#endif
+
     // Upload materials; compute sssD_max for SSS hash grid sizing
     uint32_t nMat = static_cast<uint32_t>(scene.materials.size());
     m_impl->matBuf  = std::make_unique<MetalBuffer<GpuMaterial>>(
         (__bridge void*)dev, std::max(nMat, 1u));
     m_impl->sssD_max = 0.f;
+    m_impl->materialTextures.clear();
+    m_impl->textureCache.clear();
+    if (!m_impl->dummyMaterialTex) {
+        MTLTextureDescriptor* dummyTd = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
+            width:1 height:1 mipmapped:NO];
+        dummyTd.usage = MTLTextureUsageShaderRead;
+        dummyTd.storageMode = MTLStorageModeShared;
+        m_impl->dummyMaterialTex = [dev newTextureWithDescriptor:dummyTd];
+        float white[4] = {1.f, 1.f, 1.f, 1.f};
+        [m_impl->dummyMaterialTex replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0
+                                     withBytes:white bytesPerRow:4 * sizeof(float)];
+    }
     for (uint32_t i = 0; i < nMat; ++i) {
-        (*m_impl->matBuf)[i] = extractGpuMaterial(scene.materials[i]);
+        (*m_impl->matBuf)[i] = extractGpuMaterial(scene.materials[i], dev,
+                                                    m_impl->materialTextures, m_impl->textureCache,
+                                                    i, &mxDispatchMap);
         if (scene.materials[i]) {
             auto sss = scene.materials[i]->subsurfaceParams();
             if (sss.weight > 0.f)
@@ -976,6 +1391,8 @@ void MetalPathIntegrator::prepare(const SceneView& scene) {
         m_impl->fallbackEnvTex = fb;
     }
 
+    spdlog::info("MetalPathIntegrator::prepare — {} material textures loaded into atlas",
+                 m_impl->materialTextures.size());
     spdlog::info("MetalPathIntegrator::prepare — {} materials, {} lights, "
                  "{} verts, {} tris",
                  m_impl->numMaterials, m_impl->numLights,
@@ -1107,10 +1524,8 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     id<MTLBuffer> camMTL   = [dev newBufferWithBytes:&camParams
                                               length:sizeof(GpuCameraParams)
                                              options:MTLResourceStorageModeShared];
-    uint32_t numLightsVal = m_impl->numLights;
-    uint32_t numMatsVal   = m_impl->numMaterials;
-    id<MTLBuffer> numLightsMTL = [dev newBufferWithBytes:&numLightsVal length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
-    id<MTLBuffer> numMatsMTL   = [dev newBufferWithBytes:&numMatsVal   length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
+    GpuCounts counts{m_impl->numLights, m_impl->numMaterials};
+    id<MTLBuffer> countsMTL = [dev newBufferWithBytes:&counts length:sizeof(GpuCounts) options:MTLResourceStorageModeShared];
 
     id<MTLAccelerationStructure> tlas = (__bridge id<MTLAccelerationStructure>)m_impl->accel->tlas();
     id<MTLTexture> envTex = m_impl->envTexture ? m_impl->envTexture : m_impl->fallbackEnvTex;
@@ -1157,13 +1572,13 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
         [enc setBuffer:camMTL        offset:0 atIndex:0];
         [enc setBuffer:accumMTL      offset:0 atIndex:1];
         [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->lightBuf->handle() offset:0 atIndex:2];
-        [enc setBuffer:numLightsMTL  offset:0 atIndex:3];
+        [enc setBuffer:countsMTL     offset:0 atIndex:3];
         [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->matBuf->handle()   offset:0 atIndex:4];
-        [enc setBuffer:numMatsMTL    offset:0 atIndex:5];
+        [enc setBuffer:m_impl->mxArgsBuf offset:0 atIndex:5];
         [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->normalBuffer()              offset:0 atIndex:6];
         [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->indexBuffer()               offset:0 atIndex:7];
         [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->instanceMeshIDBuffer()      offset:0 atIndex:8];
-        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->meshVertexOffsetBuffer()    offset:0 atIndex:9];
+        [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->vertexExtraBuffer()          offset:0 atIndex:9];
         [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->meshIndexOffsetBuffer()     offset:0 atIndex:10];
         [enc setBuffer:batchMTL      offset:0 atIndex:11];
         [enc setAccelerationStructure:tlas atBufferIndex:12];
@@ -1198,9 +1613,19 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
         if (m_impl->haloPrimIdxBuf)[enc setBuffer:m_impl->haloPrimIdxBuf offset:0 atIndex:29];
         [enc setBuffer:(__bridge id<MTLBuffer>)m_impl->accel->instanceNormalMatrixBuffer() offset:0 atIndex:30];
         [enc setTexture:envTex atIndex:0];
+        for (uint32_t ti = 0; ti < kMaxGpuTextures; ++ti) {
+            id<MTLTexture> tex = (ti < m_impl->materialTextures.size())
+                ? m_impl->materialTextures[ti] : m_impl->dummyMaterialTex;
+            [enc setTexture:tex atIndex:1 + ti];
+        }
         [enc useResource:tlas usage:MTLResourceUsageRead];
         for (void* blasVoid : m_impl->accel->blasHandles())
             [enc useResource:(__bridge id<MTLAccelerationStructure>)blasVoid usage:MTLResourceUsageRead];
+        // Buffers referenced only indirectly through the mxArgs argument
+        // buffer need explicit residency tracking.
+        if (m_impl->mxUniformDataBuf) [enc useResource:m_impl->mxUniformDataBuf usage:MTLResourceUsageRead];
+        if (m_impl->mxDispatchBuf)    [enc useResource:m_impl->mxDispatchBuf    usage:MTLResourceUsageRead];
+        if (m_impl->mxFuncTable)      [enc useResource:m_impl->mxFuncTable      usage:MTLResourceUsageRead];
         [enc dispatchThreads:threadsPerGrid threadsPerThreadgroup:threadsPerThreadgroup];
         [enc endEncoding];
         [cmdBuf commit];
@@ -1329,14 +1754,10 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
     id<MTLBuffer> camMTL   = [dev newBufferWithBytes:&camParams
                                               length:sizeof(GpuCameraParams)
                                              options:MTLResourceStorageModeShared];
-    uint32_t numLightsVal = m_impl->numLights;
-    uint32_t numMatsVal   = m_impl->numMaterials;
-    id<MTLBuffer> numLightsMTL = [dev newBufferWithBytes:&numLightsVal
-                                                  length:sizeof(uint32_t)
-                                                 options:MTLResourceStorageModeShared];
-    id<MTLBuffer> numMatsMTL   = [dev newBufferWithBytes:&numMatsVal
-                                                  length:sizeof(uint32_t)
-                                                 options:MTLResourceStorageModeShared];
+    GpuCounts counts{m_impl->numLights, m_impl->numMaterials};
+    id<MTLBuffer> countsMTL = [dev newBufferWithBytes:&counts
+                                                length:sizeof(GpuCounts)
+                                               options:MTLResourceStorageModeShared];
     id<MTLBuffer> sampleIdxMTL = [dev newBufferWithLength:sizeof(uint32_t)
                                                    options:MTLResourceStorageModeShared];
 
@@ -1364,13 +1785,13 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
         setB (0,  camMTL);
         setB (1,  accumMTL);
         setB (2,  (__bridge id<MTLBuffer>)m_impl->lightBuf->handle());
-        setB (3,  numLightsMTL);
+        setB (3,  countsMTL);
         setB (4,  (__bridge id<MTLBuffer>)m_impl->matBuf->handle());
-        setB (5,  numMatsMTL);
+        setB (5,  m_impl->mxArgsBuf);
         setBV(6,  m_impl->accel->normalBuffer());
         setBV(7,  m_impl->accel->indexBuffer());
         setBV(8,  m_impl->accel->instanceMeshIDBuffer());
-        setBV(9,  m_impl->accel->meshVertexOffsetBuffer());
+        setBV(9,  m_impl->accel->vertexExtraBuffer());
         setBV(10, m_impl->accel->meshIndexOffsetBuffer());
         setB (11, sampleIdxMTL);
 
@@ -1419,6 +1840,11 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
                               ? m_impl->envTexture
                               : m_impl->fallbackEnvTex;
         [enc setTexture:envTex atIndex:0];
+        for (uint32_t ti = 0; ti < kMaxGpuTextures; ++ti) {
+            id<MTLTexture> tex = (ti < m_impl->materialTextures.size())
+                ? m_impl->materialTextures[ti] : m_impl->dummyMaterialTex;
+            [enc setTexture:tex atIndex:1 + ti];
+        }
 
         // Mark TLAS + all BLAS as used — required for GPU hazard tracking.
         // Without this, the GPU cannot access the BLAS data and intersections
@@ -1429,6 +1855,9 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
                 (__bridge id<MTLAccelerationStructure>)blasVoid;
             [enc useResource:blas usage:MTLResourceUsageRead];
         }
+        if (m_impl->mxUniformDataBuf) [enc useResource:m_impl->mxUniformDataBuf usage:MTLResourceUsageRead];
+        if (m_impl->mxDispatchBuf)    [enc useResource:m_impl->mxDispatchBuf    usage:MTLResourceUsageRead];
+        if (m_impl->mxFuncTable)      [enc useResource:m_impl->mxFuncTable      usage:MTLResourceUsageRead];
 
         MTLSize threadsPerGrid        = MTLSizeMake(tileW, tileH, 1);
         MTLSize threadsPerThreadgroup = MTLSizeMake(8, 8, 1);

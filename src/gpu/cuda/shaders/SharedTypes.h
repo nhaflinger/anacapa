@@ -20,6 +20,13 @@
 // the struct layout exactly matching the CPU-side layout.
 struct GpuFloat3 { float x, y, z; };
 struct GpuFloat2 { float x, y; };
+struct GpuFloat4 { float x, y, z, w; };
+
+// Per-material texture atlas cap — kept in sync with the Metal backend's
+// kMaxGpuTextures for parity, though CUDA has no per-kernel-argument limit
+// forcing this; it's just a fixed-size device array of texture handles here.
+#define ANACAPA_MAX_GPU_TEXTURES 48
+constexpr uint32_t kMaxGpuTextures = ANACAPA_MAX_GPU_TEXTURES;
 
 // ---------------------------------------------------------------------------
 // GpuRay
@@ -58,6 +65,7 @@ enum GpuMaterialType : uint32_t {
     kMatGlass       = 3,
     kMatHair        = 4,   // Marschner — handled via hairTris/hairMats buffers
     kMatTranslucent = 5,   // diffuse transmission — power-cosine lobe around straight-through dir
+    kMatMaterialX   = 6,   // MaterialX-codegen'd procedural surface params, feeds evalLayeredBSDF()
 };
 
 struct GpuMaterial {
@@ -84,7 +92,36 @@ struct GpuMaterial {
     float      subsurfaceRadius;   // effective d = radius * scale (precomputed by host)
     float      subsurfaceStrength; // independent amplifier (> 1 boosts SSS contribution)
     float      scatter;            // translucent lobe width: 0=delta straight-through, 1=Lambertian
-    float      _sss_pad[2];        // keep struct 16-byte aligned (Metal parity)
+    // Texture atlas indices; -1 = no texture, use the constant field above instead.
+    int32_t    baseColorTexIdx;
+    int32_t    normalMapTexIdx;
+    float      normalScale;
+    float      normalBias;
+    // Index into LaunchParams::mxDispatch when type == kMatMaterialX; -1 otherwise.
+    int32_t    mxDispatchIdx;
+};
+
+// ---------------------------------------------------------------------------
+// MaterialX GPU codegen dispatch — CUDA counterpart of the Metal backend's
+// identically-named struct (src/gpu/metal/shaders/SharedTypes.h). Each
+// kMatMaterialX GpuMaterial owns one MxDispatchEntry. A slot's funcIndex is
+// kMxNoFunction when that surface input was a plain literal for this
+// material. Unlike Metal (which needs a visible_function_table + argument
+// buffer to dispatch dynamically), CUDA/OptiX dispatches generated functions
+// via optixDirectCall<>(sbtIndex, ...) — funcIndex here IS that SBT index
+// directly (offset by however many non-MaterialX callables precede them;
+// see CudaPathIntegrator.cu's buildMaterialXCallables()).
+// ---------------------------------------------------------------------------
+#define ANACAPA_MX_NO_FUNCTION 0xFFFFFFFFu
+constexpr uint32_t kMxNoFunction = ANACAPA_MX_NO_FUNCTION;
+
+struct MxDispatchEntry {
+    uint32_t baseColorFunc;    // optixDirectCall SBT index, or kMxNoFunction
+    uint32_t baseColorOffset;  // float offset into LaunchParams::mxUniforms
+    uint32_t roughnessFunc;
+    uint32_t roughnessOffset;
+    uint32_t metalnessFunc;
+    uint32_t metalnessOffset;
 };
 
 // ---------------------------------------------------------------------------

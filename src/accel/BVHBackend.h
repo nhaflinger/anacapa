@@ -78,10 +78,11 @@ static_assert(sizeof(BVHTriTrav) == 64, "BVHTriTrav must be 64 bytes (one cache 
 struct BVHTriAttrib {
     Vec3f    n;
     Vec3f    sn0, sn1, sn2;
+    Vec4f    t0, t1, t2;    // xyz = tangent, w = handedness sign (MeshDesc::tangents)
     Vec2f    uv0, uv1, uv2;
     uint32_t primID;
 };
-static_assert(sizeof(BVHTriAttrib) == 96, "BVHTriAttrib must be 96 bytes");
+static_assert(sizeof(BVHTriAttrib) == 144, "BVHTriAttrib must be 144 bytes");
 
 // ---------------------------------------------------------------------------
 // BLAS — bottom-level acceleration structure for one prototype mesh.

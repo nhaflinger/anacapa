@@ -78,6 +78,12 @@ void BVHBackend::commit() {
                 return idx < mesh.uvs.size() ? mesh.uvs[idx] : Vec2f{0.f, 0.f};
             };
             attrib.uv0 = getUV(i0); attrib.uv1 = getUV(i1); attrib.uv2 = getUV(i2);
+
+            auto getT = [&](uint32_t idx) -> Vec4f {
+                return idx < mesh.tangents.size() ? mesh.tangents[idx] : Vec4f{1.f, 0.f, 0.f, 1.f};
+            };
+            attrib.t0 = getT(i0); attrib.t1 = getT(i1); attrib.t2 = getT(i2);
+
             attrib.primID = ti;
 
             m_trav.push_back(trav);
@@ -597,6 +603,12 @@ void BVHBackend::buildBLAS(uint32_t groupID) {
             return idx < proto.uvs.size() ? proto.uvs[idx] : Vec2f{0.f, 0.f};
         };
         attrib.uv0 = getUV(i0); attrib.uv1 = getUV(i1); attrib.uv2 = getUV(i2);
+
+        auto getT = [&](uint32_t idx) -> Vec4f {
+            return idx < proto.tangents.size() ? proto.tangents[idx] : Vec4f{1.f, 0.f, 0.f, 1.f};
+        };
+        attrib.t0 = getT(i0); attrib.t1 = getT(i1); attrib.t2 = getT(i2);
+
         attrib.primID = ti;
 
         blas.trav.push_back(trav);
@@ -956,6 +968,9 @@ void BVHBackend::fillSurfaceInteraction(const BVHTriTrav& trav,
     si.t  = t;
     si.uv = attrib.uv0 * w + attrib.uv1 * u + attrib.uv2 * v;
 
+    Vec3f tanLocal = attrib.t0.xyz() * w + attrib.t1.xyz() * u + attrib.t2.xyz() * v;
+    si.dpduSign = (attrib.t0.w + attrib.t1.w + attrib.t2.w) >= 0.f ? 1.f : -1.f;
+
     if (worldXfm) {
         si.p             = worldXfm->transformPoint(trav.v0 + trav.e1 * u + trav.e2 * v);
         si.objectToWorld = *worldXfm;
@@ -965,10 +980,14 @@ void BVHBackend::fillSurfaceInteraction(const BVHTriTrav& trav,
         si.ng = safeNormalize(si.worldToObject.transformNormal(attrib.n));
         si.n  = safeNormalize(si.worldToObject.transformNormal(
                     attrib.sn0 * w + attrib.sn1 * u + attrib.sn2 * v));
+        // Tangents are ordinary directions (not normals) — transform by the
+        // plain linear part of objectToWorld, not the inverse-transpose.
+        si.dpdu = safeNormalize(worldXfm->transformVector(tanLocal));
     } else {
         si.p  = trav.v0 + trav.e1 * u + trav.e2 * v;
         si.ng = attrib.n;
         si.n  = safeNormalize(attrib.sn0 * w + attrib.sn1 * u + attrib.sn2 * v);
+        si.dpdu = safeNormalize(tanLocal);
         const MeshDesc& mesh = m_pool.mesh(trav.meshID());
         si.objectToWorld = mesh.staticObjectToWorld;
         si.worldToObject = mesh.staticWorldToObject;

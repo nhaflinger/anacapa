@@ -28,7 +28,10 @@ struct MetalAccelStructure::Impl {
     id<MTLBuffer> positionBuffer          = nil;  // packed_float3 — world-space at shutter-open
     id<MTLBuffer> positionBufferClose     = nil;  // packed_float3 — world-space at shutter-close (= positionBuffer for static)
     id<MTLBuffer> normalBuffer            = nil;  // packed_float3
-    id<MTLBuffer> uvBuffer                = nil;  // float2
+    // Combined uv+tangent buffer (one MTLBuffer instead of two) — Metal caps
+    // buffer arguments at 31 per kernel and the shade kernel is already at
+    // that limit, so uv+tangent share a single slot via the VertexExtra struct.
+    id<MTLBuffer> vertexExtraBuffer       = nil;  // VertexExtra { packed_float2 uv; packed_float4 tangent; }
     id<MTLBuffer> indexBuffer             = nil;  // uint32_t
     id<MTLBuffer> triMeshIDBuffer         = nil;  // uint32_t per tri
     id<MTLBuffer> meshVertexOffsetBuffer  = nil;  // uint32_t per mesh
@@ -36,9 +39,10 @@ struct MetalAccelStructure::Impl {
 
     // Per-TLAS-instance lookup buffers (size = totalInstances).
     // instanceMeshIDBuffer: TLAS instance index → pool mesh ID (for vertex/index/material lookup)
-    // instanceNormalMatrixBuffer: 3 × float4 rows per instance = worldToObject^T for normal xfm
-    //   For regular meshes: identity (normals already world-space).
-    //   For prototype instances: actual worldToObject^T rows.
+    // instanceNormalMatrixBuffer: 9 × float4 rows per instance —
+    //   [0-2]=normal xfm, [3-5]=tangent xfm, [6-8]=full worldToObject (position).
+    //   For regular meshes: [0-5] identity (already world-space), [6-8] real.
+    //   For prototype instances: [0-8] all actual transforms.
     id<MTLBuffer> instanceMeshIDBuffer        = nil;
     id<MTLBuffer> instanceNormalMatrixBuffer  = nil;
 
@@ -74,6 +78,8 @@ static id<MTLBuffer> makeSharedBuffer(id<MTLDevice> device,
 // Aligned float3 for Metal packed_float3 (12 bytes, no padding)
 struct PackedFloat3 { float x, y, z; };
 struct PackedFloat2 { float x, y; };
+struct PackedFloat4 { float x, y, z, w; };  // xyz = tangent, w = handedness
+struct VertexExtra { PackedFloat2 uv; PackedFloat4 tangent; };  // must match Shade.metal's VertexExtra exactly
 
 // ---------------------------------------------------------------------------
 // Hair tessellation helpers
@@ -250,13 +256,13 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
 
         // All attribute buffers: 1 dummy element each so Metal doesn't see nil buffers.
         PackedFloat3 dummyN{0,1,0};
-        PackedFloat2 dummyUV{0,0};
+        VertexExtra  dummyExtra{{0,0}, {1,0,0,1}};
         uint32_t     dummyZero = 0;
         m_impl->positionBuffer        = dvBuf;
         m_impl->positionBufferClose   = dvBuf;
         m_impl->normalBuffer          = [device newBufferWithBytes:&dummyN length:sizeof(PackedFloat3)
                                                            options:MTLResourceStorageModeShared];
-        m_impl->uvBuffer              = [device newBufferWithBytes:&dummyUV length:sizeof(PackedFloat2)
+        m_impl->vertexExtraBuffer     = [device newBufferWithBytes:&dummyExtra length:sizeof(VertexExtra)
                                                            options:MTLResourceStorageModeShared];
         m_impl->indexBuffer           = diBuf;
         m_impl->triMeshIDBuffer       = [device newBufferWithBytes:&dummyZero length:sizeof(uint32_t)
@@ -334,7 +340,7 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
     std::vector<PackedFloat3> positions     (totalVerts);  // world-space at shutter-open
     std::vector<PackedFloat3> positionsClose(totalVerts);  // world-space at shutter-close
     std::vector<PackedFloat3> normals       (totalVerts);
-    std::vector<PackedFloat2> uvs           (totalVerts);
+    std::vector<VertexExtra>  vertexExtra   (totalVerts);
     std::vector<uint32_t>     indices       (totalTris * 3);
     std::vector<uint32_t>     triMeshIDs   (totalTris);
     std::vector<uint32_t>     vertexOffsets(numMeshes);
@@ -369,9 +375,23 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
             positions     [vBase + v] = pOpen;
             positionsClose[vBase + v] = pClose;
             normals        [vBase + v] = {n.x, n.y, n.z};
-            uvs[vBase + v] = m.uvs.empty()
+            vertexExtra[vBase + v].uv = m.uvs.empty()
                 ? PackedFloat2{0,0}
                 : PackedFloat2{m.uvs[v].x, m.uvs[v].y};
+
+            Vec4f tan = v < m.tangents.size() ? m.tangents[v] : Vec4f{1.f, 0.f, 0.f, 1.f};
+            if (m.hasMotion()) {
+                // Tangents are ordinary directions — transform by the plain
+                // linear part of worldToObject^-1, i.e. objectToWorld's
+                // rotation, same convention as positions (baked at shutter-open).
+                const Mat4f& xfOpen = m.motionKeys.front().objectToWorld;
+                Vec3f tw = xfOpen.transformVector(tan.xyz());
+                float len = tw.length();
+                if (len > 1e-6f) tw = tw * (1.f / len);
+                vertexExtra[vBase + v].tangent = {tw.x, tw.y, tw.z, tan.w};
+            } else {
+                vertexExtra[vBase + v].tangent = {tan.x, tan.y, tan.z, tan.w};
+            }
         }
 
         for (uint32_t t = 0; t < m.numTriangles(); ++t) {
@@ -397,8 +417,8 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
         device, positionsClose.data(), totalVerts * sizeof(PackedFloat3), "positionsClose");
     m_impl->normalBuffer   = makeSharedBuffer(
         device, normals.data(),    totalVerts * sizeof(PackedFloat3), "normals");
-    m_impl->uvBuffer       = makeSharedBuffer(
-        device, uvs.data(),        totalVerts * sizeof(PackedFloat2), "uvs");
+    m_impl->vertexExtraBuffer = makeSharedBuffer(
+        device, vertexExtra.data(), totalVerts * sizeof(VertexExtra), "vertexExtra");
     m_impl->indexBuffer    = makeSharedBuffer(
         device, indices.data(),    totalTris * 3 * sizeof(uint32_t),  "indices");
     m_impl->triMeshIDBuffer = makeSharedBuffer(
@@ -618,26 +638,61 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
 
     // Per-TLAS-instance lookup data (CPU-side, uploaded below)
     // instanceMeshIDs: TLAS instance → pool mesh ID (hair → numMeshes virtual ID)
-    // instanceNormalMatrix: 3 × float4 = rows of worldToObject^T per TLAS instance
+    // instanceNormalMatrix: 9 × float4 rows per instance —
+    //   rows [0-2] = worldToObject^T (normal transform)
+    //   rows [3-5] = plain objectToWorld rotation (tangent transform — tangents
+    //                are ordinary directions, not normals, so no inverse-transpose)
+    //   rows [6-8] = plain worldToObject (full, translation included) — used to
+    //                reconstruct object-space hit position for MaterialX
+    //                <position space="object"> nodes. Unlike the normal/tangent
+    //                rows, this is NOT identity for regular (non-instanced)
+    //                meshes even though their geometry is pre-baked to world
+    //                space at export time — that baking uses each mesh's own
+    //                real objectToWorld, so recovering object-space position
+    //                still requires the real (non-identity) worldToObject.
     std::vector<uint32_t>  instanceMeshIDs       (totalInstances);
-    std::vector<float>     instanceNormalMatrices (totalInstances * 12, 0.f);
+    std::vector<float>     instanceNormalMatrices (totalInstances * 36, 0.f);
 
     auto setIdentityNM = [&](uint32_t tlasIdx) {
-        float* m = &instanceNormalMatrices[tlasIdx * 12];
-        // rows of identity^T = identity
-        m[0] = 1.f; m[1] = 0.f; m[2] = 0.f; m[3] = 0.f;
-        m[4] = 0.f; m[5] = 1.f; m[6] = 0.f; m[7] = 0.f;
-        m[8] = 0.f; m[9] = 0.f; m[10] = 1.f; m[11] = 0.f;
+        float* m = &instanceNormalMatrices[tlasIdx * 36];
+        // rows [0-2], [3-5], and [6-8] of identity are all identity
+        for (int r = 0; r < 9; ++r) {
+            m[r*4 + 0] = (r % 3 == 0) ? 1.f : 0.f;
+            m[r*4 + 1] = (r % 3 == 1) ? 1.f : 0.f;
+            m[r*4 + 2] = (r % 3 == 2) ? 1.f : 0.f;
+            m[r*4 + 3] = 0.f;
+        }
     };
 
     auto setNormalMatrix = [&](uint32_t tlasIdx, const Mat4f& w2o) {
         // Store rows of worldToObject^T = columns of worldToObject.
         // Row i = { w2o.m[0][i], w2o.m[1][i], w2o.m[2][i] } (col i of w2o)
         // In shader: result[i] = dot(n_obj, row[i]) = worldToObject^T * n_obj
-        float* m = &instanceNormalMatrices[tlasIdx * 12];
+        float* m = &instanceNormalMatrices[tlasIdx * 36];
         m[0]  = w2o.m[0][0]; m[1]  = w2o.m[1][0]; m[2]  = w2o.m[2][0]; m[3]  = 0.f;
         m[4]  = w2o.m[0][1]; m[5]  = w2o.m[1][1]; m[6]  = w2o.m[2][1]; m[7]  = 0.f;
         m[8]  = w2o.m[0][2]; m[9]  = w2o.m[1][2]; m[10] = w2o.m[2][2]; m[11] = 0.f;
+    };
+
+    // Tangents are ordinary directions, not normals — transform by the plain
+    // linear (rotation/scale) part of objectToWorld, not its inverse-transpose.
+    // Written into rows [3-5] of the same per-instance block as the normal matrix.
+    auto setTangentMatrix = [&](uint32_t tlasIdx, const Mat4f& o2w) {
+        // Row i = { o2w.m[i][0], o2w.m[i][1], o2w.m[i][2] } so result[i] = dot(t_obj, row[i]) = (o2w * t_obj)_i
+        float* m = &instanceNormalMatrices[tlasIdx * 36 + 12];
+        m[0]  = o2w.m[0][0]; m[1]  = o2w.m[0][1]; m[2]  = o2w.m[0][2]; m[3]  = 0.f;
+        m[4]  = o2w.m[1][0]; m[5]  = o2w.m[1][1]; m[6]  = o2w.m[1][2]; m[7]  = 0.f;
+        m[8]  = o2w.m[2][0]; m[9]  = o2w.m[2][1]; m[10] = o2w.m[2][2]; m[11] = 0.f;
+    };
+
+    // Full worldToObject (translation included) — row i = { w2o.m[i][0..3] },
+    // so in the shader objPos[i] = dot(row[i].xyz, worldPos) + row[i].w.
+    // Written into rows [6-8].
+    auto setPositionMatrix = [&](uint32_t tlasIdx, const Mat4f& w2o) {
+        float* m = &instanceNormalMatrices[tlasIdx * 36 + 24];
+        m[0]  = w2o.m[0][0]; m[1]  = w2o.m[0][1]; m[2]  = w2o.m[0][2]; m[3]  = w2o.m[0][3];
+        m[4]  = w2o.m[1][0]; m[5]  = w2o.m[1][1]; m[6]  = w2o.m[1][2]; m[7]  = w2o.m[1][3];
+        m[8]  = w2o.m[2][0]; m[9]  = w2o.m[2][1]; m[10] = w2o.m[2][2]; m[11] = w2o.m[2][3];
     };
 
     size_t instDescSize = sizeof(MTLAccelerationStructureInstanceDescriptor);
@@ -664,12 +719,15 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
     // Fill TLAS instances
     uint32_t tlasIdx = 0;
 
-    // Regular (non-prototype) mesh instances — identity transform, geometry world-space
+    // Regular (non-prototype) mesh instances — identity TLAS transform (geometry
+    // already baked to world space), but the mesh's real staticWorldToObject is
+    // still needed for object-space position reconstruction (rows [6-8]).
     for (uint32_t mi = 0; mi < numMeshes; ++mi) {
         if (pool.isPrototype(mi)) continue;
         instDescs[tlasIdx]      = makeIdentityInstance(mi);
         instanceMeshIDs[tlasIdx] = mi;
         setIdentityNM(tlasIdx);
+        setPositionMatrix(tlasIdx, pool.mesh(mi).staticWorldToObject);
         ++tlasIdx;
     }
 
@@ -702,6 +760,8 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
             instDescs[tlasIdx]       = d;
             instanceMeshIDs[tlasIdx] = grp.protoMeshID;
             setNormalMatrix(tlasIdx, w2o);
+            setTangentMatrix(tlasIdx, o2w);
+            setPositionMatrix(tlasIdx, w2o);
             ++tlasIdx;
         }
     }
@@ -712,7 +772,7 @@ MetalAccelStructure::MetalAccelStructure(void*             deviceVoid,
         totalInstances * sizeof(uint32_t), "instanceMeshIDs");
     m_impl->instanceNormalMatrixBuffer = makeSharedBuffer(
         device, instanceNormalMatrices.data(),
-        totalInstances * 12 * sizeof(float), "instanceNormalMatrix");
+        totalInstances * 36 * sizeof(float), "instanceNormalMatrix");
 
     MTLInstanceAccelerationStructureDescriptor* tlasDesc =
         [MTLInstanceAccelerationStructureDescriptor descriptor];
@@ -759,7 +819,7 @@ void* MetalAccelStructure::hairTriBuffer()         const { return (__bridge void
 void* MetalAccelStructure::hairMatBuffer()         const { return (__bridge void*)m_impl->hairMatBuf; }
 uint32_t MetalAccelStructure::numHairMaterials()   const { return m_impl->numHairMats; }
 uint32_t MetalAccelStructure::hairMeshBaseID()     const { return m_impl->hairMeshBase; }
-void* MetalAccelStructure::uvBuffer()              const { return (__bridge void*)m_impl->uvBuffer; }
+void* MetalAccelStructure::vertexExtraBuffer()     const { return (__bridge void*)m_impl->vertexExtraBuffer; }
 void* MetalAccelStructure::triMeshIDBuffer()       const { return (__bridge void*)m_impl->triMeshIDBuffer; }
 void* MetalAccelStructure::meshVertexOffsetBuffer() const { return (__bridge void*)m_impl->meshVertexOffsetBuffer; }
 void* MetalAccelStructure::meshIndexOffsetBuffer()  const { return (__bridge void*)m_impl->meshIndexOffsetBuffer; }

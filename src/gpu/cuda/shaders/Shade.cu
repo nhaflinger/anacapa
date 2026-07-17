@@ -184,6 +184,38 @@ float3 interpolateNormal(uint32_t globalPrimId, float2 bary,
     return normalize(n0 * w + n1 * bary.x + n2 * bary.y);
 }
 
+static __forceinline__ __device__
+float2 interpolateUV(uint32_t globalPrimId, float2 bary,
+                     const GpuFloat2* uvs,
+                     const uint32_t*  indices)
+{
+    uint32_t i0 = indices[globalPrimId * 3 + 0];
+    uint32_t i1 = indices[globalPrimId * 3 + 1];
+    uint32_t i2 = indices[globalPrimId * 3 + 2];
+    float w = 1.0f - bary.x - bary.y;
+    float u = uvs[i0].x * w + uvs[i1].x * bary.x + uvs[i2].x * bary.y;
+    float v = uvs[i0].y * w + uvs[i1].y * bary.x + uvs[i2].y * bary.y;
+    return make_float2(u, v);
+}
+
+// xyz = interpolated tangent (not yet normalized/orthogonalized), w = handedness sign
+static __forceinline__ __device__
+float4 interpolateTangent(uint32_t globalPrimId, float2 bary,
+                          const GpuFloat4* tangents,
+                          const uint32_t*  indices)
+{
+    uint32_t i0 = indices[globalPrimId * 3 + 0];
+    uint32_t i1 = indices[globalPrimId * 3 + 1];
+    uint32_t i2 = indices[globalPrimId * 3 + 2];
+    GpuFloat4 t0 = tangents[i0], t1 = tangents[i1], t2 = tangents[i2];
+    float w = 1.0f - bary.x - bary.y;
+    float3 t = make3(GpuFloat3{t0.x, t0.y, t0.z}) * w
+             + make3(GpuFloat3{t1.x, t1.y, t1.z}) * bary.x
+             + make3(GpuFloat3{t2.x, t2.y, t2.z}) * bary.y;
+    float sign = (t0.w + t1.w + t2.w) >= 0.0f ? 1.0f : -1.0f;
+    return make_float4(t.x, t.y, t.z, sign);
+}
+
 // Apply per-IAS-instance normal matrix (= worldToObject^T) to an object-space
 // normal, returning the world-space normal.  Identity (no-op) for regular
 // world-space meshes; mirrors MetalAccelStructure setNormalMatrix layout.
@@ -201,6 +233,27 @@ float3 applyInstanceNormalMat(float3 nObj, uint32_t instID, const float* nMat)
         nObj.x*r1x + nObj.y*r1y + nObj.z*r1z,
         nObj.x*r2x + nObj.y*r2y + nObj.z*r2z);
     return normalize(w);
+}
+
+// Apply per-IAS-instance position matrix (= worldToObject, translation
+// included) to a world-space hit position, returning the object-space
+// position — used for MaterialX <position space="object"> nodes. Unlike
+// applyInstanceNormalMat, this is NOT identity for regular (non-instanced)
+// meshes even though their geometry is pre-baked to world space; each mesh's
+// real worldToObject is still needed to recover object-space position.
+// pMat layout per instance: 3 rows × 4 floats — row i = {w2o[i][0..3]}.
+static __forceinline__ __device__
+float3 applyInstancePositionMat(float3 worldPos, uint32_t instID, const float* pMat)
+{
+    if (pMat == nullptr) return worldPos;
+    uint32_t base = instID * 12u;
+    float4 row0 = make_float4(pMat[base+0], pMat[base+1], pMat[base+2],  pMat[base+3]);
+    float4 row1 = make_float4(pMat[base+4], pMat[base+5], pMat[base+6],  pMat[base+7]);
+    float4 row2 = make_float4(pMat[base+8], pMat[base+9], pMat[base+10], pMat[base+11]);
+    return make_float3(
+        row0.x*worldPos.x + row0.y*worldPos.y + row0.z*worldPos.z + row0.w,
+        row1.x*worldPos.x + row1.y*worldPos.y + row1.z*worldPos.z + row1.w,
+        row2.x*worldPos.x + row2.y*worldPos.y + row2.z*worldPos.z + row2.w);
 }
 
 // ---------------------------------------------------------------------------
@@ -1847,6 +1900,72 @@ extern "C" __global__ void __raygen__wf_bounce()
     mat       = params.materials[matIdx];
     baseColor = make3(mat.baseColor);
     emissive  = make3(mat.emissive);
+
+    // Hoisted out of the texture-conditional block below (unconditional now)
+    // so the MaterialX resolve block can also use texUV for <texcoord>-driven
+    // node graphs — mirrors the Metal backend's Shade.metal exactly.
+    float2 hitUV = interpolateUV(hit.primID, hit.bary, params.uvs, params.indices);
+    // V is flipped to match CPU TextureSampler's convention (USD/OpenGL
+    // bottom-left UV origin sampled against a top-left-origin raster image).
+    float2 texUV = make_float2(hitUV.x, 1.0f - hitUV.y);
+
+    if (params.materialTextures != nullptr &&
+        (mat.baseColorTexIdx >= 0 || mat.normalMapTexIdx >= 0)) {
+        if (mat.baseColorTexIdx >= 0 && mat.baseColorTexIdx < int32_t(kMaxGpuTextures)) {
+            float4 texel = tex2D<float4>(params.materialTextures[mat.baseColorTexIdx],
+                                          texUV.x, texUV.y);
+            baseColor = make_float3(texel.x, texel.y, texel.z);
+        }
+
+        if (mat.normalMapTexIdx >= 0 && mat.normalMapTexIdx < int32_t(kMaxGpuTextures)) {
+            float4 texel = tex2D<float4>(params.materialTextures[mat.normalMapTexIdx],
+                                          texUV.x, texUV.y);
+            float3 nts = make_float3(texel.x * mat.normalScale + mat.normalBias,
+                                     texel.y * mat.normalScale + mat.normalBias,
+                                     texel.z * mat.normalScale + mat.normalBias);
+
+            float4 tanW = interpolateTangent(hit.primID, hit.bary, params.tangents, params.indices);
+            float3 t = applyInstanceNormalMat(make_float3(tanW.x, tanW.y, tanW.z),
+                                              hit.instanceID, params.instanceTangentMat);
+            // Re-orthogonalize against the (possibly flipped) shading normal.
+            t = t - n * dot(n, t);
+            float tLen = sqrtf(dot(t, t));
+            if (tLen > 1e-8f) {
+                t = t * (1.0f / tLen);
+                float3 bt = normalize(cross(n, t)) * tanW.w;
+                n = normalize(t * nts.x + bt * nts.y + n * nts.z);
+            }
+        }
+    }
+
+    // ---- MaterialX-generated procedural surface params ----------------------
+    // Resolve base_color/roughness/metalness via optixDirectCall into the
+    // runtime-compiled generated functions, then reclassify as kMatGGX so
+    // every downstream branch (direct lighting, evalLayeredBSDF calls) needs
+    // no MaterialX-specific code of its own — mirrors the Metal backend's
+    // visible_function_table resolve block in Shade.metal exactly, just
+    // using OptiX direct callables instead of an argument-buffer table.
+    if (mat.type == kMatMaterialX && mat.mxDispatchIdx >= 0
+            && params.mxDispatch != nullptr && params.mxUniforms != nullptr) {
+        float3 objPos = applyInstancePositionMat(hitPos, hit.instanceID, params.instancePositionMat);
+        MxDispatchEntry disp = params.mxDispatch[mat.mxDispatchIdx];
+        if (disp.baseColorFunc != kMxNoFunction) {
+            float4 c = optixDirectCall<float4, const float*, unsigned int, float2, float3>(
+                disp.baseColorFunc, params.mxUniforms, disp.baseColorOffset, texUV, objPos);
+            baseColor = make_float3(c.x, c.y, c.z);
+        }
+        if (disp.roughnessFunc != kMxNoFunction) {
+            float4 r = optixDirectCall<float4, const float*, unsigned int, float2, float3>(
+                disp.roughnessFunc, params.mxUniforms, disp.roughnessOffset, texUV, objPos);
+            mat.roughness = r.x;
+        }
+        if (disp.metalnessFunc != kMxNoFunction) {
+            float4 m = optixDirectCall<float4, const float*, unsigned int, float2, float3>(
+                disp.metalnessFunc, params.mxUniforms, disp.metalnessOffset, texUV, objPos);
+            mat.metalness = m.x;
+        }
+        mat.type = kMatGGX;
+    }
 
     // ---- Emitter Le ---------------------------------------------------------
     if (mat.type == kMatEmissive) {

@@ -1,6 +1,9 @@
 #include "MatAssignLoader.h"
 #include "../shading/MarschnerHair.h"
 #include "../shading/ChiangHair.h"
+#ifdef ANACAPA_ENABLE_MATERIALX
+#include "../shading/MaterialXMaterial.h"
+#endif
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -19,6 +22,7 @@ static MatAssignType parseType(const std::string& s) {
     if (s == "usd")     return MatAssignType::Usd;
     if (s == "osl")     return MatAssignType::Osl;
     if (s == "chiang")  return MatAssignType::Chiang;
+    if (s == "mtlx")    return MatAssignType::Mtlx;
     return MatAssignType::Marschner;  // "marschner" or unknown → safe default
 }
 
@@ -46,6 +50,8 @@ static MatAssignEntry parseEntry(const json& j) {
         e.usdPath   = mat ? mat->value("path", "") : "";
     } else if (e.type == MatAssignType::Osl) {
         e.oslShader = mat ? mat->value("shader", "") : "";
+    } else if (e.type == MatAssignType::Mtlx) {
+        e.mtlxPath = mat ? mat->value("path", "") : "";
     }
 
     return e;
@@ -135,12 +141,25 @@ std::unique_ptr<IMaterial> buildMaterial(const MatAssignEntry& entry) {
         return std::make_unique<MarschnerHairMaterial>(p);
     }
 
+#ifdef ANACAPA_ENABLE_MATERIALX
+    if (entry.type == MatAssignType::Mtlx) {
+        if (entry.mtlxPath.empty()) {
+            spdlog::warn("MatAssignLoader: object '{}' has type 'mtlx' but no path — "
+                         "using default Marschner", entry.objectName);
+        } else {
+            return std::make_unique<MaterialXMaterial>(entry.mtlxPath);
+        }
+        return std::make_unique<MarschnerHairMaterial>(MarschnerHairMaterial::Params{});
+    }
+#endif
+
     // Usd and Osl types are resolved by the caller (RenderSession) which has
     // access to the loaded USD scene.  Returning a default here is a safe
     // fallback if buildMaterial is called in a context without USD access.
     spdlog::warn("MatAssignLoader: buildMaterial called for type '{}' object '{}' "
                  "— USD/OSL resolution requires RenderSession; using default Marschner",
-                 entry.type == MatAssignType::Usd ? "usd" : "osl",
+                 entry.type == MatAssignType::Usd ? "usd" :
+                 entry.type == MatAssignType::Mtlx ? "mtlx" : "osl",
                  entry.objectName);
     return std::make_unique<MarschnerHairMaterial>(MarschnerHairMaterial::Params{});
 }

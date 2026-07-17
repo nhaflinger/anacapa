@@ -17,12 +17,14 @@ namespace anacapa {
 //   "usd"       — reference a material prim in the already-loaded USD scene.
 //   "osl"       — reference an .oso shader file on disk with optional param
 //                 overrides (future; not yet implemented).
+//   "mtlx"      — reference a .mtlx sidecar file on disk; resolved into a
+//                 MaterialXMaterial (GPU-codegen-capable procedural shading).
 //
 // Multiple .matassign.json files may be loaded in order; a later file's entry
 // for a given object name overrides an earlier one (layer semantics).
 // ---------------------------------------------------------------------------
 
-enum class MatAssignType { Marschner, Chiang, Usd, Osl };
+enum class MatAssignType { Marschner, Chiang, Usd, Osl, Mtlx };
 
 struct MarschnerAssignParams {
     float sigma_a[3] = {0.06f, 0.10f, 0.20f};  // absorption coefficients (Beer-Lambert)
@@ -41,6 +43,7 @@ struct MatAssignEntry {
 
     std::string           usdPath;    // USD material prim path, type == Usd
     std::string           oslShader;  // path to .oso file, type == Osl (future)
+    std::string           mtlxPath;   // path to .mtlx sidecar file, type == Mtlx
 };
 
 // ---------------------------------------------------------------------------

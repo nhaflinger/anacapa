@@ -45,6 +45,8 @@ public:
     uint64_t positionBuffer()          const;  // float*     — packed float3, world-space at shutter-open
     uint64_t positionBufferClose()     const;  // float*     — packed float3, world-space at shutter-close
     uint64_t normalBuffer()            const;  // GpuFloat3* — all meshes concatenated (baked at open)
+    uint64_t uvBuffer()                const;  // GpuFloat2* — all meshes concatenated
+    uint64_t tangentBuffer()           const;  // GpuFloat4* — xyz=tangent, w=handedness; all meshes concatenated
     uint64_t indexBuffer()             const;  // uint32_t*  — globalized triangle indices
     uint64_t triMeshIDBuffer()         const;  // uint32_t*  — per-triangle meshID
     uint64_t meshVertexOffsetBuffer()  const;  // uint32_t*  — per-mesh vertex base
@@ -78,6 +80,16 @@ public:
     //   actual w2o^T for prototype instances (geometry object-space).
     uint64_t instanceMeshIDBuffer()       const;  // uint32_t*
     uint64_t instanceNormalMatrixBuffer() const;  // float*
+    // instanceTangentMatrixBuffer: 12 floats per IAS instance = plain
+    //   objectToWorld rotation (tangents are ordinary directions, not
+    //   normals — no inverse-transpose). Identity for regular meshes.
+    uint64_t instanceTangentMatrixBuffer() const;  // float*
+    // instancePositionMatrixBuffer: 12 floats per IAS instance = rows of
+    //   plain worldToObject (translation included) — object-space hit
+    //   position for MaterialX <position space="object"> nodes. NOT identity
+    //   for regular meshes (unlike normal/tangent) — each mesh's real
+    //   worldToObject is needed even though geometry is baked to world space.
+    uint64_t instancePositionMatrixBuffer() const;  // float*
 
 private:
     struct Impl;

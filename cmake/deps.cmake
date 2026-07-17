@@ -144,6 +144,42 @@ if(ANACAPA_ENABLE_OSL)
 endif()
 
 # ---------------------------------------------------------------------------
+# MaterialX — GPU shader codegen (MSL for Metal, GLSL for CUDA post-processing)
+#
+# This is an explicit exception to the "header-only only" dependency
+# philosophy above (same exception already made for OSL/OIIO): MaterialX has
+# no Homebrew formula and its C++ core/generators aren't available anywhere
+# on a typical dev machine (Blender bundles a Python-only build with no
+# linkable headers/libs) — so unlike OSL, there's no precompiled shortcut and
+# it must be built from source.
+#
+# Only the pieces we actually use are enabled: core doc model, format I/O,
+# the shader-generation framework, and the MSL/GLSL generator backends. No
+# Python bindings, viewer, tests, docs, or OSL/MDL generators (Blender's own
+# bundled MaterialX already covers .osl generation for the CPU path).
+# ---------------------------------------------------------------------------
+if(ANACAPA_ENABLE_MATERIALX)
+    FetchContent_Declare(
+        materialx
+        GIT_REPOSITORY https://github.com/AcademySoftwareFoundation/MaterialX.git
+        GIT_TAG        v1.39.3
+        GIT_SHALLOW    TRUE
+    )
+    set(MATERIALX_BUILD_PYTHON  OFF CACHE BOOL "" FORCE)
+    set(MATERIALX_BUILD_VIEWER  OFF CACHE BOOL "" FORCE)
+    set(MATERIALX_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
+    set(MATERIALX_BUILD_DOCS    OFF CACHE BOOL "" FORCE)
+    set(MATERIALX_BUILD_RENDER  OFF CACHE BOOL "" FORCE)
+    set(MATERIALX_BUILD_GEN_OSL OFF CACHE BOOL "" FORCE)
+    set(MATERIALX_BUILD_GEN_MDL OFF CACHE BOOL "" FORCE)
+    set(MATERIALX_BUILD_GEN_GLSL ON  CACHE BOOL "" FORCE)
+    set(MATERIALX_BUILD_GEN_MSL  ON  CACHE BOOL "" FORCE)
+    set(MATERIALX_INSTALL_INCLUDE_PATH "" CACHE STRING "" FORCE)
+    set(MATERIALX_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(materialx)
+endif()
+
+# ---------------------------------------------------------------------------
 # Intel OpenImageDenoise (optional — denoising phase)
 # Expected: brew install open-image-denoise
 # ---------------------------------------------------------------------------

@@ -60,6 +60,16 @@ if(ANACAPA_ENABLE_OPTIX)
     target_include_directories(anacapa_lib PRIVATE "${OptiX_INSTALL_DIR}/include")
     target_compile_definitions(anacapa_lib PRIVATE ANACAPA_ENABLE_OPTIX)
 
+    # nvrtc — runtime compilation of MaterialX-generated CUDA source into
+    # OptiX direct-callable PTX modules (see CudaPathIntegrator.cu's
+    # buildMaterialXCallables(), mirrors the Metal backend's
+    # newLibraryWithSource: runtime compilation). Needs the same target
+    # architecture as the offline-compiled PTX above.
+    if(ANACAPA_ENABLE_MATERIALX)
+        target_link_libraries(anacapa_lib PUBLIC CUDA::nvrtc)
+        target_compile_definitions(anacapa_lib PRIVATE ANACAPA_CUDA_ARCH="${CUDA_ARCH}")
+    endif()
+
     # Where the integrator looks for compiled PTX shaders at runtime.  PTX
     # produced by anacapa_compile_ptx() is written into this directory.
     set(ANACAPA_PTX_DIR "${CMAKE_BINARY_DIR}/ptx" CACHE INTERNAL "PTX output dir")

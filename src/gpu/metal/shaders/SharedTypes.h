@@ -20,11 +20,23 @@ using namespace metal;
 // create a different layout than the host.
 typedef packed_float3 GpuFloat3;
 typedef float2 GpuFloat2;
+typedef packed_float4 GpuFloat4;
 #else
 // C++ side
 #include <cstdint>
 struct GpuFloat3 { float x, y, z; };
 struct GpuFloat2 { float x, y; };
+struct GpuFloat4 { float x, y, z, w; };
+#endif
+
+// Per-material texture atlas cap — a fixed-size array bound as consecutive
+// texture slots (Metal) / a device array of handles (CUDA). Materials beyond
+// this count fall back to their flat constant color (baseColorTexIdx = -1).
+#define ANACAPA_MAX_GPU_TEXTURES 48
+#ifdef __METAL_VERSION__
+constant uint kMaxGpuTextures = ANACAPA_MAX_GPU_TEXTURES;
+#else
+constexpr uint32_t kMaxGpuTextures = ANACAPA_MAX_GPU_TEXTURES;
 #endif
 
 // ---------------------------------------------------------------------------
@@ -39,6 +51,14 @@ struct GpuRay {
     uint32_t  sampleIdx;  // which sample within the spp loop
     uint32_t  bounce;     // current bounce depth
     float     time;       // normalized shutter time [0,1] for motion blur
+};
+
+// GpuCounts — numLights + numMaterials packed into one buffer binding.
+// Frees a buffer slot in the main `shade` kernel (Metal's hard 31-slot
+// argument limit is fully occupied) for the MaterialX argument buffer.
+struct GpuCounts {
+    uint32_t numLights;
+    uint32_t numMaterials;
 };
 
 // ---------------------------------------------------------------------------
@@ -64,6 +84,7 @@ enum GpuMaterialType : uint32_t {
     kMatGlass       = 3,   // smooth dielectric — delta Fresnel + Snell refraction
     kMatHair        = 4,   // Marschner cylindrical fiber BSDF (handled via hairTris/hairMats buffers)
     kMatTranslucent = 5,   // diffuse transmission — power-cosine lobe around straight-through direction
+    kMatMaterialX   = 6,   // MaterialX-codegen'd procedural surface params, feeds evalLayeredBSDF()
 };
 
 struct GpuMaterial {
@@ -88,8 +109,47 @@ struct GpuMaterial {
     float           subsurfaceRadius;   // effective d = radius * scale (precomputed by host)
     float           subsurfaceStrength; // independent amplifier (> 1 boosts SSS contribution)
     float           scatter;            // translucent lobe width: 0=delta straight-through, 1=Lambertian
-    float           _sss_pad[2];        // keep struct 16-byte aligned
+    // Texture atlas indices; -1 = no texture, use the constant field above instead.
+    int32_t         baseColorTexIdx;
+    int32_t         normalMapTexIdx;
+    float           normalScale;
+    float           normalBias;
+    // Index into MxMaterialArgs::dispatch when type == kMatMaterialX; -1 otherwise.
+    int32_t         mxDispatchIdx;
 };
+
+// ---------------------------------------------------------------------------
+// MaterialX GPU codegen dispatch — see project memory project_materialx_codegen.
+//
+// Each kMatMaterialX GpuMaterial owns one MxDispatchEntry, giving up to three
+// generated-function slots (base_color, roughness, metalness). A slot's
+// funcIndex is kMxNoFunction when that surface input was a plain literal for
+// this material — evalLayeredBSDF() uses the literal GpuMaterial fields
+// (baseColor/roughness/metalness) directly in that case, exactly like any
+// other material type.
+// ---------------------------------------------------------------------------
+#define ANACAPA_MX_NO_FUNCTION 0xFFFFFFFFu
+#ifdef __METAL_VERSION__
+constant uint kMxNoFunction = ANACAPA_MX_NO_FUNCTION;
+#else
+constexpr uint32_t kMxNoFunction = ANACAPA_MX_NO_FUNCTION;
+#endif
+
+struct MxDispatchEntry {
+    uint32_t baseColorFunc;    // visible_function_table index, or kMxNoFunction
+    uint32_t baseColorOffset;  // float offset into MxMaterialArgs::uniformData
+    uint32_t roughnessFunc;
+    uint32_t roughnessOffset;
+    uint32_t metalnessFunc;
+    uint32_t metalnessOffset;
+};
+
+// Every generated wrapper function shares this exact signature so a single
+// visible_function_table<float4(const device float*, uint, float2, float3)>
+// can dispatch to any of them (declared at point of use in Shade.metal — MSL's
+// visible_function_table<> template can't be aliased via typedef here):
+// each reads its packed uniform floats starting at `offset` and returns the
+// evaluated value in .xyz (color3/vector3) or .x (float), .w unused.
 
 // ---------------------------------------------------------------------------
 // GpuHairMaterial — Marschner BSDF parameters for one hair material slot.

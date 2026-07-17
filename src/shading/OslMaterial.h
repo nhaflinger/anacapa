@@ -44,6 +44,20 @@ void oslSetSubsurfaceParams(IMaterial* mat,
                              float radius, float anisotropy,
                              float strength = 1.f);
 
+// Attaches a MaterialX GPU-codegen counterpart to an OslMaterial, built from
+// the same .mtlx sidecar OSL was compiled from (when one exists). GPU
+// material extraction uses this to get real procedural shading for materials
+// where OSL succeeded on CPU — CPU rendering is unaffected, it always
+// executes the real OSL shader. No-op for non-OslMaterial types.
+// mxMat's dynamic type is opaque here by design (keeps this header free of
+// MaterialX types); callers pass a MaterialXMaterial as IMaterial.
+void oslSetMaterialXCounterpart(IMaterial* mat, std::unique_ptr<IMaterial> mxMat);
+
+// Returns the MaterialX GPU-codegen counterpart attached via
+// oslSetMaterialXCounterpart(), or nullptr if mat isn't an OslMaterial or has
+// none attached. Callers dynamic_cast the result to MaterialXMaterial*.
+const IMaterial* oslGetMaterialXCounterpart(const IMaterial* mat);
+
 #endif  // ANACAPA_ENABLE_OSL
 
 } // namespace anacapa

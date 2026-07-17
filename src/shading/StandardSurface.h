@@ -1055,7 +1055,17 @@ private:
 
         ShadingContext result = ctx;
         result.n = nWorld;
-        buildOrthonormalBasis(result.n, result.t, result.bt);
+        // Re-orthogonalize the real UV tangent against the perturbed normal
+        // rather than deriving an arbitrary basis, so anisotropic lobes stay
+        // aligned with the UV layout after bump mapping.
+        Vec3f tOrtho = ctx.t - nWorld * dot(nWorld, ctx.t);
+        if (tOrtho.lengthSq() < 1e-12f) {
+            buildOrthonormalBasis(result.n, result.t, result.bt);
+        } else {
+            float handedness = dot(cross(ctx.n, ctx.t), ctx.bt) < 0.f ? -1.f : 1.f;
+            result.t  = normalize(tOrtho);
+            result.bt = safeNormalize(cross(result.n, result.t)) * handedness;
+        }
         return result;
     }
 

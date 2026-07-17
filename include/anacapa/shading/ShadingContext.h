@@ -56,7 +56,17 @@ struct ShadingContext {
             t  = si.dpdu;
             bt = safeNormalize(cross(n, t));
         } else {
-            buildOrthonormalBasis(n, t, bt);
+            // Re-orthogonalize the interpolated UV-derivative tangent (si.dpdu)
+            // against the (possibly bump-mapped-later, currently geometric)
+            // shading normal. Falls back to an arbitrary basis on UV-less or
+            // degenerate meshes, where si.dpdu ends up parallel to n.
+            Vec3f tOrtho = si.dpdu - n * dot(n, si.dpdu);
+            if (tOrtho.lengthSq() < 1e-12f) {
+                buildOrthonormalBasis(n, t, bt);
+            } else {
+                t  = normalize(tOrtho);
+                bt = safeNormalize(cross(n, t)) * si.dpduSign;
+            }
         }
     }
 

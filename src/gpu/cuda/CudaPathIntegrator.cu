@@ -16,6 +16,7 @@
 
 #include "../../shading/Lambertian.h"
 #include "../../shading/StandardSurface.h"
+#include "../../shading/Texture.h"
 #include "../../shading/MarschnerHair.h"
 #include "../../shading/ChiangHair.h"
 #include "../../shading/SoftParticle.h"
@@ -23,6 +24,11 @@
 #include "../../shading/lights/DirectionalLight.h"
 #include "../../shading/lights/DomeLight.h"
 #include "../../sky/SkyLight.h"
+#ifdef ANACAPA_ENABLE_MATERIALX
+#include "../../shading/MaterialXMaterial.h"
+#include "../../shading/MxGlslToCuda.h"
+#include <nvrtc.h>
+#endif
 
 #include <cuda_runtime.h>
 
@@ -40,7 +46,11 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
+#include <unordered_map>
+#include <unordered_set>
+#include <OpenImageIO/imageio.h>
 
 #define CUDA_CHECK(call) do { \
     cudaError_t _e = (call); \
@@ -60,6 +70,87 @@
 namespace anacapa {
 
 // ---------------------------------------------------------------------------
+// Load an image file into the GPU texture atlas, or return the cached index
+// if already loaded. Mirrors Metal's loadOrCacheTexture (MetalPathIntegrator.mm):
+// raw pixel values from OIIO (no gamma applied), sRGB->linear applied manually
+// for color textures only (linearize=false for normal/roughness/etc maps).
+// Returns -1 on missing path, load failure, or once the atlas cap is reached.
+// ---------------------------------------------------------------------------
+static int32_t loadOrCacheTexture(const std::string& path, bool linearize,
+                                   std::vector<cudaArray_t>& arrays,
+                                   std::vector<cudaTextureObject_t>& textures,
+                                   std::unordered_map<std::string, int32_t>& cache) {
+    if (path.empty()) return -1;
+    auto it = cache.find(path);
+    if (it != cache.end()) return it->second;
+
+    if (textures.size() >= kMaxGpuTextures) {
+        static std::unordered_set<std::string> s_warned;
+        if (s_warned.insert(path).second)
+            fprintf(stderr, "[warn] CudaPathIntegrator: texture atlas cap (%u) reached — "
+                            "'%s' falls back to a flat constant color\n", kMaxGpuTextures, path.c_str());
+        cache[path] = -1;
+        return -1;
+    }
+
+    auto in = OIIO::ImageInput::open(path);
+    if (!in) {
+        fprintf(stderr, "[warn] CudaPathIntegrator: failed to open texture '%s'\n", path.c_str());
+        cache[path] = -1;
+        return -1;
+    }
+    const OIIO::ImageSpec& spec = in->spec();
+    int w = spec.width, h = spec.height, nchans = spec.nchannels;
+    std::vector<float> pixels(size_t(w) * size_t(h) * size_t(nchans));
+    bool ok = in->read_image(0, 0, 0, nchans, OIIO::TypeDesc::FLOAT, pixels.data());
+    in->close();
+    if (!ok || w <= 0 || h <= 0) {
+        fprintf(stderr, "[warn] CudaPathIntegrator: failed to read texture '%s'\n", path.c_str());
+        cache[path] = -1;
+        return -1;
+    }
+
+    std::vector<float> rgba(size_t(w) * size_t(h) * 4);
+    for (size_t p = 0; p < size_t(w) * size_t(h); ++p) {
+        float r = pixels[p * nchans + 0];
+        float g = nchans > 1 ? pixels[p * nchans + 1] : r;
+        float b = nchans > 2 ? pixels[p * nchans + 2] : r;
+        float a = nchans > 3 ? pixels[p * nchans + 3] : 1.f;
+        if (linearize) {
+            Spectrum lin = srgbToLinear(Spectrum{r, g, b});
+            r = lin.x; g = lin.y; b = lin.z;
+        }
+        rgba[p * 4 + 0] = r; rgba[p * 4 + 1] = g; rgba[p * 4 + 2] = b; rgba[p * 4 + 3] = a;
+    }
+
+    cudaArray_t arr = nullptr;
+    cudaChannelFormatDesc fmt = cudaCreateChannelDesc<float4>();
+    CUDA_CHECK(cudaMallocArray(&arr, &fmt, w, h));
+    CUDA_CHECK(cudaMemcpy2DToArray(arr, 0, 0, rgba.data(),
+                                    size_t(w) * 4 * sizeof(float),
+                                    size_t(w) * 4 * sizeof(float), h,
+                                    cudaMemcpyHostToDevice));
+
+    cudaResourceDesc resDesc{};
+    resDesc.resType         = cudaResourceTypeArray;
+    resDesc.res.array.array = arr;
+    cudaTextureDesc texDesc{};
+    texDesc.addressMode[0]   = cudaAddressModeWrap;
+    texDesc.addressMode[1]   = cudaAddressModeWrap;
+    texDesc.filterMode       = cudaFilterModeLinear;
+    texDesc.readMode         = cudaReadModeElementType;
+    texDesc.normalizedCoords = 1;
+    cudaTextureObject_t tex = 0;
+    CUDA_CHECK(cudaCreateTextureObject(&tex, &resDesc, &texDesc, nullptr));
+
+    int32_t idx = static_cast<int32_t>(textures.size());
+    arrays.push_back(arr);
+    textures.push_back(tex);
+    cache[path] = idx;
+    return idx;
+}
+
+// ---------------------------------------------------------------------------
 // Material / light extraction (identical logic to Metal backend)
 // ---------------------------------------------------------------------------
 static void fillSSSFields(GpuMaterial& gm, const IMaterial* mat) {
@@ -73,7 +164,12 @@ static void fillSSSFields(GpuMaterial& gm, const IMaterial* mat) {
     gm.subsurfaceStrength = sss.strength;
 }
 
-static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
+static GpuMaterial extractGpuMaterial(const IMaterial* mat,
+                                       std::vector<cudaArray_t>& atlasArrays,
+                                       std::vector<cudaTextureObject_t>& atlas,
+                                       std::unordered_map<std::string, int32_t>& texCache,
+                                       uint32_t materialIdx = 0,
+                                       const std::unordered_map<uint32_t, uint32_t>* mxDispatchMap = nullptr) {
     GpuMaterial gm{};
     gm.baseColor   = {0.5f, 0.5f, 0.5f};
     gm.emissive    = {0.f,  0.f,  0.f};
@@ -83,6 +179,11 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
     gm.specular    = 0.5f;       // matches MaterialX standard_surface default
     gm.type        = kMatLambertian;
     gm.causticGenerator = 0u;
+    gm.baseColorTexIdx = -1;
+    gm.normalMapTexIdx = -1;
+    gm.normalScale = 1.f;
+    gm.normalBias  = -1.f;
+    gm.mxDispatchIdx = -1;
     if (!mat) return gm;
     gm.causticGenerator = mat->isCausticGenerator() ? 1u : 0u;
 
@@ -100,6 +201,29 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
         gm.roughness = spm->opacity();
         return gm;
     }
+
+#ifdef ANACAPA_ENABLE_MATERIALX
+    // MaterialX-codegen'd procedural material — literal fallback values come
+    // from MaterialXMaterial's own CPU-fallback fields; the GPU path
+    // overrides base_color/roughness/metalness at shade time via
+    // mxDispatchIdx when procedural (see the kMatMaterialX resolve block in
+    // Shade.cu). Mirrors the Metal backend's extractGpuMaterial() exactly.
+    if (const auto* mxMat = dynamic_cast<const MaterialXMaterial*>(mat)) {
+        gm.type = kMatMaterialX;
+        SurfaceInteraction si; si.n = si.ng = {0,0,1};
+        ShadingContext ctx(si, {0,0,1});
+        Spectrum alb = mxMat->reflectance(ctx);
+        gm.baseColor = {alb.x, alb.y, alb.z};
+        gm.roughness = mxMat->roughness();
+        gm.metalness = mxMat->metalness();
+        if (mxDispatchMap) {
+            auto it = mxDispatchMap->find(materialIdx);
+            if (it != mxDispatchMap->end())
+                gm.mxDispatchIdx = static_cast<int32_t>(it->second);
+        }
+        return gm;
+    }
+#endif
 
     // Sample emission and reflectance up front for every material — UsdPreview-
     // Surface lights load as StandardSurfaceMaterial with emissive_color set, not
@@ -177,6 +301,18 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat) {
         gm.metalness   = ssm->params().metalness.value;
         gm.specular    = ssm->params().specular.value;
         gm.specularIOR = ssm->params().specular_IOR;
+
+        if (ssm->params().base_color.hasTexture()) {
+            gm.baseColorTexIdx = loadOrCacheTexture(
+                ssm->params().base_color.path, /*linearize=*/true, atlasArrays, atlas, texCache);
+        }
+        if (ssm->params().has_normal_map && ssm->params().normal_map.hasTexture()) {
+            gm.normalMapTexIdx = loadOrCacheTexture(
+                ssm->params().normal_map.path, /*linearize=*/false, atlasArrays, atlas, texCache);
+            gm.normalScale = ssm->params().normal_scale;
+            gm.normalBias  = ssm->params().normal_bias;
+        }
+
         fillSSSFields(gm, mat);
         return gm;
     }
@@ -310,6 +446,14 @@ struct CudaPathIntegrator::Impl {
     Vec3f               envRot[3]  = {{1,0,0},{0,1,0},{0,0,1}};
     float               envIntensity = 1.0f;
 
+    // Per-material texture atlas (base color / normal maps). Index-aligned
+    // with GpuMaterial::baseColorTexIdx / normalMapTexIdx. Mirrors Metal's
+    // materialTextures, but as a device array of handles (no fixed-slot cap).
+    std::vector<cudaArray_t>              materialTexArrays;
+    std::vector<cudaTextureObject_t>      materialTexObjects;
+    std::unordered_map<std::string, int32_t> textureCache;  // resolved path -> atlas index (-1 = failed/capped)
+    CudaBuffer<cudaTextureObject_t>       d_materialTextures;
+
     // HDRI importance sampling — CDF tables (empty when no DomeLight or no
     // texture present).  envCdfWidth/Height = 0 signals the GPU to fall
     // back to the cosine-hemisphere prior.
@@ -408,11 +552,23 @@ struct CudaPathIntegrator::Impl {
     CudaBuffer<LaunchParams> d_launchParams;  // single-element buffer in device mem
     bool                  optixReady     = false;
 
-    // Wavefront state buffer (allocated lazily by renderFrameWavefront).
-    CudaBuffer<WfRayState> d_wfRays;
-    uint32_t               wfRayCount    = 0;
+#ifdef ANACAPA_ENABLE_MATERIALX
+    // MaterialX GPU codegen — one OptixModule + CALLABLES OptixProgramGroup
+    // per generated function (base_color/roughness/metalness per procedural
+    // material), rebuilt alongside the rest of the pipeline whenever the
+    // scene has at least one MaterialXMaterial. See buildMaterialXCallables()
+    // and project memory project_materialx_codegen, Phase 3 section.
+    std::vector<OptixModule>       mxModules;
+    std::vector<OptixProgramGroup> mxPgs;
+    CudaByteBuffer                 sbtCallablesBuf;
+    CudaBuffer<MxDispatchEntry>    d_mxDispatch;
+    CudaBuffer<float>              d_mxUniforms;
+    // scene.materials[] index -> index into d_mxDispatch. Only
+    // MaterialXMaterial entries appear here. Read by extractGpuMaterial().
+    std::unordered_map<uint32_t, uint32_t> mxDispatchIndexForMaterial;
+#endif
 
-    bool buildOptixPipeline(OptixDeviceContext ctx);
+    bool buildOptixPipeline(OptixDeviceContext ctx, const std::vector<const IMaterial*>& materials);
     void destroyOptixPipeline();
     void buildPhotonMap(OptixDeviceContext ctx);
     bool renderFrameWavefront(const SceneView& scene,
@@ -427,9 +583,18 @@ struct CudaPathIntegrator::Impl {
                               TileBuffer& out);
 #endif
 
+    void freeMaterialTextures() {
+        for (cudaTextureObject_t t : materialTexObjects) if (t) cudaDestroyTextureObject(t);
+        for (cudaArray_t a : materialTexArrays)           if (a) cudaFreeArray(a);
+        materialTexObjects.clear();
+        materialTexArrays.clear();
+        textureCache.clear();
+    }
+
     ~Impl() {
         if (envTex)   cudaDestroyTextureObject(envTex);
         if (envArray) cudaFreeArray(envArray);
+        freeMaterialTextures();
 #ifdef ANACAPA_ENABLE_OPTIX
         destroyOptixPipeline();
 #endif
@@ -463,11 +628,159 @@ namespace {
 struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) SbtRecord {
     char header[OPTIX_SBT_RECORD_HEADER_SIZE];
 };
+
+#ifdef ANACAPA_ENABLE_MATERIALX
+// ---------------------------------------------------------------------------
+// MaterialX GPU codegen — CUDA/OptiX counterpart of the Metal backend's
+// buildMaterialXShading() (src/gpu/metal/MetalPathIntegrator.mm). Compiles
+// each procedural material's generated CUDA source (from MxGlslToCuda) via
+// nvrtc, wraps it as its own OptixModule + CALLABLES OptixProgramGroup, and
+// returns everything needed to fold into the main pipeline build below.
+//
+// UNVERIFIED — written with no CUDA/OptiX compiler available. The Metal
+// equivalent of this exact kind of code (correct-looking API usage that
+// silently does the wrong thing) took a long debugging session to nail down
+// once — see project memory project_materialx_codegen, Phase 3 section, for
+// what to check first if generated materials don't shade correctly:
+//   1. Does optixModuleCreate/optixProgramGroupCreate actually succeed for
+//      each generated function (check the returned log buffers)?
+//   2. Does the SBT's callablesRecordBase/Count/Stride reach every SBT that
+//      launches wf_bounce (currently: all four, see below)?
+//   3. Does optixDirectCall's sbtIndex argument in Shade.cu match this
+//      function's assignment order into build.pgs (0-based, in the exact
+//      order program groups are appended to the callables SBT)?
+// ---------------------------------------------------------------------------
+struct MxCudaBuild {
+    std::vector<OptixModule>       modules;
+    std::vector<OptixProgramGroup> pgs;              // callables SBT index order
+    std::vector<float>             uniformData;
+    std::vector<MxDispatchEntry>   dispatchEntries;
+    std::unordered_map<uint32_t, uint32_t> dispatchIndexForMaterial;
+};
+
+bool nvrtcCompileToPtx(const std::string& src, const std::string& name, std::string& outPtx) {
+    nvrtcProgram prog;
+    if (nvrtcCreateProgram(&prog, src.c_str(), name.c_str(), 0, nullptr, nullptr) != NVRTC_SUCCESS)
+        return false;
+    std::string archOpt = std::string("--gpu-architecture=compute_") + ANACAPA_CUDA_ARCH;
+    const char* opts[] = { archOpt.c_str() };
+    nvrtcResult compileRes = nvrtcCompileProgram(prog, 1, opts);
+    if (compileRes != NVRTC_SUCCESS) {
+        size_t logSize = 0;
+        nvrtcGetProgramLogSize(prog, &logSize);
+        std::string log(logSize, '\0');
+        if (logSize > 0) nvrtcGetProgramLog(prog, &log[0]);
+        fprintf(stderr, "[warn]  CudaPathIntegrator: nvrtc compile failed for '%s':\n%s\n",
+                name.c_str(), log.c_str());
+        nvrtcDestroyProgram(&prog);
+        return false;
+    }
+    size_t ptxSize = 0;
+    nvrtcGetPTXSize(prog, &ptxSize);
+    outPtx.resize(ptxSize);
+    nvrtcGetPTX(prog, &outPtx[0]);
+    nvrtcDestroyProgram(&prog);
+    return true;
+}
+
+MxCudaBuild buildMaterialXCallables(OptixDeviceContext ctx,
+                                     const OptixModuleCompileOptions& modOpts,
+                                     const OptixPipelineCompileOptions& pipeOpts,
+                                     const OptixProgramGroupOptions& pgOpts,
+                                     const std::vector<const IMaterial*>& materials) {
+    MxCudaBuild build;
+
+    auto compileAndRegister = [&](const MxGeneratedShader* gen, const char* baseName,
+                                   uint32_t materialIdx) -> std::pair<uint32_t, uint32_t> {
+        if (!gen || !gen->valid) return {ANACAPA_MX_NO_FUNCTION, 0u};
+
+        std::string wrapperName = "anacapa_mx_m" + std::to_string(materialIdx) + "_" + baseName;
+        MxCudaAdapterResult adapted = buildCudaAdapter(*gen, wrapperName);
+        if (!adapted.valid) return {ANACAPA_MX_NO_FUNCTION, 0u};
+
+        std::string ptx;
+        if (!nvrtcCompileToPtx(adapted.source, wrapperName + ".cu", ptx))
+            return {ANACAPA_MX_NO_FUNCTION, 0u};
+
+        char   log[4096];
+        size_t logSize = sizeof(log);
+        OptixModule mod = nullptr;
+        OptixResult r = optixModuleCreate(ctx, &modOpts, &pipeOpts,
+                                          ptx.c_str(), ptx.size(), log, &logSize, &mod);
+        if (r != OPTIX_SUCCESS) {
+            fprintf(stderr, "[warn]  CudaPathIntegrator: optixModuleCreate failed for '%s': %s\n",
+                    wrapperName.c_str(), log);
+            return {ANACAPA_MX_NO_FUNCTION, 0u};
+        }
+        build.modules.push_back(mod);
+
+        std::string entryName = "__direct_callable__" + wrapperName;
+        OptixProgramGroupDesc pgDesc{};
+        pgDesc.kind                          = OPTIX_PROGRAM_GROUP_KIND_CALLABLES;
+        pgDesc.callables.moduleDC            = mod;
+        pgDesc.callables.entryFunctionNameDC = entryName.c_str();
+        OptixProgramGroup pg = nullptr;
+        logSize = sizeof(log);
+        r = optixProgramGroupCreate(ctx, &pgDesc, 1, &pgOpts, log, &logSize, &pg);
+        if (r != OPTIX_SUCCESS) {
+            fprintf(stderr, "[warn]  CudaPathIntegrator: optixProgramGroupCreate failed for '%s': %s\n",
+                    wrapperName.c_str(), log);
+            return {ANACAPA_MX_NO_FUNCTION, 0u};
+        }
+
+        uint32_t sbtIndex = static_cast<uint32_t>(build.pgs.size());
+        build.pgs.push_back(pg);
+
+        uint32_t uniformOffset = static_cast<uint32_t>(build.uniformData.size());
+        build.uniformData.insert(build.uniformData.end(),
+                                 adapted.defaultUniformData.begin(), adapted.defaultUniformData.end());
+        return {sbtIndex, uniformOffset};
+    };
+
+    for (uint32_t i = 0; i < materials.size(); ++i) {
+        const auto* mxMat = dynamic_cast<const MaterialXMaterial*>(materials[i]);
+        if (!mxMat) continue;
+
+        MxDispatchEntry entry{};
+        entry.baseColorFunc = entry.roughnessFunc = entry.metalnessFunc = ANACAPA_MX_NO_FUNCTION;
+
+        std::tie(entry.baseColorFunc, entry.baseColorOffset) =
+            compileAndRegister(mxMat->generated("base_color"), "base_color", i);
+        std::tie(entry.roughnessFunc, entry.roughnessOffset) =
+            compileAndRegister(mxMat->generated("specular_roughness"), "roughness", i);
+        std::tie(entry.metalnessFunc, entry.metalnessOffset) =
+            compileAndRegister(mxMat->generated("base_metalness"), "metalness", i);
+
+        build.dispatchIndexForMaterial[i] = static_cast<uint32_t>(build.dispatchEntries.size());
+        build.dispatchEntries.push_back(entry);
+    }
+
+    printf("[info]  CudaPathIntegrator: MaterialX GPU shading — %zu generated function(s), "
+           "%zu material(s) using procedural inputs\n",
+           build.pgs.size(), build.dispatchIndexForMaterial.size());
+
+    return build;
+}
+#endif // ANACAPA_ENABLE_MATERIALX
+
 }  // namespace
 
-bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
+bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx,
+                                                   const std::vector<const IMaterial*>& materials)
 {
-    if (optixReady) return true;
+    bool hasMx = false;
+#ifdef ANACAPA_ENABLE_MATERIALX
+    for (const IMaterial* m : materials) {
+        if (dynamic_cast<const MaterialXMaterial*>(m)) { hasMx = true; break; }
+    }
+#endif
+    if (optixReady) {
+        // Preserve the original "build once, reuse forever" fast path for
+        // scenes with no MaterialX materials — only rebuild when there's
+        // actually new callables content to pick up.
+        if (!hasMx) return true;
+        destroyOptixPipeline();
+    }
 
     // ---- Read PTX from disk -------------------------------------------------
     const std::string ptxPath = std::string(ANACAPA_PTX_DIR) + "/Shade.ptx";
@@ -543,33 +856,49 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
     makeRaygenPg("__raygen__wf_bounce",   pgWfBounce);
     makeRaygenPg("__raygen__wf_finalize", pgWfFinalize);
 
+    // ---- MaterialX GPU codegen callables -------------------------------------
+    // Compiled before pipeline creation — its program groups must be present
+    // in the same optixPipelineCreate() call as everything else.
+#ifdef ANACAPA_ENABLE_MATERIALX
+    MxCudaBuild mxBuild = buildMaterialXCallables(ctx, modOpts, pipeOpts, pgOpts, materials);
+    mxModules = mxBuild.modules;
+    mxPgs     = mxBuild.pgs;
+    mxDispatchIndexForMaterial = mxBuild.dispatchIndexForMaterial;
+#endif
+
     // ---- Pipeline -----------------------------------------------------------
-    // Single pipeline links every raygen plus the shared miss/hit programs.
-    // Photon-trace renders share this pipeline with the three wavefront
-    // raygens so OptiX builds and stack-sizes everything once.
+    // Single pipeline links every raygen plus the shared miss/hit programs
+    // (and, when present, the MaterialX callables). Photon-trace renders
+    // share this pipeline with the three wavefront raygens so OptiX builds
+    // and stack-sizes everything once.
     OptixPipelineLinkOptions linkOpts{};
     linkOpts.maxTraceDepth = 1;  // raygen is the only invoker; no recursion
 
-    OptixProgramGroup wfPgs[6] = {
+    std::vector<OptixProgramGroup> allPgs = {
         pgWfPrimary, pgWfBounce, pgWfFinalize, pgPhotonRg, pgMiss, pgHit
     };
+#ifdef ANACAPA_ENABLE_MATERIALX
+    allPgs.insert(allPgs.end(), mxPgs.begin(), mxPgs.end());
+#endif
     logSize = sizeof(log);
     OPTIX_CHECK(optixPipelineCreate(ctx, &pipeOpts, &linkOpts,
-                                    wfPgs, 6, log, &logSize, &wfPipeline));
+                                    allPgs.data(), static_cast<unsigned int>(allPgs.size()),
+                                    log, &logSize, &wfPipeline));
 
     OptixStackSizes wfStack{};
-    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgWfPrimary,  &wfStack, wfPipeline));
-    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgWfBounce,   &wfStack, wfPipeline));
-    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgWfFinalize, &wfStack, wfPipeline));
-    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgPhotonRg,   &wfStack, wfPipeline));
-    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgMiss,       &wfStack, wfPipeline));
-    OPTIX_CHECK(optixUtilAccumulateStackSizes(pgHit,        &wfStack, wfPipeline));
+    for (OptixProgramGroup pg : allPgs)
+        OPTIX_CHECK(optixUtilAccumulateStackSizes(pg, &wfStack, wfPipeline));
     {
         uint32_t dcStackTrav2 = 0, dcStackState2 = 0, contStack2 = 0;
+#ifdef ANACAPA_ENABLE_MATERIALX
+        const unsigned int maxDCDepth = mxPgs.empty() ? 0u : 1u;
+#else
+        const unsigned int maxDCDepth = 0u;
+#endif
         OPTIX_CHECK(optixUtilComputeStackSizes(&wfStack,
                                                /*maxTraceDepth=*/1,
                                                /*maxCCDepth=*/0,
-                                               /*maxDCDepth=*/0,
+                                               maxDCDepth,
                                                &dcStackTrav2, &dcStackState2, &contStack2));
         OPTIX_CHECK(optixPipelineSetStackSize(wfPipeline,
                                               dcStackTrav2, dcStackState2, contStack2,
@@ -595,7 +924,40 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx)
     sbtCommon.hitgroupRecordStrideInBytes = sizeof(SbtRecord);
     sbtCommon.hitgroupRecordCount         = 1;
 
-    // Build the four raygen SBT records; miss+hit are shared.
+#ifdef ANACAPA_ENABLE_MATERIALX
+    // Callables SBT — one record per generated function, in the exact order
+    // buildMaterialXCallables() appended them to mxBuild.pgs (that order IS
+    // the optixDirectCall sbtIndex every MxDispatchEntry::*Func value refers
+    // to). Attached to every raygen SBT below (only wf_bounce actually calls
+    // optixDirectCall today, but OptiX requires the active SBT at launch
+    // time to have the table, not just the pipeline).
+    if (!mxPgs.empty()) {
+        std::vector<SbtRecord> callRecs(mxPgs.size());
+        for (size_t i = 0; i < mxPgs.size(); ++i)
+            OPTIX_CHECK(optixSbtRecordPackHeader(mxPgs[i], &callRecs[i]));
+        sbtCallablesBuf = CudaByteBuffer(callRecs.size() * sizeof(SbtRecord));
+        sbtCallablesBuf.upload(reinterpret_cast<const uint8_t*>(callRecs.data()),
+                               callRecs.size() * sizeof(SbtRecord));
+        sbtCommon.callablesRecordBase          = sbtCallablesBuf.devPtr();
+        sbtCommon.callablesRecordStrideInBytes = sizeof(SbtRecord);
+        sbtCommon.callablesRecordCount         = static_cast<unsigned int>(mxPgs.size());
+    }
+
+    // Upload the per-material dispatch table + packed uniform floats (padded
+    // to length 1 when empty — CudaBuffer disallows zero-length allocations).
+    std::vector<MxDispatchEntry> dispatchUpload = mxBuild.dispatchEntries;
+    if (dispatchUpload.empty())
+        dispatchUpload.push_back(MxDispatchEntry{
+            ANACAPA_MX_NO_FUNCTION, 0u, ANACAPA_MX_NO_FUNCTION, 0u, ANACAPA_MX_NO_FUNCTION, 0u});
+    std::vector<float> uniformUpload = mxBuild.uniformData;
+    if (uniformUpload.empty()) uniformUpload.push_back(0.f);
+    d_mxDispatch = CudaBuffer<MxDispatchEntry>(dispatchUpload.size());
+    d_mxDispatch.upload(dispatchUpload);
+    d_mxUniforms = CudaBuffer<float>(uniformUpload.size());
+    d_mxUniforms.upload(uniformUpload);
+#endif
+
+    // Build the four raygen SBT records; miss+hit(+callables) are shared.
     auto packAndUpload = [&](OptixProgramGroup pg, CudaByteBuffer& buf,
                               OptixShaderBindingTable& out) {
         SbtRecord rec{};
@@ -633,6 +995,13 @@ void CudaPathIntegrator::Impl::destroyOptixPipeline()
     pgWfFinalize = pgWfBounce = pgWfPrimary = nullptr;
     pgHit = pgMiss = pgPhotonRg = nullptr;
     optixModule = nullptr;
+#ifdef ANACAPA_ENABLE_MATERIALX
+    for (OptixProgramGroup pg : mxPgs)     if (pg)  optixProgramGroupDestroy(pg);
+    for (OptixModule mod : mxModules)      if (mod) optixModuleDestroy(mod);
+    mxPgs.clear();
+    mxModules.clear();
+    mxDispatchIndexForMaterial.clear();
+#endif
     optixReady = false;
 }
 
@@ -1227,12 +1596,31 @@ void CudaPathIntegrator::prepare(const SceneView& scene) {
     }
     m_impl->hairMeshBaseID = m_impl->accel->hairMeshBaseID();
 
+#ifdef ANACAPA_ENABLE_OPTIX
+    // Build (or rebuild — see buildOptixPipeline's MaterialX-aware gating)
+    // the OptiX pipeline before extracting materials below: MaterialX GPU
+    // codegen needs mxDispatchIndexForMaterial populated first so
+    // extractGpuMaterial() can resolve each material's dispatch index.
+    // Called unconditionally, independent of photon mode (see prepare()'s
+    // later photon-map block for why buildPhotonMap() is deferred).
+    m_impl->buildOptixPipeline(
+        static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()), scene.materials);
+#endif
+
     // Materials — also track sssD_max for SSS hash-grid cell sizing.
     uint32_t nMat = static_cast<uint32_t>(scene.materials.size());
     std::vector<GpuMaterial> gpuMats(std::max(nMat, 1u));
     m_impl->sssD_max = 0.f;
+    m_impl->freeMaterialTextures();
     for (uint32_t i = 0; i < nMat; ++i) {
-        gpuMats[i] = extractGpuMaterial(scene.materials[i]);
+#ifdef ANACAPA_ENABLE_MATERIALX
+        gpuMats[i] = extractGpuMaterial(scene.materials[i], m_impl->materialTexArrays,
+                                         m_impl->materialTexObjects, m_impl->textureCache,
+                                         i, &m_impl->mxDispatchIndexForMaterial);
+#else
+        gpuMats[i] = extractGpuMaterial(scene.materials[i], m_impl->materialTexArrays,
+                                         m_impl->materialTexObjects, m_impl->textureCache);
+#endif
         if (scene.materials[i]) {
             auto sss = scene.materials[i]->subsurfaceParams();
             if (sss.weight > 0.f)
@@ -1242,6 +1630,12 @@ void CudaPathIntegrator::prepare(const SceneView& scene) {
     m_impl->d_materials  = CudaBuffer<GpuMaterial>(gpuMats.size());
     m_impl->d_materials.upload(gpuMats);
     m_impl->numMaterials = nMat;
+    if (!m_impl->materialTexObjects.empty()) {
+        m_impl->d_materialTextures = CudaBuffer<cudaTextureObject_t>(m_impl->materialTexObjects.size());
+        m_impl->d_materialTextures.upload(m_impl->materialTexObjects);
+    }
+    spdlog::info("CudaPathIntegrator::prepare — {} material textures loaded into atlas",
+                 m_impl->materialTexObjects.size());
 
     // Hair materials — one slot per scene material, even on non-hair slots
     // (the raygen indexes by the strand's material index, not by GpuMaterial type).
@@ -1426,15 +1820,13 @@ void CudaPathIntegrator::prepare(const SceneView& scene) {
            m_impl->accel->totalTriangles());
 
 #ifdef ANACAPA_ENABLE_OPTIX
-    // GPU caustic photon map.  Requires the OptiX pipeline (specifically the
-    // __raygen__photon entry) to be built before launch.  buildPhotonMap is
-    // a no-op when photonMapEnabled is false or numPhotons == 0.
-    if (m_impl->photonMapEnabled) {
-        if (m_impl->buildOptixPipeline(
-                static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()))) {
-            m_impl->buildPhotonMap(
-                static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()));
-        }
+    // The photon map's __raygen__photon entry needing the pipeline built is
+    // handled by the earlier buildOptixPipeline() call (see above, right
+    // before the materials loop — moved there so mxDispatchIndexForMaterial
+    // is populated before extractGpuMaterial() needs it).
+    if (m_impl->photonMapEnabled && m_impl->optixReady) {
+        m_impl->buildPhotonMap(
+            static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()));
     }
 #endif
 
@@ -1501,13 +1893,25 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.numLights         = numLights;
     p.materials         = d_materials.ptr();
     p.numMaterials      = numMaterials;
+#ifdef ANACAPA_ENABLE_MATERIALX
+    p.mxDispatch        = d_mxDispatch.isValid() ? d_mxDispatch.ptr() : nullptr;
+    p.mxUniforms        = d_mxUniforms.isValid() ? d_mxUniforms.ptr() : nullptr;
+#else
+    p.mxDispatch        = nullptr;
+    p.mxUniforms        = nullptr;
+#endif
     p.normals           = reinterpret_cast<const GpuFloat3*>(accel->normalBuffer());
+    p.uvs               = reinterpret_cast<const GpuFloat2*>(accel->uvBuffer());
+    p.tangents          = reinterpret_cast<const GpuFloat4*>(accel->tangentBuffer());
     p.indices           = reinterpret_cast<const uint32_t*>(accel->indexBuffer());
     p.triMeshIDs        = reinterpret_cast<const uint32_t*>(accel->triMeshIDBuffer());
     p.meshVertexOffsets = reinterpret_cast<const uint32_t*>(accel->meshVertexOffsetBuffer());
     p.meshIndexOffsets  = reinterpret_cast<const uint32_t*>(accel->meshIndexOffsetBuffer());
     p.instanceMeshIDs   = reinterpret_cast<const uint32_t*>(accel->instanceMeshIDBuffer());
     p.instanceNormalMat = reinterpret_cast<const float*>(accel->instanceNormalMatrixBuffer());
+    p.instanceTangentMat = reinterpret_cast<const float*>(accel->instanceTangentMatrixBuffer());
+    p.instancePositionMat = reinterpret_cast<const float*>(accel->instancePositionMatrixBuffer());
+    p.materialTextures  = d_materialTextures.isValid() ? d_materialTextures.ptr() : nullptr;
     p.sampleBatch.sampleStart = sampleStart;
     p.sampleBatch.batchSize   = sampleCount;
     p.envTexture        = envTex;
@@ -1589,7 +1993,7 @@ bool CudaPathIntegrator::renderFrame(const SceneView& scene,
 
 #ifdef ANACAPA_ENABLE_OPTIX
     if (!m_impl->buildOptixPipeline(
-            static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()))) {
+            static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()), scene.materials)) {
         return false;
     }
     return m_impl->renderFrameWavefront(scene,
@@ -1617,7 +2021,7 @@ void CudaPathIntegrator::renderTile(const SceneView& scene,
 
 #ifdef ANACAPA_ENABLE_OPTIX
     if (!m_impl->buildOptixPipeline(
-            static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()))) {
+            static_cast<OptixDeviceContext>(m_impl->ctx->optixContext()), scene.materials)) {
         return;
     }
     uint32_t tw = std::min(tile.width,  filmWidth  - tile.x0);

@@ -5,6 +5,9 @@
 #include "../../shading/SoftParticle.h"
 #include "../../shading/StandardSurface.h"
 #include "../../shading/OslMaterial.h"
+#ifdef ANACAPA_ENABLE_MATERIALX
+#include "../../shading/MaterialXMaterial.h"
+#endif
 #include "../../shading/lights/AreaLight.h"
 #include "../../shading/lights/DirectionalLight.h"
 #include "../../shading/lights/DomeLight.h"
@@ -794,8 +797,80 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                                  mat.GetPrim().GetName().GetString(), sssWeight, radius);
                 }
             }
+#ifdef ANACAPA_ENABLE_MATERIALX
+            // OSL succeeded — this material renders correctly on CPU. But GPU
+            // rendering can't execute OSL at all; without this, extractGpuMaterial()
+            // would only get OslMaterial's single flat-probed color (see
+            // OslMaterial.cpp's "GPU/Metal preview" cache), losing all procedural
+            // detail (e.g. wood grain) on GPU even though CPU shows it correctly.
+            // Attach a MaterialX GPU-codegen counterpart from the same .mtlx
+            // sidecar, if one exists, so GPU extraction can dynamic_cast it via
+            // oslGetMaterialXCounterpart() and get real per-pixel procedural
+            // shading instead. CPU rendering is completely unaffected — it always
+            // executes the real OSL shader via osl. See project memory
+            // project_materialx_codegen, Phase 4b.
+            {
+                std::string matDir = stageDir + "/materials";
+                auto tryMtlxCounterpart = [&](const std::string& name) -> bool {
+                    if (name.empty()) return false;
+                    std::string mtlxPath = matDir + "/" + name + ".mtlx";
+                    if (!std::filesystem::exists(mtlxPath)) return false;
+                    oslSetMaterialXCounterpart(osl.get(), std::make_unique<MaterialXMaterial>(mtlxPath));
+                    spdlog::info("USDLoader: material '{}' OSL + MaterialX GPU counterpart ('{}')",
+                                 mat.GetPath().GetString(), name);
+                    return true;
+                };
+                bool foundMtlx = tryMtlxCounterpart(blenderName);
+                if (!foundMtlx && blenderNameSanitized != blenderName)
+                    foundMtlx = tryMtlxCounterpart(blenderNameSanitized);
+                if (!foundMtlx)
+                    tryMtlxCounterpart(mat.GetPrim().GetName().GetString());
+            }
+#endif
             return osl;
         }
+    }
+#endif
+
+#ifdef ANACAPA_ENABLE_MATERIALX
+    // No usable OSL material (OSL disabled at compile time, --skip-osl, or no
+    // .osl/.oso on disk for this material) — fall back to MaterialX GPU
+    // codegen. It reads the exact same .mtlx sidecar the Blender addon
+    // already exports for the OSL path. MaterialXMaterial is a stub on CPU
+    // (falls back to literal defaults, matching StandardSurface below) —
+    // its real value is that extractGpuMaterial() dynamic_casts it and
+    // generates MSL/GLSL at scene-load time, giving GPU rendering the same
+    // procedural shading OSL already gives the CPU. See project memory
+    // project_materialx_codegen.
+    if (!skipOSL) {
+        auto tryMtlx = [&](const std::string& name) -> std::unique_ptr<IMaterial> {
+            if (name.empty()) return nullptr;
+            std::string matDir   = stageDir + "/materials";
+            std::string mtlxPath = matDir + "/" + name + ".mtlx";
+            if (!std::filesystem::exists(mtlxPath)) return nullptr;
+            spdlog::info("USDLoader: material '{}' → MaterialXMaterial ('{}')",
+                         mat.GetPath().GetString(), name);
+            return std::make_unique<MaterialXMaterial>(mtlxPath);
+        };
+
+        std::string blenderName;
+        UsdAttribute nameAttr = mat.GetPrim().GetAttribute(
+            TfToken("userProperties:blender:data_name"));
+        if (nameAttr) nameAttr.Get(&blenderName);
+        auto sanitizeName = [](const std::string& s) {
+            std::string r = s;
+            for (char& c : r)
+                if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_')
+                    c = '_';
+            return r;
+        };
+        std::string blenderNameSanitized = sanitizeName(blenderName);
+
+        auto mx = tryMtlx(blenderName);
+        if (!mx && blenderNameSanitized != blenderName)
+            mx = tryMtlx(blenderNameSanitized);
+        if (!mx) mx = tryMtlx(mat.GetPrim().GetName().GetString());
+        if (mx) return mx;
     }
 #endif
 

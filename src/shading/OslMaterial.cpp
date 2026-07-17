@@ -1574,6 +1574,19 @@ private:
     // the normal-based GGX path (which is meaningless on ribbon/curve geometry).
     MarschnerHairMaterial       m_hairFallback{MarschnerHairMaterial::Params{}};
 
+    // GPU codegen counterpart — set via oslSetMaterialXCounterpart() when the
+    // same .mtlx sidecar OSL was compiled from also exists. GPU material
+    // extraction dynamic_casts this (via oslGetMaterialXCounterpart()) to get
+    // real per-pixel procedural shading instead of this class's flat
+    // single-probe base color (see m_baseColor above and the "GPU/Metal
+    // preview" comment on its cache site). CPU rendering never touches this —
+    // it always executes the real OSL shader. See project memory
+    // project_materialx_codegen, Phase 4b.
+    std::unique_ptr<IMaterial>  m_mxCounterpart;
+
+    friend void oslSetMaterialXCounterpart(IMaterial*, std::unique_ptr<IMaterial>);
+    friend const IMaterial* oslGetMaterialXCounterpart(const IMaterial*);
+
     // Build a per-lobe ShadingContext whose shading normal is the bump-perturbed
     // normal stored in the lobe.  Falls back to ctx unchanged when lobe.normal
     // is zero (i.e. no bump node contributed to this lobe).
@@ -1898,6 +1911,17 @@ void oslSetSubsurfaceParams(IMaterial* mat,
                              float strength) {
     if (auto* osl = dynamic_cast<OslMaterial*>(mat))
         osl->setSubsurfaceParams(weight, color, radius, anisotropy, strength);
+}
+
+void oslSetMaterialXCounterpart(IMaterial* mat, std::unique_ptr<IMaterial> mxMat) {
+    if (auto* osl = dynamic_cast<OslMaterial*>(mat))
+        osl->m_mxCounterpart = std::move(mxMat);
+}
+
+const IMaterial* oslGetMaterialXCounterpart(const IMaterial* mat) {
+    if (const auto* osl = dynamic_cast<const OslMaterial*>(mat))
+        return osl->m_mxCounterpart.get();
+    return nullptr;
 }
 
 } // namespace anacapa

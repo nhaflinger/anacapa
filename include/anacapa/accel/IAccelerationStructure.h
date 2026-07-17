@@ -15,6 +15,8 @@ struct SurfaceInteraction {
     Vec3f    ng;          // Geometric normal (normalized)
     Vec3f    dpdu, dpdv;  // Partial derivatives (tangent frame)
                           // For curves: dpdu = fiber/tangent direction along strand
+                          // For triangles: dpdu = UV-derivative tangent (MeshDesc::tangents)
+    float    dpduSign = 1.f;  // Bitangent handedness sign for dpdu (triangles only)
     Vec2f    uv;          // Surface parameterization.
                           // For curves: root UV on the emitter mesh (scalp position).
     float    strandV = 0.f; // Curves only: parametric position along strand ∈ [0,1] (root=0, tip=1)
