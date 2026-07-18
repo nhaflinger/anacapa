@@ -1269,6 +1269,21 @@ public:
                     break;
                 }
             }
+            // Cache the transmissive lobe's own path weight (distinct from
+            // the tint above) — this is how much of the material's total
+            // response is actually transmission, e.g. 0.535 for a fruit
+            // glaze with transmission_weight=0.535 in OpenPBR terms, vs 1.0
+            // for genuine clear glass. Used by GPU material extraction to
+            // avoid misclassifying mostly-opaque-but-slightly-transmissive
+            // materials as pure glass (found via a real-scene bug report: a
+            // raspberry glaze rendered near-black/wrong-hue on GPU because
+            // it was treated as 100% transparent, discarding its real
+            // diffuse red color entirely).
+            for (auto& l : lobes) {
+                if (l.kind == OslLobe::Kind::GGXTrans || l.kind == OslLobe::Kind::GGXBoth) {
+                    m_transmissionWeight = std::max(m_transmissionWeight, luminance(l.weight));
+                }
+            }
             // DiffuseTrans (translucent_bsdf) also needs shadow transmittance.
             if (isBlack(m_transmittanceTint)) {
                 for (auto& l : lobes) {
@@ -1284,7 +1299,6 @@ public:
             // Cache the diffuse lobe weight as the base color for GPU/Metal preview.
             // Only use the diffuse lobe — GGX specular is handled separately by the
             // GPU shader and summing both would exceed 1.0 and make the scene too bright.
-            // Fall back to 0.5 grey for pure-specular / glass materials.
             Spectrum diffuseColor{};
             for (auto& l : lobes) {
                 if (l.kind == OslLobe::Kind::Diffuse ||
@@ -1293,7 +1307,41 @@ public:
                 }
             }
             float lum = luminance(diffuseColor);
-            m_baseColor = (lum > 1e-4f) ? diffuseColor : Spectrum{0.5f, 0.5f, 0.5f};
+            if (lum > 1e-4f) {
+                m_baseColor = diffuseColor;
+                m_metalness = 0.0f;
+            } else {
+                // No diffuse lobe — e.g. a fully metallic/conductor material
+                // (metalness=1 in MaterialX/OpenPBR terms has no diffuse
+                // component at all). Fall back to the dominant GGX reflection
+                // lobe's Fresnel F0, which for a metal IS the material's tint
+                // (conductor/generalized-Schlick closures carry the real
+                // color there, not in `weight` — see OSL_CID_MX_CONDUCTOR/
+                // OSL_CID_MX_SCHLICK above). Without this, every fully
+                // metallic OSL material collapsed to flat 0.5 grey on the GPU
+                // preview path, discarding its tint entirely — found via a
+                // real-scene bug report (bronze TV antenna rendering as grey/
+                // white metal instead of bronze on GPU; CPU was unaffected
+                // since it executes the real OSL shader per-pixel instead of
+                // this cached flat-probe fallback).
+                Spectrum bestF0{};
+                float    bestWeight = 0.f;
+                for (auto& l : lobes) {
+                    if (l.kind == OslLobe::Kind::GGXRefl || l.kind == OslLobe::Kind::GGXBoth) {
+                        float w = luminance(l.weight);
+                        if (w > bestWeight) { bestWeight = w; bestF0 = l.f0; }
+                    }
+                }
+                if (bestWeight > 1e-4f) {
+                    m_baseColor = bestF0;
+                    m_metalness = 1.0f;
+                } else {
+                    // Truly no reflective lobe of any kind (e.g. pure glass) —
+                    // grey is a reasonable neutral fallback here.
+                    m_baseColor = Spectrum{0.5f, 0.5f, 0.5f};
+                    m_metalness = 0.0f;
+                }
+            }
 
             // Cache emission from probe for auto-registration of emissive meshes.
             for (auto& l : lobes) {
@@ -1377,6 +1425,8 @@ public:
         return m_baseColor;
     }
     float    roughness() const override { return m_roughness; }
+    float    metalness() const override { return m_metalness; }
+    float    transmissionWeight() const override { return m_transmissionWeight; }
     Spectrum probeEmission() const override { return m_probeEmission; }
 
     // ---------- Le: emitted radiance ----------
@@ -1564,6 +1614,8 @@ private:
     Spectrum                    m_transmittanceTint = {};
     Spectrum                    m_baseColor         = {0.5f, 0.5f, 0.5f};
     float                       m_roughness         = 1.0f;  // from dominant GGX lobe, cached at ctor
+    float                       m_metalness         = 0.0f;  // 1.0 when no diffuse lobe exists (conductor), cached at ctor
+    float                       m_transmissionWeight = 0.0f; // dominant GGXTrans/GGXBoth lobe's own weight, cached at ctor
     Spectrum                    m_probeEmission     = {};    // emission at uv=(0.5,0.5), cached at ctor
     SubsurfaceParams            m_sss               = {};
 

@@ -146,6 +146,16 @@ public:
     // Default (1.0) is safe for any material that doesn't override this.
     virtual float roughness() const { return 1.0f; }
     virtual float metalness() const { return 0.0f; }
+
+    // Fraction of the material's response carried by transmission (0 = fully
+    // opaque, 1 = fully transparent). Used by GPU material extraction to
+    // decide whether a material is genuinely glass-like (safe to render as a
+    // delta transmission BSDF) versus mostly opaque with an incidental
+    // transmission lobe (e.g. a fruit glaze with ~50% transmission_weight
+    // blended with a real diffuse color) — the latter should render as
+    // opaque GGX using its real diffuse/specular response, not as clear
+    // glass, or its color is discarded entirely. Default 0 (opaque).
+    virtual float transmissionWeight() const { return 0.0f; }
 };
 
 } // namespace anacapa

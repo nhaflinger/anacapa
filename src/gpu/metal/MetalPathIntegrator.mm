@@ -557,8 +557,18 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat, id<MTLDevice> dev,
         ShadingContext ctx(si, {0,0,1});
         Spectrum tint = mat->transmittanceColor(ctx);
         // Use a higher threshold for OslMaterial to avoid misclassifying materials
-        // with tiny incidental refraction lobes (e.g. eyes) as glass.
-        bool isTransmissive = (tint.x > 0.1f || tint.y > 0.1f || tint.z > 0.1f);
+        // with tiny incidental refraction lobes (e.g. eyes) as glass. Also require
+        // transmission to actually DOMINATE the material's response (not just be
+        // present) — transmittanceColor() is a TINT, not a weight, so a material
+        // that's mostly diffuse/opaque with a modest transmission_weight (e.g. a
+        // ~50% translucent fruit glaze) would trivially clear the tint threshold
+        // and get rendered as 100% clear glass, discarding its real (correctly-
+        // captured) diffuse color entirely — found via a real-scene bug report
+        // (a raspberry tartlet glaze rendering near-black/wrong-hue on GPU).
+        // Genuine glass (drinking glasses, windows) has transmission_weight
+        // close to 1.0, well clear of this threshold.
+        bool isTransmissive = (tint.x > 0.1f || tint.y > 0.1f || tint.z > 0.1f)
+                            && mat->transmissionWeight() > 0.85f;
 
         const StandardSurfaceMaterial* ssm = dynamic_cast<const StandardSurfaceMaterial*>(mat);
         if (ssm && ssm->params().transmission > 0.001f && ssm->params().metalness.value < 0.001f) {
@@ -625,10 +635,26 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat, id<MTLDevice> dev,
             gm.type = kMatMaterialX;
             SurfaceInteraction si; si.n = si.ng = {0,0,1};
             ShadingContext ctx(si, {0,0,1});
-            Spectrum alb = mxMat->reflectance(ctx);
+            // Static/base values come from `mat` (the original material —
+            // OslMaterial's real probed reflectance/roughness/metalness for
+            // Phase 4b, or mxMat itself for Phase 4a where mat IS mxMat), NOT
+            // mxMat->reflectance()/roughness()/metalness() — those are
+            // MaterialXMaterial's own generic stub defaults (0.8/0.5/0-ish
+            // literals), meant only as a last-resort fallback. The per-pixel
+            // generated-function dispatch below overrides whichever fields
+            // actually compiled successfully; this static value is what's
+            // left in place for any field that didn't (e.g. an unsupported
+            // `filename`/image-texture base_color input — `generated()`
+            // structurally treats it as procedural since it's non-literal,
+            // but MaterialXMslAdapter gracefully fails to compile it, leaving
+            // baseColorFunc==kMxNoFunction; using mxMat's stub default there
+            // silently discarded OSL's correctly-probed color, found via a
+            // real-scene bug report — bread materials rendering flat pale/
+            // white instead of their real baked tan tones).
+            Spectrum alb = mat->reflectance(ctx);
             gm.baseColor = {alb.x, alb.y, alb.z};
-            gm.roughness = mxMat->roughness();
-            gm.metalness = mxMat->metalness();
+            gm.roughness = mat->roughness();
+            gm.metalness = mat->metalness();
             if (mxDispatchMap) {
                 auto it = mxDispatchMap->find(materialIdx);
                 if (it != mxDispatchMap->end())

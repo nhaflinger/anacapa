@@ -265,7 +265,14 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat,
         SurfaceInteraction si; si.n = si.ng = {0,0,1};
         ShadingContext ctx(si, {0,0,1});
         Spectrum tint = mat->transmittanceColor(ctx);
-        bool isTransmissive = (tint.x > 0.1f || tint.y > 0.1f || tint.z > 0.1f);
+        // Require transmission to actually DOMINATE the material's response, not
+        // just be present — transmittanceColor() is a TINT, not a weight, so a
+        // mostly-opaque material with a modest transmission_weight (e.g. a ~50%
+        // translucent fruit glaze) would trivially clear the tint threshold and
+        // render as 100% clear glass, discarding its real diffuse color entirely.
+        // Mirrors the identical Metal backend fix in MetalPathIntegrator.mm.
+        bool isTransmissive = (tint.x > 0.1f || tint.y > 0.1f || tint.z > 0.1f)
+                            && mat->transmissionWeight() > 0.85f;
 
         const StandardSurfaceMaterial* ssm = dynamic_cast<const StandardSurfaceMaterial*>(mat);
         if (ssm && ssm->params().transmission > 0.001f && ssm->params().metalness.value < 0.001f) {
