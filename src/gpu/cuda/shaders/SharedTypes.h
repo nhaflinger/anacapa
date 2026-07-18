@@ -99,6 +99,13 @@ struct GpuMaterial {
     float      normalBias;
     // Index into LaunchParams::mxDispatch when type == kMatMaterialX; -1 otherwise.
     int32_t    mxDispatchIdx;
+    // 1 = apply Kulla-Conty multi-scatter GGX compensation in evalLayeredBSDF
+    // (matches CPU's StandardSurfaceMaterial, which uses the same LUTs — see
+    // StandardSurface.h); 0 = pure single-scatter (matches CPU's OslMaterial
+    // conductor/dielectric lobes, evalGGXReflLobe in OslMaterial.cpp, which
+    // never applies this compensation). Set per-material in
+    // extractGpuMaterial() — mirrors the identical Metal backend split.
+    uint32_t   multiScatter;
 };
 
 // ---------------------------------------------------------------------------

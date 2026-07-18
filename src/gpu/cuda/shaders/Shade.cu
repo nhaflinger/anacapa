@@ -590,7 +590,7 @@ float3 disneyDiffuseLobe(float3 wo, float3 wi, float3 n,
 static __forceinline__ __device__
 float3 evalLayeredBSDF(float3 wo, float3 wi, float3 n,
                         float3 baseColor, float roughness,
-                        float metalness, float specular)
+                        float metalness, float specular, bool multiScatter)
 {
     float3 wh    = normalize(wo + wi);
     float  cosH  = fmaxf(0.0f, dot(n, wh));
@@ -606,8 +606,16 @@ float3 evalLayeredBSDF(float3 wo, float3 wi, float3 n,
     float  invDen = 1.0f / fmaxf(1e-7f, 4.0f * cosO * cosII);
 
     float3 F0     = lerp3(make_float3(0.04f, 0.04f, 0.04f), baseColor, metalness);
-    float3 spec   = D * G * schlick(vdotH, F0) * invDen
-                  + evalGGXMs(cosO, cosII, roughness, F0);
+    float3 spec   = D * G * schlick(vdotH, F0) * invDen;
+    // Kulla-Conty multi-scatter compensation — only for materials whose CPU
+    // reference actually includes it (StandardSurfaceMaterial's evalCombined).
+    // OSL/MaterialX-backed materials' CPU reference (evalGGXReflLobe in
+    // OslMaterial.cpp) is pure single-scatter; adding this term there flattens
+    // the dark-base/bright-rim Fresnel contrast a real metal should show.
+    // Mirrors the identical Metal backend change in Shade.metal.
+    if (multiScatter) {
+        spec += evalGGXMs(cosO, cosII, roughness, F0);
+    }
 
     float  E_spec = specAlbedoLookup(cosO, roughness);
     float  diffW  = (1.0f - metalness) * (1.0f - specular * E_spec);
@@ -940,7 +948,7 @@ float3 sampleDirectHair(float3 hitPos, float3 wo, float3 hairT, float h,
 static __forceinline__ __device__
 float3 sampleDirect(float3 hitPos, float3 n, float3 wo,
                     uint32_t matType, float3 baseColor,
-                    float roughness, float metalness, float specular,
+                    float roughness, float metalness, float specular, bool multiScatter,
                     uint32_t& rng, float rayTime)
 {
     if (params.numLights == 0) return make_float3(0.0f, 0.0f, 0.0f);
@@ -1023,7 +1031,7 @@ float3 sampleDirect(float3 hitPos, float3 n, float3 wo,
     if (matType == kMatLambertian) {
         f = baseColor * (1.0f / CUDART_PI_F);
     } else if (matType == kMatGGX) {
-        f = evalLayeredBSDF(wo, wi, n, baseColor, roughness, metalness, specular);
+        f = evalLayeredBSDF(wo, wi, n, baseColor, roughness, metalness, specular, multiScatter);
     }
 
     // MIS weight against the BSDF-sampling strategy (matches CPU's
@@ -1108,7 +1116,7 @@ PixelFilterSample samplePixelFilter(float u1, float u2)
 static __forceinline__ __device__
 float3 queryPhotonMap(float3 p, float3 n, float3 wo,
                        uint32_t matType, float3 baseColor,
-                       float roughness, float metalness, float specular)
+                       float roughness, float metalness, float specular, bool multiScatter)
 {
     if (!params.cam.photonMapEnabled
         || params.hashCellStart == nullptr
@@ -1170,7 +1178,7 @@ float3 queryPhotonMap(float3 p, float3 n, float3 wo,
                 f = baseColor * (1.0f / CUDART_PI_F);
             } else if (matType == kMatGGX) {
                 f = evalLayeredBSDF(wo, wi, n, baseColor,
-                                     roughness, metalness, specular);
+                                     roughness, metalness, specular, multiScatter);
             }
             Laccum += f * make3(ph.power);
         }
@@ -2152,7 +2160,7 @@ extern "C" __global__ void __raygen__wf_bounce()
         float3 Ldirect = sampleDirect(hitPos, n, wo,
                                       mat.type, baseColor,
                                       mat.roughness, mat.metalness,
-                                      mat.specular,
+                                      mat.specular, mat.multiScatter != 0,
                                       rng, rayTime);
         L += throughput * Ldirect;
     }
@@ -2163,7 +2171,7 @@ extern "C" __global__ void __raygen__wf_bounce()
         float3 Lcaustic = queryPhotonMap(hitPos, n, wo,
                                           mat.type, baseColor,
                                           mat.roughness, mat.metalness,
-                                          mat.specular);
+                                          mat.specular, mat.multiScatter != 0);
         L += throughput * Lcaustic;
     }
     // SSS photon map — fires for any SSS material hit (all bounces, not just first).
@@ -2227,7 +2235,7 @@ extern "C" __global__ void __raygen__wf_bounce()
         float D     = ggxD(cosH, alpha2);
         bsdfF = evalLayeredBSDF(wo, wi, n, baseColor,
                                  mat.roughness, mat.metalness,
-                                 mat.specular);
+                                 mat.specular, mat.multiScatter != 0);
         float ggxPdf = D * cosH / fmaxf(1e-7f, 4.0f * dot(wo, wh));
         float cosPdf = cosII / CUDART_PI_F;
         bsdfPdf = pSpec * ggxPdf + pDiff * cosPdf;
@@ -2237,7 +2245,7 @@ extern "C" __global__ void __raygen__wf_bounce()
         bsdfPdf = fmaxf(1e-7f, dot(n, wi)) / CUDART_PI_F;
         if (mat.type == kMatGGX) {
             bsdfF = evalLayeredBSDF(wo, wi, n, baseColor,
-                                     mat.roughness, mat.metalness, mat.specular);
+                                     mat.roughness, mat.metalness, mat.specular, mat.multiScatter != 0);
         } else {
             bsdfF = baseColor * (1.0f / CUDART_PI_F);
         }

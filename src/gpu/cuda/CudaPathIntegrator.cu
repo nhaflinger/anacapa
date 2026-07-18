@@ -184,6 +184,7 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat,
     gm.normalScale = 1.f;
     gm.normalBias  = -1.f;
     gm.mxDispatchIdx = -1;
+    gm.multiScatter = 0u;  // default: single-scatter, matches OslMaterial's conductor/dielectric lobes
     if (!mat) return gm;
     gm.causticGenerator = mat->isCausticGenerator() ? 1u : 0u;
 
@@ -308,6 +309,7 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat,
         gm.metalness   = ssm->params().metalness.value;
         gm.specular    = ssm->params().specular.value;
         gm.specularIOR = ssm->params().specular_IOR;
+        gm.multiScatter = 1u;
 
         if (ssm->params().base_color.hasTexture()) {
             gm.baseColorTexIdx = loadOrCacheTexture(

@@ -493,6 +493,7 @@ static float3 disneyDiffuseLobe(float3 wo, float3 wi, float3 n,
 static float3 evalLayeredBSDF(float3 wo, float3 wi, float3 n,
                                float3 baseColor, float roughness,
                                float metalness, float specular,
+                               bool multiScatter,
                                constant GpuCameraParams& cam,
                                const device float* specLUT,
                                const device float* specAvgLUT) {
@@ -510,8 +511,15 @@ static float3 evalLayeredBSDF(float3 wo, float3 wi, float3 n,
     float  invDen = 1.0f / max(1e-7f, 4.0f * cosO * cosII);
 
     float3 F0   = mix(float3(0.04f), baseColor, metalness);
-    float3 spec = D * G * schlick(vdotH, F0) * invDen
-                + evalGGXMs(cosO, cosII, roughness, F0, cam, specLUT, specAvgLUT);
+    float3 spec = D * G * schlick(vdotH, F0) * invDen;
+    // Kulla-Conty multi-scatter compensation — only for materials whose CPU
+    // reference actually includes it (StandardSurfaceMaterial's evalCombined).
+    // OSL/MaterialX-backed materials' CPU reference (evalGGXReflLobe in
+    // OslMaterial.cpp) is pure single-scatter; adding this term there flattens
+    // the dark-base/bright-rim Fresnel contrast a real metal should show.
+    if (multiScatter) {
+        spec += evalGGXMs(cosO, cosII, roughness, F0, cam, specLUT, specAvgLUT);
+    }
 
     float  E_spec = specAlbedoLookup(cosO, roughness, cam, specLUT);
     float  diffW  = (1.0f - metalness) * (1.0f - specular * E_spec);
@@ -849,6 +857,7 @@ static float3 sampleDirect(
     float                           roughness,
     float                           metalness,
     float                           specular,
+    bool                            multiScatter,
     float                           rayTime,
     const device GpuLight*          lights,
     uint                            numLights,
@@ -957,7 +966,7 @@ static float3 sampleDirect(
     if (matType == kMatLambertian) {
         f = baseColor * (1.0f / M_PI_F);
     } else if (matType == kMatGGX) {
-        f = evalLayeredBSDF(wo, wi, n, baseColor, roughness, metalness, specular,
+        f = evalLayeredBSDF(wo, wi, n, baseColor, roughness, metalness, specular, multiScatter,
                             cam, specAlbedoLUT, specAvgAlbedoLUT);
     }
     // Glass is delta — no area PDF can be evaluated, skip direct lighting
@@ -1030,6 +1039,7 @@ static float3 queryHashGrid(
     float                          roughness,
     float                          metalness,
     float                          specular,
+    bool                           multiScatter,
     constant GpuCameraParams&      cam,
     const device uint32_t*         cellStart,
     const device uint32_t*         sortedPhotonIdx,
@@ -1081,7 +1091,7 @@ static float3 queryHashGrid(
             if (matType == kMatLambertian) {
                 f = baseColor * (1.f / M_PI_F);
             } else if (matType == kMatGGX) {
-                f = evalLayeredBSDF(wo, wi, n, baseColor, roughness, metalness, specular,
+                f = evalLayeredBSDF(wo, wi, n, baseColor, roughness, metalness, specular, multiScatter,
                                     cam, specAlbedoLUT, specAvgAlbedoLUT);
             }
 
@@ -1760,6 +1770,7 @@ kernel void shade(
             float3 Ldirect = sampleDirect(hitPos, n, wo,
                                           mat.type, baseColor,
                                           mat.roughness, mat.metalness, mat.specular,
+                                          mat.multiScatter != 0,
                                           rayTime,
                                           lights, numLights,
                                           materials, numMaterials,
@@ -1776,6 +1787,7 @@ kernel void shade(
                 float3 Lcaustic = queryHashGrid(hitPos, n, wo,
                                                mat.type, baseColor,
                                                mat.roughness, mat.metalness, mat.specular,
+                                               mat.multiScatter != 0,
                                                cam, hashCellStart, sortedPhotonIdx, photons,
                                                specAlbedoLUT, specAvgAlbedoLUT);
                 L += throughput * Lcaustic;
@@ -1945,7 +1957,7 @@ kernel void shade(
             float D     = ggxD(cosH, alpha2);
 
             bsdfF = evalLayeredBSDF(wo, wi, n, baseColor, mat.roughness,
-                                    mat.metalness, mat.specular,
+                                    mat.metalness, mat.specular, mat.multiScatter != 0,
                                     cam, specAlbedoLUT, specAvgAlbedoLUT);
 
             float ggxPdf = D * cosH / max(1e-7f, 4.0f * dot(wo, wh));
@@ -1957,7 +1969,7 @@ kernel void shade(
             bsdfPdf = max(1e-7f, dot(n, wi)) / M_PI_F;
             if (mat.type == kMatGGX) {
                 bsdfF = evalLayeredBSDF(wo, wi, n, baseColor, mat.roughness,
-                                        mat.metalness, mat.specular,
+                                        mat.metalness, mat.specular, mat.multiScatter != 0,
                                         cam, specAlbedoLUT, specAvgAlbedoLUT);
             } else {
                 bsdfF = baseColor / M_PI_F;
