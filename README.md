@@ -482,7 +482,6 @@ The addon caches both the USD and Alembic exports separately and only re-exports
 ### Known limitations
 
 - Animated hair (simulated or cached) exports a single frame (the current frame). Animated hair sequences are not yet supported.
-- The GPU (`--interactive`) backend does not support hair rendering. Hair strands are silently absent in interactive mode.
 
 ## Motion Blur
 
@@ -641,12 +640,13 @@ Measured on Linux/WSL2 (NVIDIA RTX A400, 10 CPU threads), 800×800:
 
 | Feature | CPU renderer | GPU (`--interactive`) |
 |---|---|---|
-| Integrator | BDPT with MIS | Unidirectional path tracing |
-| Direct lighting | Full MIS: BSDF + light sampling | Single random light sample, no MIS |
-| Light types | Rect, sphere, directional, HDRI dome | Rect and directional only |
-| Material model | Full GGX `standard_surface` | Lambertian + GGX (roughness fixed at 0.5) |
-| Caustics | Yes | No |
-| Motion blur | Yes | No |
+| Integrator | BDPT with full MIS | Unidirectional path tracing (no bidirectional light-subpath connections) |
+| Direct lighting | Full MIS: BSDF + light sampling | NEE with MIS against the BSDF-sampling strategy |
+| Light types | Rect, sphere, directional, HDRI dome | Rect, directional, HDRI dome (no sphere lights yet) |
+| Material model | Full GGX `standard_surface` + OSL procedural shading (arbitrary node graphs) | GGX `standard_surface` + MaterialX-codegen procedural shading (base color/roughness/metalness driven by noise/pattern node graphs); image-texture-sampling nodes within a material graph not yet supported |
+| Caustics | Yes (photon map) | Yes (photon map) |
+| Motion blur | Yes | Yes |
+| Hair | Yes (Marschner) | Yes (Marschner) |
 | AOVs / denoising | Supported | Not supported |
 
 ## Tools
