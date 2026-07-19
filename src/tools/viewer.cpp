@@ -1170,8 +1170,9 @@ int main(int argc, char** argv)
                 if (tu.rgba.empty()) {
                     // IMAGE_OPEN — allocate live texture
                     uint32_t w = tu.w, h = tu.h;
-                    // Render lands in whichever slot is active right now.
-                    int destSlot = activeSlot;
+                    // Render lands in the slot picked as the record target
+                    // (Shift+1-8), not necessarily the one currently displayed.
+                    int destSlot = recordSlot;
                     // Save old live texture ID before overwriting it.
                     GLuint oldLiveTex = g_live.liveTex;
                     g_live.liveTex = 0;
