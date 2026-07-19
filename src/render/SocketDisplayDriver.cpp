@@ -80,6 +80,15 @@ void SocketDisplayDriver::writeTile(uint32_t x0, uint32_t y0,
     sendAll(buf.data(), buf.size());
 }
 
+void SocketDisplayDriver::writeAov(uint32_t layerId, uint32_t w, uint32_t h,
+                                   const float* rgba) {
+    if (m_fd < 0) return;
+    std::vector<uint8_t> buf;
+    proto::encodeAovImage(buf, layerId, w, h, rgba);
+    std::lock_guard<std::mutex> lk(m_sendMtx);
+    sendAll(buf.data(), buf.size());
+}
+
 void SocketDisplayDriver::imageClose() {
     if (m_fd < 0) return;
     std::vector<uint8_t> buf;

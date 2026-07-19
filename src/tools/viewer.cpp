@@ -80,6 +80,11 @@ static GLuint g_shader = 0;
 struct TileUpdate {
     uint32_t x0, y0, w, h;
     std::vector<float> rgba;  // w*h*4 floats, RGBA, top-left origin
+    // 0 = Combined (ordinary incremental tile, existing behavior).
+    // Nonzero (proto::kAovDenoised/kAovAlbedo/kAovNormals) = a whole-image
+    // AOV_IMAGE replace — x0/y0 are unused (always 0,0), w/h are the full
+    // image dimensions, rgba holds the entire image, not a sub-tile.
+    uint32_t layerId = 0;
 };
 
 struct LiveState {
@@ -95,6 +100,10 @@ struct LiveState {
     uint32_t    liveH   = 0;
     bool        active  = false;  // true while a render is connected
     bool        done    = false;  // true after IMAGE_CLOSE received
+    // Slot the current image is landing in — captured at IMAGE_OPEN, reused
+    // by subsequent TILE/AOV_IMAGE items so they land in the same slot even
+    // if the user changes recordSlot mid-render.
+    int         destSlot = 0;
 
     // Tile queue (reader thread → main thread)
     std::mutex              queueMtx;
@@ -607,6 +616,23 @@ struct SlotState {
     float    temperature= 0.f;
     bool     toneMap    = true;   // fallback ACES (when OCIO disabled)
     int      channelMode = 0;    // 0=RGB, 1=R, 2=G, 3=B, 4=A
+
+    // AOV layers. srcTex holds Combined (as before — unchanged live/file
+    // upload path); these hold additional layers when available (0 = not
+    // present). activeLayer selects which one processImage() displays:
+    // 0=Combined(srcTex), else one of anacapa::proto::kAovDenoised/
+    // kAovAlbedo/kAovNormals.
+    GLuint   denoisedTex = 0, albedoTex = 0, normalsTex = 0;
+    int      activeLayer = 0;
+
+    GLuint displayTex() const {
+        switch (activeLayer) {
+        case 1: return denoisedTex ? denoisedTex : srcTex;  // kAovDenoised
+        case 2: return albedoTex   ? albedoTex   : srcTex;  // kAovAlbedo
+        case 3: return normalsTex  ? normalsTex  : srcTex;  // kAovNormals
+        default: return srcTex;
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -621,9 +647,10 @@ static void processImage(const SlotState& s, bool useOcio)
     glViewport(0, 0, g_fboWidth, g_fboHeight);
     glUseProgram(g_shader);
 
-    // Source image on unit 0
+    // Source image on unit 0 — displayTex() picks Combined or the active
+    // AOV layer (falls back to Combined if that layer isn't loaded yet).
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, s.srcTex);
+    glBindTexture(GL_TEXTURE_2D, s.displayTex());
     glUniform1i(glGetUniformLocation(g_shader, "uTex"), 0);
 
 #ifdef ANACAPA_HAVE_OCIO
@@ -676,6 +703,13 @@ static bool hasExtCI(const char* path, const char* ext)
 static bool uploadTextureToSlot(const char* path, SlotState& s)
 {
     if (s.srcTex) { glDeleteTextures(1, &s.srcTex); s.srcTex = 0; }
+    // Loading a new file replaces whatever AOV layers belonged to the
+    // previous image in this slot — mirrors the live IMAGE_OPEN reset.
+    for (GLuint* t : { &s.denoisedTex, &s.albedoTex, &s.normalsTex }) {
+        if (*t) glDeleteTextures(1, t);
+        *t = 0;
+    }
+    s.activeLayer = 0;
 
     GLuint tex;
     glGenTextures(1, &tex);
@@ -703,6 +737,24 @@ static bool uploadTextureToSlot(const char* path, SlotState& s)
             int h  = spec.height;
             int nc = spec.nchannels;
             std::vector<float> buf(w * h * 4, 0.f);
+
+            // Locate optional AOV layers by channel name (e.g. "denoised.R")
+            // rather than assuming a fixed offset — the channel count/order
+            // depends on which of --denoise/--write-aovs were set when the
+            // file was written (Film::writeEXR).
+            auto findChannel = [&](const char* layerName) -> int {
+                std::string want = std::string(layerName) + ".R";
+                for (int c = 0; c < nc; ++c)
+                    if (spec.channelnames[c] == want) return c;
+                return -1;
+            };
+            int denoisedIdx = findChannel("denoised");
+            int albedoIdx   = findChannel("albedo");
+            int normalsIdx  = findChannel("normals");
+            std::vector<float> denoisedBuf(denoisedIdx >= 0 ? size_t(w) * h * 4 : 0);
+            std::vector<float> albedoBuf(albedoIdx   >= 0 ? size_t(w) * h * 4 : 0);
+            std::vector<float> normalsBuf(normalsIdx  >= 0 ? size_t(w) * h * 4 : 0);
+
             if (nc >= 3) {
                 std::vector<float> row(static_cast<size_t>(w) * nc);
                 bool readOk = true;
@@ -715,12 +767,25 @@ static bool uploadTextureToSlot(const char* path, SlotState& s)
                         break;
                     }
                     float* dst = buf.data() + static_cast<size_t>(flippedY) * w * 4;
+                    auto copyLayer = [&](std::vector<float>& out, int idx) {
+                        if (idx < 0) return;
+                        float* d = out.data() + static_cast<size_t>(flippedY) * w * 4;
+                        for (int x = 0; x < w; ++x) {
+                            d[x*4+0] = row[x*nc+idx+0];
+                            d[x*4+1] = row[x*nc+idx+1];
+                            d[x*4+2] = row[x*nc+idx+2];
+                            d[x*4+3] = 1.f;
+                        }
+                    };
                     for (int x = 0; x < w; ++x) {
                         dst[x*4 + 0] = row[x*nc + 0];
                         dst[x*4 + 1] = row[x*nc + 1];
                         dst[x*4 + 2] = row[x*nc + 2];
                         dst[x*4 + 3] = (nc >= 4) ? row[x*nc + 3] : 1.f;
                     }
+                    copyLayer(denoisedBuf, denoisedIdx);
+                    copyLayer(albedoBuf,   albedoIdx);
+                    copyLayer(normalsBuf,  normalsIdx);
                 }
                 if (readOk) {
                     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0,
@@ -730,6 +795,22 @@ static bool uploadTextureToSlot(const char* path, SlotState& s)
                     s.isHdr   = true;
                     s.hasAlpha = (nc >= 4);
                     ok = true;
+
+                    auto uploadLayer = [&](std::vector<float>& src, GLuint& dstTex) {
+                        if (src.empty()) return;
+                        glGenTextures(1, &dstTex);
+                        glBindTexture(GL_TEXTURE_2D, dstTex);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0,
+                                    GL_RGBA, GL_FLOAT, src.data());
+                    };
+                    uploadLayer(denoisedBuf, s.denoisedTex);
+                    uploadLayer(albedoBuf,   s.albedoTex);
+                    uploadLayer(normalsBuf,  s.normalsTex);
+                    if (s.denoisedTex) s.activeLayer = anacapa::proto::kAovDenoised;
                 }
             }
             inp->close();
@@ -925,6 +1006,31 @@ static void socketReaderThread(int clientFd) {
             }
             g_live.tilesReceived.fetch_add(1);
             g_live.pixelsFilled.fetch_add(tu.w * tu.h);
+            {
+                std::lock_guard<std::mutex> lk(g_live.queueMtx);
+                g_live.queue.push(std::move(tu));
+            }
+            g_live.dirty.store(true);
+            break;
+        }
+        case AOV_IMAGE: {
+            if (hdr.payloadLen < 12) break;
+            TileUpdate tu;
+            std::memcpy(&tu.layerId, payload.data() + 0, 4);
+            std::memcpy(&tu.w,       payload.data() + 4, 4);
+            std::memcpy(&tu.h,       payload.data() + 8, 4);
+            tu.x0 = 0; tu.y0 = 0;
+            uint32_t nFloats = tu.w * tu.h * 4;
+            if (tu.layerId == 0 || hdr.payloadLen < 12 + nFloats * 4) break;
+            // Flip rows to GL bottom-left convention, same as TILE.
+            const float* src = reinterpret_cast<const float*>(payload.data() + 12);
+            tu.rgba.resize(tu.w * tu.h * 4);
+            for (uint32_t row = 0; row < tu.h; ++row) {
+                uint32_t srcRow = row;
+                uint32_t dstRow = tu.h - 1 - row;
+                std::memcpy(tu.rgba.data() + dstRow * tu.w * 4,
+                           src + srcRow * tu.w * 4, tu.w * 4 * sizeof(float));
+            }
             {
                 std::lock_guard<std::mutex> lk(g_live.queueMtx);
                 g_live.queue.push(std::move(tu));
@@ -1167,12 +1273,46 @@ int main(int argc, char** argv)
             }
             while (!pending.empty()) {
                 TileUpdate& tu = pending.front();
-                if (tu.rgba.empty()) {
+                if (tu.layerId != 0) {
+                    // AOV_IMAGE — whole-image replace into a named per-slot
+                    // texture. Uses the destSlot captured at IMAGE_OPEN, not
+                    // recordSlot, so it lands with the render it belongs to
+                    // even if the user has since picked a new record target.
+                    SlotState& ds = slots[g_live.destSlot];
+                    GLuint* texSlot = tu.layerId == anacapa::proto::kAovDenoised ? &ds.denoisedTex
+                                     : tu.layerId == anacapa::proto::kAovAlbedo  ? &ds.albedoTex
+                                                                        : &ds.normalsTex;
+                    if (*texSlot) glDeleteTextures(1, texSlot);
+                    glGenTextures(1, texSlot);
+                    glBindTexture(GL_TEXTURE_2D, *texSlot);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F,
+                                static_cast<GLsizei>(tu.w), static_cast<GLsizei>(tu.h), 0,
+                                GL_RGBA, GL_FLOAT, tu.rgba.data());
+                    // Denoised becomes the displayed layer automatically —
+                    // Albedo/Normals just become selectable via the combo.
+                    if (tu.layerId == anacapa::proto::kAovDenoised)
+                        ds.activeLayer = anacapa::proto::kAovDenoised;
+                } else if (tu.rgba.empty()) {
                     // IMAGE_OPEN — allocate live texture
                     uint32_t w = tu.w, h = tu.h;
                     // Render lands in the slot picked as the record target
                     // (Shift+1-8), not necessarily the one currently displayed.
                     int destSlot = recordSlot;
+                    g_live.destSlot = destSlot;
+                    // A new render starting in this slot invalidates any AOV
+                    // layers left over from a previous render there.
+                    {
+                        SlotState& ds = slots[destSlot];
+                        for (GLuint* t : { &ds.denoisedTex, &ds.albedoTex, &ds.normalsTex }) {
+                            if (*t) glDeleteTextures(1, t);
+                            *t = 0;
+                        }
+                        ds.activeLayer = 0;
+                    }
                     // Save old live texture ID before overwriting it.
                     GLuint oldLiveTex = g_live.liveTex;
                     g_live.liveTex = 0;
@@ -1339,6 +1479,11 @@ int main(int argc, char** argv)
                 if (ImGui::MenuItem("Close Slot")) {
                     SlotState& s = slots[activeSlot];
                     if (s.srcTex) { glDeleteTextures(1, &s.srcTex); s.srcTex = 0; }
+                    for (GLuint* t : { &s.denoisedTex, &s.albedoTex, &s.normalsTex }) {
+                        if (*t) glDeleteTextures(1, t);
+                        *t = 0;
+                    }
+                    s.activeLayer = 0;
                     s.texW = s.texH = 0; s.lastMod = 0; s.isHdr = false;
                 }
                 ImGui::Separator();
@@ -1528,6 +1673,40 @@ int main(int argc, char** argv)
         ImGui::SliderFloat("##sat", &as.saturation, 0.f, 2.f, "Saturation: %.2f");
         ImGui::SetNextItemWidth(-1);
         ImGui::SliderFloat("##tmp", &as.temperature, -1.f, 1.f, "Temp: %.2f");
+
+        // Layer selector — only shown once at least one AOV layer has been
+        // loaded for this slot (live render with --denoise/--write-aovs, or
+        // a multi-layer EXR opened from disk). Combined is always available.
+        if (as.denoisedTex || as.albedoTex || as.normalsTex) {
+            ImGui::SeparatorText("Layer");
+            struct LayerEntry { const char* label; int id; GLuint tex; };
+            LayerEntry entries[] = {
+                { "Combined", 0, as.srcTex },
+                { "Denoised", anacapa::proto::kAovDenoised, as.denoisedTex },
+                { "Albedo",   anacapa::proto::kAovAlbedo,   as.albedoTex },
+                { "Normals",  anacapa::proto::kAovNormals,  as.normalsTex },
+            };
+            int nAvail = 0;
+            for (auto& e : entries) if (e.tex) ++nAvail;
+            float btnW = (kPanelW - 16.f - 4.f * (nAvail - 1)) / float(nAvail);
+            bool first = true;
+            for (auto& e : entries) {
+                if (!e.tex) continue;
+                if (!first) ImGui::SameLine(0.f, 4.f);
+                first = false;
+                bool sel = (as.activeLayer == e.id);
+                if (sel) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        {0.2f,0.5f,0.9f,1.f});
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.3f,0.6f,1.0f,1.f});
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        {0.25f,0.25f,0.28f,1.f});
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.35f,0.35f,0.40f,1.f});
+                }
+                if (ImGui::Button(e.label, {btnW, 0}))
+                    as.activeLayer = e.id;
+                ImGui::PopStyleColor(2);
+            }
+        }
 
         ImGui::SeparatorText("Channels");
         {
@@ -1892,8 +2071,11 @@ int main(int argc, char** argv)
             if (slots[i].srcTex == liveId) slots[i].srcTex = 0;
     }
 
-    for (int i = 0; i < kNumSlots; ++i)
+    for (int i = 0; i < kNumSlots; ++i) {
         if (slots[i].srcTex) glDeleteTextures(1, &slots[i].srcTex);
+        for (GLuint t : { slots[i].denoisedTex, slots[i].albedoTex, slots[i].normalsTex })
+            if (t) glDeleteTextures(1, &t);
+    }
 #ifdef ANACAPA_HAVE_OCIO
     ocioFreeTextures();
 #endif

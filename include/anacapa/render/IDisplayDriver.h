@@ -40,6 +40,13 @@ public:
     // Called once after all tiles are complete (before final EXR write).
     virtual void imageClose() = 0;
 
+    // Called once per available AOV/denoised layer, after the tile loop
+    // finishes and before imageClose() — a whole-image replace, not an
+    // incremental tile. layerId is one of proto::kAovDenoised/kAovAlbedo/
+    // kAovNormals. Default: no-op, so file-only drivers need not override.
+    virtual void writeAov(uint32_t /*layerId*/, uint32_t /*w*/, uint32_t /*h*/,
+                          const float* /*rgba*/) {}
+
     // ---------------------------------------------------------------------------
     // Viewer → renderer commands.  RenderSession calls pollCommands() between
     // tile dispatches; implementations that receive inbound messages should

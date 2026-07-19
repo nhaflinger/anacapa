@@ -255,6 +255,40 @@ bool Film::writeEXR(const std::string& path,
 }
 
 // ---------------------------------------------------------------------------
+// Whole-image resolved layer access — same per-pixel resolve() calls writeEXR()
+// uses above, just written into a caller-supplied RGBA buffer instead of an
+// interleaved multi-channel EXR row. Alpha is always 1.0 for these layers.
+// ---------------------------------------------------------------------------
+void Film::readDenoised(float* outRGBA) const {
+    // Caller must check hasDenoised() first — mirrors readAlbedo/readNormals'
+    // implicit precondition that the corresponding buffer has been populated.
+    const uint32_t N = m_width * m_height;
+    for (uint32_t i = 0; i < N; ++i) {
+        float* p = outRGBA + i * 4;
+        p[0] = m_denoised[i*3+0]; p[1] = m_denoised[i*3+1]; p[2] = m_denoised[i*3+2];
+        p[3] = 1.f;
+    }
+}
+
+void Film::readAlbedo(float* outRGBA) const {
+    const uint32_t N = m_width * m_height;
+    for (uint32_t i = 0; i < N; ++i) {
+        Spectrum alb = m_albedo[i].resolve();
+        float* p = outRGBA + i * 4;
+        p[0] = alb.x; p[1] = alb.y; p[2] = alb.z; p[3] = 1.f;
+    }
+}
+
+void Film::readNormals(float* outRGBA) const {
+    const uint32_t N = m_width * m_height;
+    for (uint32_t i = 0; i < N; ++i) {
+        Spectrum nrm = m_normals[i].resolve();
+        float* p = outRGBA + i * 4;
+        p[0] = nrm.x; p[1] = nrm.y; p[2] = nrm.z; p[3] = 1.f;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // writePNG — ACES filmic tone mapping + sRGB gamma, written as 8-bit PNG/JPEG
 //
 // Pipeline: linear → exposure → ACES RRT+ODT approximation → sRGB gamma

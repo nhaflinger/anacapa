@@ -209,6 +209,15 @@ public:
     // Returns 0 if the pixel has no samples yet.
     float varianceAt(uint32_t x, uint32_t y) const;
 
+    // Whole-image resolved layer access — for pushing AOV/denoised buffers to
+    // a live display driver (e.g. SocketDisplayDriver), mirroring the exact
+    // per-pixel resolve logic writeEXR() uses. out must hold width*height*4
+    // floats (row-major RGBA; alpha is always 1.0 for these layers).
+    bool hasDenoised() const { return !m_denoised.empty(); }
+    void readDenoised(float* outRGBA) const;
+    void readAlbedo(float* outRGBA) const;
+    void readNormals(float* outRGBA) const;
+
 private:
     uint32_t m_width, m_height;
     std::vector<PixelAccumulator> m_pixels;   // [y * width + x]

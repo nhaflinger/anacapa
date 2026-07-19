@@ -41,6 +41,8 @@ public:
                    uint32_t w,  uint32_t h,
                    const float* rgba) override;
     void imageClose() override;
+    void writeAov(uint32_t layerId, uint32_t w, uint32_t h,
+                 const float* rgba) override;
     void pollCommands() override;
 
     // Command callbacks — called from pollCommands() on the calling thread.

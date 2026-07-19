@@ -1,5 +1,6 @@
 #include "RenderSession.h"
 #include <anacapa/render/FileDisplayDriver.h>
+#include <anacapa/render/DisplayProtocol.h>
 #include "../accel/BVHBackend.h"
 #include "../accel/CurveBrute.h"
 #include "../accel/HaloAccel.h"
@@ -1149,15 +1150,35 @@ void RenderSession::render() {
     pollStop.store(true);
     pollThread.join();
 
+    if (m_settings.denoise.enabled)
+        m_film->denoise();
+
+    // Push whatever layers are available to the viewer before signalling
+    // render-complete, so the display driver's message queue sees them in
+    // order: AOV_IMAGE(s) then IMAGE_CLOSE.
+    {
+        uint32_t w = m_settings.imageWidth, h = m_settings.imageHeight;
+        std::vector<float> layerBuf;
+        if (m_settings.denoise.enabled && m_film->hasDenoised()) {
+            layerBuf.resize(size_t(w) * h * 4);
+            m_film->readDenoised(layerBuf.data());
+            displayDriver->writeAov(proto::kAovDenoised, w, h, layerBuf.data());
+        }
+        if (m_settings.denoise.writeAOVs) {
+            layerBuf.resize(size_t(w) * h * 4);
+            m_film->readAlbedo(layerBuf.data());
+            displayDriver->writeAov(proto::kAovAlbedo, w, h, layerBuf.data());
+            m_film->readNormals(layerBuf.data());
+            displayDriver->writeAov(proto::kAovNormals, w, h, layerBuf.data());
+        }
+    }
+
     // Signal render complete — driver flushes its final preview write
     displayDriver->imageClose();
 
     auto t1  = std::chrono::steady_clock::now();
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     spdlog::info("Render complete in {:.1f} ms", ms);
-
-    if (m_settings.denoise.enabled)
-        m_film->denoise();
 
     if (!m_film->writeEXR(m_settings.outputPath, m_settings.denoise))
         spdlog::error("Failed to write {}", m_settings.outputPath);
