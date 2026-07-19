@@ -779,8 +779,10 @@ void RenderSession::render() {
 
     m_film = std::make_unique<Film>(m_settings.imageWidth,
                                     m_settings.imageHeight);
-    // Enable alpha channel when the sky uses transparent background
-    if (m_scene.envLight && m_scene.envLight->transparentBg())
+    // Enable alpha channel when transparent background is requested — scene-level,
+    // independent of light type (a plain DomeLight/HDRI scene can request this too,
+    // not just Nishita sky).
+    if (m_scene.transparentBg)
         m_film->setHasAlpha(true);
 
 #ifdef ANACAPA_ENABLE_METAL

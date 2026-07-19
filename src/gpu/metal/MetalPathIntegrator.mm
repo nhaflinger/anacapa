@@ -1531,7 +1531,7 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
     camParams.pixelFilterRadius = m_impl->pixelFilterRadius;
     camParams.hairMeshBaseID    = m_impl->hairMeshBaseID;
     camParams.numHalos          = m_impl->numHalos;
-    camParams.transparentBg     = (scene.envLight && scene.envLight->transparentBg()) ? 1u : 0u;
+    camParams.transparentBg     = scene.transparentBg ? 1u : 0u;
     camParams.photonMapEnabled  = m_impl->photonMapEnabled && (m_impl->validPhotons > 0) ? 1u : 0u;
     camParams.photonSearchRadius = m_impl->photonSearchRadius;
     camParams.hashGridOrigin    = m_impl->hashGridOrigin;
@@ -1590,6 +1590,11 @@ bool MetalPathIntegrator::renderFrame(const SceneView& scene,
                 tb.add(px, py, p.r / w, p.g / w, p.b / w, w);
                 tb.addLumSq(px, py, p.sumLumSq);
                 tb.addAlpha(px, py, p.alpha / w, w);
+                if (p.aovCount > 0.f) {
+                    float invN = 1.f / p.aovCount;
+                    tb.addAlbedo(px, py, Spectrum{p.albedoR * invN, p.albedoG * invN, p.albedoB * invN});
+                    tb.addNormal(px, py, Vec3f{p.normalR * invN, p.normalG * invN, p.normalB * invN});
+                }
             }
         }
         film.mergeTile(tb);
@@ -1762,7 +1767,7 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
     camParams.pixelFilterRadius = m_impl->pixelFilterRadius;
     camParams.hairMeshBaseID    = m_impl->hairMeshBaseID;
     camParams.numHalos          = m_impl->numHalos;
-    camParams.transparentBg     = (scene.envLight && scene.envLight->transparentBg()) ? 1u : 0u;
+    camParams.transparentBg     = scene.transparentBg ? 1u : 0u;
     camParams.photonMapEnabled  = m_impl->photonMapEnabled && (m_impl->validPhotons > 0) ? 1u : 0u;
     camParams.photonSearchRadius = m_impl->photonSearchRadius;
     camParams.hashGridOrigin    = m_impl->hashGridOrigin;
@@ -1929,6 +1934,11 @@ void MetalPathIntegrator::renderTile(const SceneView& scene,
             out.add(tx, ty, p.r / w, p.g / w, p.b / w, w);
             out.addLumSq(tx, ty, p.sumLumSq);
             out.addAlpha(tx, ty, p.alpha / w, w);
+            if (p.aovCount > 0.f) {
+                float invN = 1.f / p.aovCount;
+                out.addAlbedo(tx, ty, Spectrum{p.albedoR * invN, p.albedoG * invN, p.albedoB * invN});
+                out.addNormal(tx, ty, Vec3f{p.normalR * invN, p.normalG * invN, p.normalB * invN});
+            }
         }
     }
 }

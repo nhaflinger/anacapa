@@ -1946,7 +1946,7 @@ void CudaPathIntegrator::Impl::fillLaunchParams(
     p.cam.fireflyClamp  = fireflyClamp;
     p.cam.hairMeshBaseID = hairMeshBaseID;
     p.cam.numHalos       = numHalos;
-    p.cam.transparentBg  = (scene.envLight && scene.envLight->transparentBg()) ? 1u : 0u;
+    p.cam.transparentBg  = scene.transparentBg ? 1u : 0u;
     p.specAlbedoLUT     = d_specAlbedoLUT.isValid()    ? d_specAlbedoLUT.ptr()    : nullptr;
     p.specAvgAlbedoLUT  = d_specAvgAlbedoLUT.isValid() ? d_specAvgAlbedoLUT.ptr() : nullptr;
     p.specLUTCosBins    = specLUTCosBins;

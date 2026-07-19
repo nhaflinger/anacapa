@@ -361,7 +361,13 @@ struct GpuAccumPixel {
     float r, g, b, weight;
     float sumLumSq;  // sum(luminance(sample)^2) — needed for variance-based adaptive sampling
     float alpha;     // sum of per-sample alpha weights (0=transparent sky, fw=opaque)
-    float _pad;
+    // First-hit AOV accumulation (denoise guides / viewer layers) — mirrors CPU's
+    // firstHit-gated Film::addAlbedo()/addNormal(). Raw sum across samples that had
+    // a first hit this dispatch batch; aovCount is the number of contributing
+    // samples (0 if every sample in this batch missed all geometry).
+    float albedoR, albedoG, albedoB;
+    float normalR, normalG, normalB;
+    float aovCount;
 };
 
 // ---------------------------------------------------------------------------

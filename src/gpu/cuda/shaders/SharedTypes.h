@@ -319,7 +319,13 @@ struct GpuAccumPixel {
     float r, g, b, weight;
     float sumLumSq;  // sum(luminance(sample)^2) — needed for variance-based adaptive sampling
     float alpha;     // sum of per-sample alpha weights (0=transparent sky, fw=opaque)
-    float _pad;
+    // First-hit AOV accumulation (denoise guides / viewer layers) — mirrors CPU's
+    // firstHit-gated Film::addAlbedo()/addNormal(). Raw sum across samples that had
+    // a first hit this dispatch batch; aovCount is the number of contributing
+    // samples (0 if every sample in this batch missed all geometry).
+    float albedoR, albedoG, albedoB;
+    float normalR, normalG, normalB;
+    float aovCount;
 };
 
 
@@ -373,6 +379,11 @@ struct WfRayState {
     uint32_t  bounce;        // non-delta bounce depth (matches megakernel)
     uint32_t  glassDepth;    // delta bounces taken; capped at 16
     uint32_t  _pad;
+    // First-hit AOV capture (denoise guides / viewer layers) — set once per ray
+    // by __raygen__wf_bounce, gated by kWfFirstHitDone, read by
+    // __raygen__wf_finalize.
+    GpuFloat3 albedo;
+    GpuFloat3 normal;
 };
 
 enum : uint32_t {
@@ -380,6 +391,7 @@ enum : uint32_t {
     kWfPrevWasDelta  = 1u << 1,
     kWfCausticChain  = 1u << 2,  // delta chain crossed a caustic-flagged surface
     kWfTransparentSky = 1u << 3, // bounce-0 primary ray hit transparent sky (alpha=0)
+    kWfFirstHitDone  = 1u << 4,  // albedo/normal AOV already captured for this ray
 };
 
 #endif // ANACAPA_CUDA_SHARED_TYPES_H

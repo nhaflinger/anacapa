@@ -6181,6 +6181,43 @@ def _patch_camera_no_dof(usd_path):
         log(f"  [dof] Zeroed fStop on {patched} camera(s) — pinhole mode.")
 
 
+def _inject_render_settings(usd_path, render_settings):
+    """
+    Write scene-level anacapa:* custom attributes onto the stage's default/root
+    prim — settings that apply regardless of which environment-light type is
+    active (unlike anacapa:sky:*, which only applies when Nishita sky is used).
+    USDLoader reads these from any prim it visits while traversing for
+    UsdRenderSettings, but the root prim is always present even when the
+    scene has no UsdRenderSettings prim at all (Blender's exporter doesn't
+    write one), so we write here instead.
+    """
+    if render_settings is None:
+        return
+    try:
+        from pxr import Usd, Sdf
+    except ImportError:
+        log("  [render-settings] pxr not available — cannot inject attributes")
+        return
+
+    stage = Usd.Stage.Open(usd_path)
+    if not stage:
+        log(f"  [render-settings] Failed to open stage: {usd_path}")
+        return
+
+    root = stage.GetDefaultPrim() or stage.GetPrimAtPath("/root")
+    if not root:
+        log("  [render-settings] No default/root prim found — skipping")
+        return
+
+    attr = root.GetAttribute("anacapa:transparent_bg")
+    if not attr:
+        attr = root.CreateAttribute("anacapa:transparent_bg", Sdf.ValueTypeNames.Int)
+    attr.Set(int(getattr(render_settings, "transparent_bg", False)))
+
+    stage.GetRootLayer().Save()
+    log(f"  [render-settings] Scene-level attributes written to {root.GetPath()}")
+
+
 def _inject_sky_params(usd_path, sky_settings):
     """
     Write anacapa:sky:* custom attributes onto the DomeLight prim in the stage.
@@ -6234,19 +6271,23 @@ def _inject_sky_params(usd_path, sky_settings):
 
 
 def post_process_usd(usd_path, sky_texture="", shutter_close=0.0, disable_dof=False,
-                     sky_settings=None):
+                     sky_settings=None, render_settings=None):
     """
     Run USD post-processing steps after Blender's USD exporter has written
     the file.  Patches the DomeLight texture, injects MaterialX textures,
     exports per-material .mtlx files, and writes the JSON sidecar.
 
-    usd_path     — absolute path to the exported .usdc/.usda file.
-    sky_texture  — optional path to an equirectangular HDRI to use as the
-                   DomeLight texture instead of whatever Blender exported.
-    disable_dof  — when True, zero out all camera fStop values (pinhole camera).
-    sky_settings — when set, writes anacapa:sky:* attributes to the DomeLight
-                   prim so USDLoader constructs a Nishita SkyLight instead of
-                   loading an HDRI.  Expects an AnacapaRenderSettings object.
+    usd_path         — absolute path to the exported .usdc/.usda file.
+    sky_texture      — optional path to an equirectangular HDRI to use as the
+                       DomeLight texture instead of whatever Blender exported.
+    disable_dof      — when True, zero out all camera fStop values (pinhole camera).
+    sky_settings     — when set, writes anacapa:sky:* attributes to the DomeLight
+                       prim so USDLoader constructs a Nishita SkyLight instead of
+                       loading an HDRI.  Expects an AnacapaRenderSettings object.
+    render_settings  — scene-level settings that apply regardless of environment
+                       light type (e.g. transparent background).  Unlike
+                       sky_settings, always passed when available — not gated on
+                       use_sky.  Expects an AnacapaRenderSettings object.
     """
     if not os.path.exists(usd_path):
         return
@@ -6258,6 +6299,7 @@ def post_process_usd(usd_path, sky_texture="", shutter_close=0.0, disable_dof=Fa
         _patch_camera_no_dof(usd_path)
     if sky_settings is not None:
         _inject_sky_params(usd_path, sky_settings)
+    _inject_render_settings(usd_path, render_settings)
     _inject_materialx_textures(usd_path)
     _inject_caustic_flags(usd_path)
     _inject_sss_params(usd_path)

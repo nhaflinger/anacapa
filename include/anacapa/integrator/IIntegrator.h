@@ -193,6 +193,10 @@ struct SceneView {
     Vec3f                                envRadiance = {};    // Constant background (used if envLight==nullptr)
     std::optional<Camera>                camera;              // set by scene loader
     int                                  hairTessSteps = 4;   // quads per Bézier segment for hair tessellation
+    // Render sky/background as transparent (alpha=0) for compositing. Scene-level —
+    // independent of which light type is active (previously only settable via
+    // SkyLight/Nishita sky's own transparentBg(); see ILight::transparentBg()).
+    bool                                  transparentBg = false;
 };
 
 // ---------------------------------------------------------------------------

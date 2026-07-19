@@ -2495,6 +2495,11 @@ LoadedScene loadUSD(const std::string& path,
                         UsdAttribute a = prim.GetAttribute(TfToken("anacapa:sky:transparent_bg"));
                         int v = 0;
                         if (a) { a.Get(&v); sp.transparentBg = (v != 0); }
+                        // Backward compat: the sky-specific flag also sets the
+                        // scene-level flag (see the general anacapa:transparent_bg
+                        // attribute read near UsdRenderSettings, below), so old
+                        // scenes that only ever set this still work correctly.
+                        if (sp.transparentBg) result.sceneView.transparentBg = true;
                     }
 
                     // Bounds placeholder — updated after all meshes are loaded
@@ -2650,6 +2655,27 @@ LoadedScene loadUSD(const std::string& path,
                                  prim.GetPath().GetString(),
                                  targets[0].GetString());
                     break;
+                }
+            }
+        }
+    }
+
+    // Scene-level render settings that aren't tied to any specific light (e.g.
+    // transparent background) — written by the Blender addon onto the stage's
+    // default/root prim (Blender's exporter doesn't write a UsdRenderSettings
+    // prim, so that type isn't a reliable place to look for this).
+    {
+        UsdPrim rootPrim = stage->GetDefaultPrim();
+        if (!rootPrim) rootPrim = stage->GetPrimAtPath(SdfPath("/root"));
+        if (rootPrim) {
+            UsdAttribute transparentBgAttr =
+                rootPrim.GetAttribute(TfToken("anacapa:transparent_bg"));
+            if (transparentBgAttr) {
+                int v = 0;
+                if (transparentBgAttr.Get(&v) && v != 0) {
+                    result.sceneView.transparentBg = true;
+                    spdlog::info("USDLoader: transparent background enabled via '{}'",
+                                 rootPrim.GetPath().GetString());
                 }
             }
         }

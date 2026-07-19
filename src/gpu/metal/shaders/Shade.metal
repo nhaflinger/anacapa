@@ -1359,9 +1359,17 @@ kernel void shade(
     float  batchLumSq  = 0.0f;
     float  batchWeight = 0.0f;
     float  batchAlpha  = 0.0f;
+    float3 batchAlbedo = float3(0.0f);
+    float3 batchNormal = float3(0.0f);
+    float  batchAovCount = 0.0f;
 
     for (uint s = 0; s < batch.batchSize; ++s) {
         uint sampleIndex = batch.sampleStart + s;
+
+        // First-hit AOV capture — mirrors CPU PathIntegrator's firstHit bool:
+        // fires once per sample, at the very first hit regardless of material
+        // type (including glass), then never again for this sample.
+        bool firstHit = true;
 
         // Per-sample RNG seed decorrelated by pixel and sample index
         uint rng = pcg(pcg(globalPixelIdx) ^ (sampleIndex * 2654435761u));
@@ -1765,6 +1773,15 @@ kernel void shade(
             mat.type = kMatGGX;
         }
 
+        // First-hit AOV capture (denoise guides / viewer Albedo+Normals layers).
+        // Mirrors CPU: unconditional on material type, fires once per sample.
+        if (firstHit) {
+            batchAlbedo   += baseColor;
+            batchNormal   += n;
+            batchAovCount += 1.0f;
+            firstHit = false;
+        }
+
         // Emitter Le — add with MIS weight against the NEE light-sampling PDF.
         // prevWasDelta=true on first hit and after any delta bounce → weight=1.
         if (mat.type == kMatEmissive) {
@@ -2141,6 +2158,13 @@ kernel void shade(
     px_out.weight   += batchWeight;
     px_out.sumLumSq += batchLumSq;
     px_out.alpha    += batchAlpha;
+    px_out.albedoR  += batchAlbedo.x;
+    px_out.albedoG  += batchAlbedo.y;
+    px_out.albedoB  += batchAlbedo.z;
+    px_out.normalR  += batchNormal.x;
+    px_out.normalG  += batchNormal.y;
+    px_out.normalB  += batchNormal.z;
+    px_out.aovCount += batchAovCount;
 }
 
 // ---------------------------------------------------------------------------

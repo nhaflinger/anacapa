@@ -110,6 +110,15 @@ class AnacapaRenderSettings(bpy.types.PropertyGroup):
                     "Blackman-Harris=1.5, Catmull-Rom=2.0, Lanczos=4.0)",
         default=0.0, min=0.0, soft_max=8.0,
     )
+    transparent_bg: bpy.props.BoolProperty(
+        name="Transparent Background",
+        description="Render the background as transparent (alpha=0) for "
+                    "compositing. Works regardless of environment light type "
+                    "(HDRI dome light or Nishita sky) — the background still "
+                    "illuminates the scene, only its visible pixels become "
+                    "transparent. EXR output will include an alpha channel.",
+        default=False,
+    )
 
     # Hair
     hair_tess_steps: bpy.props.IntProperty(

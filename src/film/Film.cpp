@@ -257,7 +257,9 @@ bool Film::writeEXR(const std::string& path,
 // ---------------------------------------------------------------------------
 // Whole-image resolved layer access — same per-pixel resolve() calls writeEXR()
 // uses above, just written into a caller-supplied RGBA buffer instead of an
-// interleaved multi-channel EXR row. Alpha is always 1.0 for these layers.
+// interleaved multi-channel EXR row. Albedo/Normals alpha is always 1.0 (they
+// have no transparency concept of their own). Denoised alpha mirrors Combined's
+// — OIDN only denoises RGB, so the same coverage/transparency still applies.
 // ---------------------------------------------------------------------------
 void Film::readDenoised(float* outRGBA) const {
     // Caller must check hasDenoised() first — mirrors readAlbedo/readNormals'
@@ -266,7 +268,9 @@ void Film::readDenoised(float* outRGBA) const {
     for (uint32_t i = 0; i < N; ++i) {
         float* p = outRGBA + i * 4;
         p[0] = m_denoised[i*3+0]; p[1] = m_denoised[i*3+1]; p[2] = m_denoised[i*3+2];
-        p[3] = 1.f;
+        float w = m_pixels[i].weight.load(std::memory_order_relaxed);
+        float a = (w > 0.f) ? m_pixels[i].alpha.load(std::memory_order_relaxed) / w : 0.f;
+        p[3] = std::max(0.f, std::min(1.f, a));
     }
 }
 

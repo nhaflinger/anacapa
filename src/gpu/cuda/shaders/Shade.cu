@@ -2060,6 +2060,16 @@ extern "C" __global__ void __raygen__wf_bounce()
         mat.type = kMatGGX;
     }
 
+    // First-hit AOV capture (denoise guides / viewer Albedo+Normals layers).
+    // Mirrors Shade.metal / CPU: unconditional on material type, fires once
+    // per ray via the kWfFirstHitDone flag (bounce==0 alone isn't reliable —
+    // glass hops can keep bounce at 0 across multiple interfaces).
+    if (!(st.flags & kWfFirstHitDone)) {
+        st.albedo = {baseColor.x, baseColor.y, baseColor.z};
+        st.normal = {n.x, n.y, n.z};
+        st.flags |= kWfFirstHitDone;
+    }
+
     // ---- Emitter Le ---------------------------------------------------------
     if (mat.type == kMatEmissive) {
         if (!causticChain) {
@@ -2438,4 +2448,14 @@ extern "C" __global__ void __raygen__wf_finalize()
     atomicAdd(&out.sumLumSq, lum * lum);
     float alphaContrib = (st.flags & kWfTransparentSky) ? 0.f : fw;
     atomicAdd(&out.alpha,    alphaContrib);
+
+    if (st.flags & kWfFirstHitDone) {
+        atomicAdd(&out.albedoR, st.albedo.x);
+        atomicAdd(&out.albedoG, st.albedo.y);
+        atomicAdd(&out.albedoB, st.albedo.z);
+        atomicAdd(&out.normalR, st.normal.x);
+        atomicAdd(&out.normalG, st.normal.y);
+        atomicAdd(&out.normalB, st.normal.z);
+        atomicAdd(&out.aovCount, 1.0f);
+    }
 }

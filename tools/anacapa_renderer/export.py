@@ -1386,7 +1386,8 @@ def export_usd(usd_path, context, run_prep=True,
                 sky      = ana if (ana and getattr(ana, 'use_sky', False)) else None
                 prep.post_process_usd(usd_path, shutter_close=shutter_close,
                                       disable_dof=not use_dof,
-                                      sky_settings=sky)
+                                      sky_settings=sky,
+                                      render_settings=ana)
             except Exception as e:
                 print(f"[Anacapa] USD post-process warning: {e}")
 

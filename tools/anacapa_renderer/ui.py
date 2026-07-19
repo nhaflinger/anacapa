@@ -92,6 +92,9 @@ class ANACAPA_PT_film(bpy.types.Panel):
         layout.prop(s, "pixel_filter")
         layout.prop(s, "filter_width")
 
+        layout.separator()
+        layout.prop(s, "transparent_bg")
+
 
 # ---------------------------------------------------------------------------
 # Hair
