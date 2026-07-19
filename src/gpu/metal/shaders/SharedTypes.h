@@ -126,6 +126,18 @@ struct GpuMaterial {
     // reference never had, flattening the dark-base/bright-rim Fresnel
     // contrast that makes a metal read as credible on CPU.
     uint32_t        multiScatter;
+    // Real transmission color for kMatGlass (from IMaterial::transmittanceColor()),
+    // applied on the refraction path only — reflections off glass aren't tinted
+    // by the medium. Previously discarded entirely (glass transmission was always
+    // colorless float3(1.0) regardless of the material's real tint).
+    GpuFloat3       transmissionTint;
+    // Clearcoat layer (StandardSurfaceMaterial only — see StandardSurface.h's
+    // coat/coat_roughness). Deterministic attenuated-coat approximation of CPU's
+    // stochastic 5-lobe layer selection: evalLayeredBSDF adds a coat GGX term
+    // and attenuates the base diff+spec sum by (1 - coat Fresnel). 0 = no coat
+    // (default; OSL/MaterialX-backed materials always leave this at 0).
+    float           coatWeight;
+    float           coatRoughness;
 };
 
 // ---------------------------------------------------------------------------

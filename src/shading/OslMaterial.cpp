@@ -1366,6 +1366,29 @@ public:
                     }
                 }
             }
+
+            // Cache UNFLOORED roughness from the dominant transmission lobe
+            // (GGXTrans/GGXBoth specifically, not any GGXRefl coat/specular
+            // lobe) — used only for GPU glass smooth-vs-rough classification.
+            // The 0.25 floor above exists to prevent fireflies on the flat-
+            // probed GGX-reflection preview path; glass has its own Fresnel-
+            // driven stochastic reflect/refract handling on GPU and legitimately
+            // needs to resolve near zero for authored-clear glass. Reusing the
+            // floored m_roughness here was a real-scene regression: it made
+            // ALL OSL glass render frosted/too-dark on GPU, even glass authored
+            // as perfectly clear (e.g. a cake display cover), since the flat
+            // GGX-reflection roughness this material's dominant *reflection*
+            // lobe carries is unrelated to how rough its *transmission* is.
+            float transBestWeight = 0.f;
+            for (auto& l : lobes) {
+                if (l.kind == OslLobe::Kind::GGXTrans || l.kind == OslLobe::Kind::GGXBoth) {
+                    float w = luminance(l.weight);
+                    if (w > transBestWeight) {
+                        transBestWeight = w;
+                        m_transmissionRoughness = std::sqrt(std::sqrt(std::max(0.f, l.alpha2)));
+                    }
+                }
+            }
         }
 
         // Build the hair fallback from the probed OSL material parameters.
@@ -1425,6 +1448,7 @@ public:
         return m_baseColor;
     }
     float    roughness() const override { return m_roughness; }
+    float    transmissionRoughness() const override { return m_transmissionRoughness; }
     float    metalness() const override { return m_metalness; }
     float    transmissionWeight() const override { return m_transmissionWeight; }
     Spectrum probeEmission() const override { return m_probeEmission; }
@@ -1614,6 +1638,7 @@ private:
     Spectrum                    m_transmittanceTint = {};
     Spectrum                    m_baseColor         = {0.5f, 0.5f, 0.5f};
     float                       m_roughness         = 1.0f;  // from dominant GGX lobe, cached at ctor
+    float                       m_transmissionRoughness = 0.0f;  // UNFLOORED, dominant GGXTrans/GGXBoth lobe only — see cache-site comment
     float                       m_metalness         = 0.0f;  // 1.0 when no diffuse lobe exists (conductor), cached at ctor
     float                       m_transmissionWeight = 0.0f; // dominant GGXTrans/GGXBoth lobe's own weight, cached at ctor
     Spectrum                    m_probeEmission     = {};    // emission at uv=(0.5,0.5), cached at ctor

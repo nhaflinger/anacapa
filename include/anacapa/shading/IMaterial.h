@@ -156,6 +156,16 @@ public:
     // opaque GGX using its real diffuse/specular response, not as clear
     // glass, or its color is discarded entirely. Default 0 (opaque).
     virtual float transmissionWeight() const { return 0.0f; }
+
+    // Perceptual roughness of the TRANSMISSION lobe specifically, unfloored
+    // (unlike roughness(), which is floored to prevent fireflies on the
+    // flat-probed GGX-reflection preview path and is therefore unsuitable for
+    // glass smooth-vs-rough classification — a material's dominant *reflection*
+    // lobe roughness is unrelated to how rough its *transmission* is). Used by
+    // GPU glass extraction only. Default 0 (smooth) — safe for any material
+    // that doesn't override this, since only materials with transmissionWeight()
+    // above the glass-classification threshold ever consult this.
+    virtual float transmissionRoughness() const { return 0.0f; }
 };
 
 } // namespace anacapa

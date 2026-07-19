@@ -494,6 +494,7 @@ static float3 evalLayeredBSDF(float3 wo, float3 wi, float3 n,
                                float3 baseColor, float roughness,
                                float metalness, float specular,
                                bool multiScatter,
+                               float coatWeight, float coatRoughness,
                                constant GpuCameraParams& cam,
                                const device float* specLUT,
                                const device float* specAvgLUT) {
@@ -521,11 +522,29 @@ static float3 evalLayeredBSDF(float3 wo, float3 wi, float3 n,
         spec += evalGGXMs(cosO, cosII, roughness, F0, cam, specLUT, specAvgLUT);
     }
 
+    // Clearcoat — deterministic attenuated-coat approximation of CPU's
+    // stochastic 5-lobe layer selection (StandardSurface.h). Adds a second,
+    // independently-rough GGX lobe with a fixed dielectric F0 (0.04 =
+    // F0_fromIOR(1.5), CPU's hardcoded coat IOR), then attenuates the base
+    // diff+spec response by (1 - coat Fresnel-at-view-angle) so light that
+    // reflects off the coat doesn't also reach the layers underneath.
+    float3 coatSpec  = float3(0.0f);
+    float  coatAtten = 1.0f;
+    if (coatWeight > 0.0f) {
+        float  coatAlpha = max(1e-4f, coatRoughness * coatRoughness);
+        float  coatA2    = coatAlpha * coatAlpha;
+        float  coatD     = ggxD(cosH, coatA2);
+        float  coatG     = ggxG1(cosO, coatA2) * ggxG1(cosII, coatA2);
+        float3 coatF0    = float3(0.04f);
+        coatSpec  = coatD * coatG * schlick(vdotH, coatF0) * invDen * coatWeight;
+        coatAtten = 1.0f - coatWeight * schlick(cosO, coatF0).x;
+    }
+
     float  E_spec = specAlbedoLookup(cosO, roughness, cam, specLUT);
     float  diffW  = (1.0f - metalness) * (1.0f - specular * E_spec);
     float3 diff   = disneyDiffuseLobe(wo, wi, n, baseColor, roughness) * diffW;
 
-    return diff + spec;
+    return coatSpec + coatAtten * (diff + spec);
 }
 
 // ---------------------------------------------------------------------------
@@ -858,6 +877,8 @@ static float3 sampleDirect(
     float                           metalness,
     float                           specular,
     bool                            multiScatter,
+    float                           coatWeight,
+    float                           coatRoughness,
     float                           rayTime,
     const device GpuLight*          lights,
     uint                            numLights,
@@ -967,7 +988,7 @@ static float3 sampleDirect(
         f = baseColor * (1.0f / M_PI_F);
     } else if (matType == kMatGGX) {
         f = evalLayeredBSDF(wo, wi, n, baseColor, roughness, metalness, specular, multiScatter,
-                            cam, specAlbedoLUT, specAvgAlbedoLUT);
+                            coatWeight, coatRoughness, cam, specAlbedoLUT, specAvgAlbedoLUT);
     }
     // Glass is delta — no area PDF can be evaluated, skip direct lighting
 
@@ -1040,6 +1061,8 @@ static float3 queryHashGrid(
     float                          metalness,
     float                          specular,
     bool                           multiScatter,
+    float                          coatWeight,
+    float                          coatRoughness,
     constant GpuCameraParams&      cam,
     const device uint32_t*         cellStart,
     const device uint32_t*         sortedPhotonIdx,
@@ -1092,7 +1115,7 @@ static float3 queryHashGrid(
                 f = baseColor * (1.f / M_PI_F);
             } else if (matType == kMatGGX) {
                 f = evalLayeredBSDF(wo, wi, n, baseColor, roughness, metalness, specular, multiScatter,
-                                    cam, specAlbedoLUT, specAvgAlbedoLUT);
+                                    coatWeight, coatRoughness, cam, specAlbedoLUT, specAvgAlbedoLUT);
             }
 
             float3 power = float3(ph.power.x, ph.power.y, ph.power.z);
@@ -1771,6 +1794,7 @@ kernel void shade(
                                           mat.type, baseColor,
                                           mat.roughness, mat.metalness, mat.specular,
                                           mat.multiScatter != 0,
+                                          mat.coatWeight, mat.coatRoughness,
                                           rayTime,
                                           lights, numLights,
                                           materials, numMaterials,
@@ -1788,6 +1812,7 @@ kernel void shade(
                                                mat.type, baseColor,
                                                mat.roughness, mat.metalness, mat.specular,
                                                mat.multiScatter != 0,
+                                               mat.coatWeight, mat.coatRoughness,
                                                cam, hashCellStart, sortedPhotonIdx, photons,
                                                specAlbedoLUT, specAvgAlbedoLUT);
                 L += throughput * Lcaustic;
@@ -1884,40 +1909,137 @@ kernel void shade(
             bool entering = dot(r.direction, geomN) < 0.0f;  // ray opposes outward normal → entering
             float3 faceN  = entering ? geomN : -geomN;       // points toward ray origin
             float  eta    = entering ? (1.0f / mat.specularIOR) : mat.specularIOR;
+            float3 tint   = float3(mat.transmissionTint.x, mat.transmissionTint.y, mat.transmissionTint.z);
 
-            float cosI = dot(-r.direction, faceN);
-            float Fr   = fresnelDielectric(cosI, 1.0f / eta);  // eta = n2/n1, invert for function convention
+            // Smooth-vs-rough split mirrors CPU's OslMaterial sampleGGXTransLobe/
+            // sampleGGXReflLobe (alpha2 < 1e-6f ⇔ perceptual roughness ≲ 0.032).
+            if (mat.roughness < 0.032f) {
+                // ---- Smooth delta glass (existing path, now tinted) ----
+                float cosI = dot(-r.direction, faceN);
+                float Fr   = fresnelDielectric(cosI, 1.0f / eta);  // eta = n2/n1, invert for function convention
 
-            if (rand01(rng) < Fr) {
-                // Reflect
-                wi = reflect(r.direction, faceN);
-                r.origin = hitPos + faceN * 1e-4f;
-            } else {
-                // Refract (Snell's law) — Metal's built-in refract(I, N, eta) where eta = n1/n2
-                wi = refract(r.direction, faceN, eta);
-                if (length_squared(wi) < 0.5f) {
-                    // Total internal reflection fallback
+                bool reflected = rand01(rng) < Fr;
+                if (reflected) {
                     wi = reflect(r.direction, faceN);
                     r.origin = hitPos + faceN * 1e-4f;
                 } else {
-                    r.origin = hitPos - faceN * 1e-4f;  // offset to inside surface
+                    // Refract (Snell's law) — Metal's built-in refract(I, N, eta) where eta = n1/n2
+                    wi = refract(r.direction, faceN, eta);
+                    if (length_squared(wi) < 0.5f) {
+                        // Total internal reflection fallback
+                        reflected = true;
+                        wi = reflect(r.direction, faceN);
+                        r.origin = hitPos + faceN * 1e-4f;
+                    } else {
+                        r.origin = hitPos - faceN * 1e-4f;  // offset to inside surface
+                    }
                 }
-            }
-            // Delta BSDF: f/pdf = 1, throughput unchanged.
-            // baseColor is the diffuse reflectance (often 0.5 grey for OslMaterial),
-            // not a glass tint — using it here would darken everything behind glass.
-            bsdfF   = float3(1.0f);
-            bsdfPdf = 1.0f;
-            r.direction    = normalize(wi);
-            r.min_distance = 1e-4f;
-            r.max_distance = 1e10f;
-            throughput *= bsdfF;
+                // Delta BSDF: f/pdf = 1, throughput unchanged except for the
+                // transmission tint (reflections off glass aren't colored by
+                // the medium — only apply tint on the refraction branch).
+                bsdfF   = reflected ? float3(1.0f) : tint;
+                bsdfPdf = 1.0f;
+                r.direction    = normalize(wi);
+                r.min_distance = 1e-4f;
+                r.max_distance = 1e10f;
+                throughput *= bsdfF;
 
-            // Glass is a delta bounce: next emitter hit gets weight=1.
-            prevPos      = hitPos;
-            prevN        = faceN;
-            prevBsdfPdf  = 1.0f;
-            prevWasDelta = true;
+                // Glass is a delta bounce: next emitter hit gets weight=1.
+                prevPos      = hitPos;
+                prevN        = faceN;
+                prevBsdfPdf  = 1.0f;
+                prevWasDelta = true;
+            } else {
+                // ---- Rough/frosted glass — GGX half-vector reflect/refract.
+                // Transcribed directly from CPU's sampleLobe() GGXBoth case
+                // (OslMaterial.cpp) — NOT the separate sampleGGXTransLobe/
+                // sampleGGXReflLobe helper functions, which use a different
+                // (unused-for-glass) jacobian derivation and would silently
+                // over-attenuate energy if mirrored instead — this was a real
+                // regression found via a real-scene bug report (thick glass —
+                // a cake display cover — rendering near-opaque/dark instead of
+                // clear). CPU's f/pdf here have the cosI term pre-cancelled
+                // (their integrator does `f/pdf` with no separate cosine
+                // multiply for this lobe), so — unlike kMatGGX's shared
+                // `bsdfF * cosI / bsdfPdf` convention — this block deliberately
+                // does NOT multiply by an extra cosine term below.
+                float alpha  = max(1e-4f, mat.roughness * mat.roughness);
+                float alpha2 = alpha * alpha;
+
+                float3 whLocal = sampleGGX(rand2(rng), alpha2);
+                float3 wh      = toWorld(whLocal, faceN);
+
+                float3 wo   = -r.direction;
+                float cosO  = dot(wo, faceN);
+                float cosIH = max(0.0f, dot(wo, wh));
+                if (cosO <= 0.0f || cosIH <= 0.0f) break;
+
+                float cosH = max(0.0f, dot(wh, faceN));
+                float D    = ggxD(cosH, alpha2);
+                // iorRatio = n_transmitted/n_incident (CPU's lobe.ior convention,
+                // e.g. specularIOR when entering) — the OPPOSITE ratio from `eta`
+                // above, which is scoped for Metal's built-in refract() intrinsic
+                // (n_incident/n_transmitted) used by the smooth-glass path only.
+                // Using `eta` here instead of `iorRatio` was a real bug: it fed
+                // Snell's law an inverted ratio, spuriously pushing grazing/thick
+                // regions toward false total internal reflection — the direct
+                // cause of a real-scene regression (thick glass edges going
+                // very dark).
+                float iorRatio = 1.0f / eta;
+                float Fr = fresnelDielectric(cosIH, iorRatio);
+
+                if (rand01(rng) < Fr) {
+                    // ---- GGX reflection ----
+                    wi = reflect(r.direction, wh);
+                    float cosIwi = dot(wi, faceN);
+                    if (cosIwi <= 0.0f) break;
+                    float G2 = ggxG1(cosO, alpha2) * ggxG1(cosIwi, alpha2);
+                    bsdfPdf = Fr * (D * cosH / max(1e-7f, 4.0f * cosIH));
+                    bsdfF   = float3(Fr * D * G2 / max(1e-7f, 4.0f * cosO));
+                    r.origin = hitPos + faceN * 1e-4f;
+                } else {
+                    float sin2T = max(0.0f, 1.0f - cosIH * cosIH) / (iorRatio * iorRatio);
+                    if (sin2T >= 1.0f) {
+                        // TIR — reflect instead (not Fresnel-weighted: Fr≈1 here).
+                        wi = reflect(r.direction, wh);
+                        float cosIwi = dot(wi, faceN);
+                        if (cosIwi <= 0.0f) break;
+                        float G2 = ggxG1(cosO, alpha2) * ggxG1(cosIwi, alpha2);
+                        bsdfPdf = D * cosH / max(1e-7f, 4.0f * cosIH);
+                        bsdfF   = float3(D * G2 / max(1e-7f, 4.0f * cosO));
+                        r.origin = hitPos + faceN * 1e-4f;
+                    } else {
+                        float cosTH = sqrt(1.0f - sin2T);
+                        wi = wo * (-1.0f / iorRatio) + wh * (cosIH / iorRatio - cosTH);
+                        float cosIwi = dot(wi, faceN);
+                        if (cosIwi >= 0.0f) break;  // must land on the transmission side
+                        float cosIt      = -cosIwi;
+                        float G2         = ggxG1(cosO, alpha2) * ggxG1(cosIt, alpha2);
+                        float absCosTwh  = abs(dot(wi, wh));
+                        float denom      = cosIH + iorRatio * absCosTwh;
+                        if (denom < 1e-6f) break;
+                        float jacobian = (iorRatio * iorRatio) * absCosTwh / (denom * denom);
+                        bsdfPdf = (1.0f - Fr) * D * cosH * jacobian;
+                        bsdfF   = tint * ((1.0f - Fr) * D * G2 * cosIH * absCosTwh
+                                          / max(1e-7f, cosO * denom * denom));
+                        r.origin = hitPos - faceN * 1e-4f;  // offset to inside surface
+                    }
+                }
+                if (bsdfPdf <= 0.0f) break;
+
+                throughput *= bsdfF / bsdfPdf;
+
+                r.direction    = normalize(wi);
+                r.min_distance = 1e-4f;
+                r.max_distance = 1e10f;
+
+                // Rough glass is a real (non-delta) glossy bounce: MIS-weight
+                // the next emitter hit against this pdf like kMatGGX does.
+                prevPos      = hitPos;
+                prevN        = faceN;
+                prevBsdfPdf  = bsdfPdf;
+                prevWasDelta = false;
+            }
 
             // Glass hits don't count against bounce budget — refracting through a
             // dome's two surfaces plus any interior bounces would exhaust maxDepth
@@ -1958,6 +2080,7 @@ kernel void shade(
 
             bsdfF = evalLayeredBSDF(wo, wi, n, baseColor, mat.roughness,
                                     mat.metalness, mat.specular, mat.multiScatter != 0,
+                                    mat.coatWeight, mat.coatRoughness,
                                     cam, specAlbedoLUT, specAvgAlbedoLUT);
 
             float ggxPdf = D * cosH / max(1e-7f, 4.0f * dot(wo, wh));
@@ -1970,6 +2093,7 @@ kernel void shade(
             if (mat.type == kMatGGX) {
                 bsdfF = evalLayeredBSDF(wo, wi, n, baseColor, mat.roughness,
                                         mat.metalness, mat.specular, mat.multiScatter != 0,
+                                        mat.coatWeight, mat.coatRoughness,
                                         cam, specAlbedoLUT, specAvgAlbedoLUT);
             } else {
                 bsdfF = baseColor / M_PI_F;
@@ -2149,6 +2273,10 @@ kernel void photonTrace(
                 } else {
                     r.direction = normalize(refr);
                     r.origin    = hitPos - faceN * 1e-4f;
+                    // Tint the photon's carried power on transmission — mirrors
+                    // the main shading kernel's transmissionTint fix (reflections
+                    // off glass aren't colored by the medium).
+                    power *= float3(mat.transmissionTint.x, mat.transmissionTint.y, mat.transmissionTint.z);
                 }
             }
             r.min_distance = 1e-4f;
@@ -2156,7 +2284,7 @@ kernel void photonTrace(
             // Only specular bounces through caustic-flagged glass count toward
             // "this photon is a caustic photon" — see ShadowRay.h / IMaterial.
             if (mat.causticGenerator) ++numSpecular;
-            // Delta surface — throughput unchanged
+            // Delta surface — throughput unchanged (except the tint above)
 
         } else if (mat.isSubsurface && mat.subsurfaceWeight > 0.f) {
             // SSS hit — deposit first SSS photon, scatter Lambertian, continue

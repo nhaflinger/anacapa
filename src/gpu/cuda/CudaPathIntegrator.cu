@@ -185,6 +185,9 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat,
     gm.normalBias  = -1.f;
     gm.mxDispatchIdx = -1;
     gm.multiScatter = 0u;  // default: single-scatter, matches OslMaterial's conductor/dielectric lobes
+    gm.transmissionTint = {1.f, 1.f, 1.f};
+    gm.coatWeight = 0.f;
+    gm.coatRoughness = 0.1f;
     if (!mat) return gm;
     gm.causticGenerator = mat->isCausticGenerator() ? 1u : 0u;
 
@@ -283,12 +286,22 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat,
             Spectrum alb = mat->reflectance(ctx);
             gm.baseColor = {alb.x, alb.y, alb.z};
             gm.roughness = ssm->params().roughness.value;
+            // NOT `tint` here — StandardSurfaceMaterial::transmittanceColor()
+            // pre-scales base_color by transmission weight and (1-Fresnel) for
+            // shadow-ray approximation purposes; using it as a shading-time
+            // color multiplier would double-apply that scaling on top of the
+            // kMatGlass branch's own stochastic Fresnel reflect/refract choice.
+            // The raw base_color (alb) is the correct pure tint here. Mirrors
+            // the identical Metal backend fix.
+            gm.transmissionTint = {alb.x, alb.y, alb.z};
             return gm;
         }
         if (isTransmissive) {
             gm.type         = kMatGlass;
             gm.specularIOR  = 1.5f;
             gm.transmission = 1.0f;
+            gm.roughness    = mat->transmissionRoughness();
+            gm.transmissionTint = {tint.x, tint.y, tint.z};
             Spectrum alb = mat->reflectance(ctx);
             gm.baseColor = {alb.x, alb.y, alb.z};
             return gm;
@@ -310,6 +323,8 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat,
         gm.specular    = ssm->params().specular.value;
         gm.specularIOR = ssm->params().specular_IOR;
         gm.multiScatter = 1u;
+        gm.coatWeight    = ssm->params().coat;
+        gm.coatRoughness = ssm->params().coat_roughness;
 
         if (ssm->params().base_color.hasTexture()) {
             gm.baseColorTexIdx = loadOrCacheTexture(

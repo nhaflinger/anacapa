@@ -106,6 +106,15 @@ struct GpuMaterial {
     // never applies this compensation). Set per-material in
     // extractGpuMaterial() — mirrors the identical Metal backend split.
     uint32_t   multiScatter;
+    // Real transmission color for kMatGlass (from IMaterial::transmittanceColor()),
+    // applied on the refraction path only — reflections off glass aren't tinted
+    // by the medium. Mirrors the identical Metal backend field.
+    GpuFloat3  transmissionTint;
+    // Clearcoat layer (StandardSurfaceMaterial only). Mirrors the identical
+    // Metal backend fields/approach — see SharedTypes.h (Metal) for the full
+    // comment on the deterministic attenuated-coat approximation.
+    float      coatWeight;
+    float      coatRoughness;
 };
 
 // ---------------------------------------------------------------------------
