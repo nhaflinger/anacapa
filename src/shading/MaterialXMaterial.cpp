@@ -60,7 +60,23 @@ bool tryReadLiteralColor3(mx::NodePtr node, const std::string& inputName, Spectr
 MaterialXMaterial::MaterialXMaterial(const std::string& mtlxPath) : m_mtlxPath(mtlxPath) {
     MaterialXCodegen codegen;
     for (const char* inputName : kGeneratedInputs) {
+        // Cache whichever GPU shading language the active backend consumes.
+        // The Metal backend wraps MSL into a compiled shader library; the
+        // CUDA/OptiX backend's MxGlslToCuda rewrites GLSL as CUDA source.
+        // Using the wrong one silently fails every single material's
+        // adapter step (the stripper looks for GLSL patterns like
+        // 'out vec4 X;' and 'void main()' that don't exist in MSL).
+        //
+        // If both backends are enabled in one build the Metal path wins here
+        // and CUDA gets nothing — add a second cache + explicit accessor
+        // if that combined build is ever needed.
+#if defined(ANACAPA_ENABLE_METAL)
         MxGeneratedShader gen = codegen.generateMsl(mtlxPath, inputName);
+#elif defined(ANACAPA_ENABLE_CUDA)
+        MxGeneratedShader gen = codegen.generateGlsl(mtlxPath, inputName);
+#else
+        MxGeneratedShader gen = codegen.generateMsl(mtlxPath, inputName);
+#endif
         if (gen.valid) {
             m_generated.emplace(inputName, std::move(gen));
         }

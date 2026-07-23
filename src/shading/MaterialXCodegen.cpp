@@ -16,9 +16,26 @@
 
 #include <spdlog/spdlog.h>
 
+#include <type_traits>
+
 namespace mx = MaterialX;
 
 namespace anacapa {
+
+// MaterialX 1.38 (bundled with e.g. USD 24.08) returns TypeDesc* from
+// ShaderPort::getType(); 1.39.x returns a TypeDesc& reference.  This helper
+// gives us a single call site that compiles against both.
+namespace {
+template <class Port>
+inline auto mxPortTypeName(Port* port) {
+    auto&& td = port->getType();
+    if constexpr (std::is_pointer_v<std::remove_reference_t<decltype(td)>>) {
+        return td->getName();
+    } else {
+        return td.getName();
+    }
+}
+} // namespace
 
 struct MaterialXCodegen::Impl {
     mx::DocumentPtr libraryDoc;
@@ -189,7 +206,7 @@ static MxGeneratedShader generateForTarget(MaterialXCodegen::Impl* impl,
         for (mx::ShaderPort* port : block.getVariableOrder()) {
             MxUniform u;
             u.name  = port->getVariable();
-            u.type  = port->getType().getName();
+            u.type  = mxPortTypeName(port);
             u.value = port->getValue() ? port->getValue()->getValueString() : "";
             result.uniforms.push_back(std::move(u));
         }

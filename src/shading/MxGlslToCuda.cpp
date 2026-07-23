@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 
 #include <sstream>
+#include <cctype>
 #include <cstdlib>
 
 namespace anacapa {
@@ -24,44 +25,83 @@ namespace {
 // project_materialx_codegen, Phase 3 risks).
 // ---------------------------------------------------------------------------
 constexpr const char* kCudaGlslPrelude = R"CUDA(
+typedef unsigned int  uint;
+typedef unsigned char uchar;
+
+struct vec2;
+struct vec3;
+struct vec4;
+
 struct vec2 {
     float x, y;
     __device__ vec2() : x(0), y(0) {}
     __device__ vec2(float v) : x(v), y(v) {}
     __device__ vec2(float x_, float y_) : x(x_), y(y_) {}
+    // Swizzles used by MaterialX-emitted GLSL — `.xy` on a vec2 is identity,
+    // some generators emit it defensively.
+    __device__ vec2 xy() const { return *this; }
+    __device__ vec2 yx() const { return vec2(y, x); }
 };
 struct vec3 {
     float x, y, z;
     __device__ vec3() : x(0), y(0), z(0) {}
     __device__ vec3(float v) : x(v), y(v), z(v) {}
     __device__ vec3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
-    __device__ vec3(vec2 xy, float z_) : x(xy.x), y(xy.y), z(z_) {}
+    __device__ vec3(vec2 xy_, float z_) : x(xy_.x), y(xy_.y), z(z_) {}
+    __device__ vec2 xy() const { return vec2(x, y); }
+    __device__ vec2 xz() const { return vec2(x, z); }
+    __device__ vec2 yz() const { return vec2(y, z); }
+    __device__ vec3 xyz() const { return *this; }
 };
 struct vec4 {
     float x, y, z, w;
     __device__ vec4() : x(0), y(0), z(0), w(0) {}
     __device__ vec4(float v) : x(v), y(v), z(v), w(v) {}
     __device__ vec4(float x_, float y_, float z_, float w_) : x(x_), y(y_), z(z_), w(w_) {}
-    __device__ vec4(vec3 xyz, float w_) : x(xyz.x), y(xyz.y), z(xyz.z), w(w_) {}
+    __device__ vec4(vec3 xyz_, float w_) : x(xyz_.x), y(xyz_.y), z(xyz_.z), w(w_) {}
+    __device__ vec2 xy()  const { return vec2(x, y); }
+    __device__ vec3 xyz() const { return vec3(x, y, z); }
+    __device__ vec3 rgb() const { return vec3(x, y, z); }
 };
+
+// GLSL uint vector types — MaterialX's genglsl hash / noise helpers use uvec3.
+struct uvec2 { uint x, y; __device__ uvec2() : x(0), y(0) {} __device__ uvec2(uint v) : x(v), y(v) {} __device__ uvec2(uint x_, uint y_) : x(x_), y(y_) {} };
+struct uvec3 { uint x, y, z; __device__ uvec3() : x(0), y(0), z(0) {} __device__ uvec3(uint v) : x(v), y(v), z(v) {} __device__ uvec3(uint x_, uint y_, uint z_) : x(x_), y(y_), z(z_) {} };
+struct uvec4 { uint x, y, z, w; __device__ uvec4() : x(0), y(0), z(0), w(0) {} __device__ uvec4(uint v) : x(v), y(v), z(v), w(v) {} __device__ uvec4(uint x_, uint y_, uint z_, uint w_) : x(x_), y(y_), z(z_), w(w_) {} };
+struct ivec2 { int x, y; __device__ ivec2() : x(0), y(0) {} __device__ ivec2(int v) : x(v), y(v) {} __device__ ivec2(int x_, int y_) : x(x_), y(y_) {} };
+struct ivec3 { int x, y, z; __device__ ivec3() : x(0), y(0), z(0) {} __device__ ivec3(int v) : x(v), y(v), z(v) {} __device__ ivec3(int x_, int y_, int z_) : x(x_), y(y_), z(z_) {} };
 
 __device__ inline vec2 operator+(vec2 a, vec2 b) { return vec2(a.x+b.x, a.y+b.y); }
 __device__ inline vec2 operator-(vec2 a, vec2 b) { return vec2(a.x-b.x, a.y-b.y); }
 __device__ inline vec2 operator*(vec2 a, vec2 b) { return vec2(a.x*b.x, a.y*b.y); }
 __device__ inline vec2 operator/(vec2 a, vec2 b) { return vec2(a.x/b.x, a.y/b.y); }
+__device__ inline vec2 operator+(vec2 a, float s) { return vec2(a.x+s, a.y+s); }
+__device__ inline vec2 operator-(vec2 a, float s) { return vec2(a.x-s, a.y-s); }
 __device__ inline vec2 operator*(vec2 a, float s) { return vec2(a.x*s, a.y*s); }
 __device__ inline vec2 operator*(float s, vec2 a) { return vec2(a.x*s, a.y*s); }
 __device__ inline vec2 operator/(vec2 a, float s) { return vec2(a.x/s, a.y/s); }
 __device__ inline vec2 operator-(vec2 a) { return vec2(-a.x, -a.y); }
+__device__ inline vec2& operator+=(vec2& a, vec2 b) { a.x+=b.x; a.y+=b.y; return a; }
+__device__ inline vec2& operator-=(vec2& a, vec2 b) { a.x-=b.x; a.y-=b.y; return a; }
+__device__ inline vec2& operator*=(vec2& a, vec2 b) { a.x*=b.x; a.y*=b.y; return a; }
+__device__ inline vec2& operator*=(vec2& a, float s) { a.x*=s; a.y*=s; return a; }
+__device__ inline vec2& operator/=(vec2& a, float s) { a.x/=s; a.y/=s; return a; }
 
 __device__ inline vec3 operator+(vec3 a, vec3 b) { return vec3(a.x+b.x, a.y+b.y, a.z+b.z); }
 __device__ inline vec3 operator-(vec3 a, vec3 b) { return vec3(a.x-b.x, a.y-b.y, a.z-b.z); }
 __device__ inline vec3 operator*(vec3 a, vec3 b) { return vec3(a.x*b.x, a.y*b.y, a.z*b.z); }
 __device__ inline vec3 operator/(vec3 a, vec3 b) { return vec3(a.x/b.x, a.y/b.y, a.z/b.z); }
+__device__ inline vec3 operator+(vec3 a, float s) { return vec3(a.x+s, a.y+s, a.z+s); }
+__device__ inline vec3 operator-(vec3 a, float s) { return vec3(a.x-s, a.y-s, a.z-s); }
 __device__ inline vec3 operator*(vec3 a, float s) { return vec3(a.x*s, a.y*s, a.z*s); }
 __device__ inline vec3 operator*(float s, vec3 a) { return vec3(a.x*s, a.y*s, a.z*s); }
 __device__ inline vec3 operator/(vec3 a, float s) { return vec3(a.x/s, a.y/s, a.z/s); }
 __device__ inline vec3 operator-(vec3 a) { return vec3(-a.x, -a.y, -a.z); }
+__device__ inline vec3& operator+=(vec3& a, vec3 b) { a.x+=b.x; a.y+=b.y; a.z+=b.z; return a; }
+__device__ inline vec3& operator-=(vec3& a, vec3 b) { a.x-=b.x; a.y-=b.y; a.z-=b.z; return a; }
+__device__ inline vec3& operator*=(vec3& a, vec3 b) { a.x*=b.x; a.y*=b.y; a.z*=b.z; return a; }
+__device__ inline vec3& operator*=(vec3& a, float s) { a.x*=s; a.y*=s; a.z*=s; return a; }
+__device__ inline vec3& operator/=(vec3& a, float s) { a.x/=s; a.y/=s; a.z/=s; return a; }
 
 __device__ inline vec4 operator+(vec4 a, vec4 b) { return vec4(a.x+b.x, a.y+b.y, a.z+b.z, a.w+b.w); }
 __device__ inline vec4 operator-(vec4 a, vec4 b) { return vec4(a.x-b.x, a.y-b.y, a.z-b.z, a.w-b.w); }
@@ -92,6 +132,11 @@ __device__ inline vec3  cross(vec3 a, vec3 b) {
 }
 __device__ inline float length(vec2 a) { return sqrtf(dot(a,a)); }
 __device__ inline float length(vec3 a) { return sqrtf(dot(a,a)); }
+// Componentwise sqrt — GLSL builtins act elementwise on vectors.
+__device__ inline vec2  sqrt(vec2 v)  { return vec2(sqrtf(v.x), sqrtf(v.y)); }
+__device__ inline vec3  sqrt(vec3 v)  { return vec3(sqrtf(v.x), sqrtf(v.y), sqrtf(v.z)); }
+__device__ inline vec4  sqrt(vec4 v)  { return vec4(sqrtf(v.x), sqrtf(v.y), sqrtf(v.z), sqrtf(v.w)); }
+__device__ inline float sqrt(float x) { return sqrtf(x); }
 __device__ inline vec2  normalize(vec2 a) { float l = length(a); return l > 0.f ? a * (1.f/l) : a; }
 __device__ inline vec3  normalize(vec3 a) { float l = length(a); return l > 0.f ? a * (1.f/l) : a; }
 
@@ -107,6 +152,22 @@ __device__ inline vec3  mx_mod(vec3 x, float y)  { return vec3(mx_mod(x.x,y), mx
 #define mx_acos acosf
 #define mx_atan atan2f
 #define mx_radians(deg) ((deg) * 0.017453292519943295f)
+
+// GLSL builtins that MaterialX's genglsl helpers reference by their
+// unprefixed names — CUDA needs concrete implementations.
+__device__ inline float radians(float d) { return d * 0.017453292519943295f; }
+__device__ inline float degrees(float r) { return r * 57.29577951308232f;   }
+__device__ inline float inversesqrt(float x) { return rsqrtf(x); }
+__device__ inline float fract(float x) { return x - floorf(x); }
+__device__ inline vec2  fract(vec2 v)  { return vec2(fract(v.x), fract(v.y)); }
+__device__ inline vec3  fract(vec3 v)  { return vec3(fract(v.x), fract(v.y), fract(v.z)); }
+__device__ inline float sign(float x) { return (x > 0.f) - (x < 0.f); }
+__device__ inline float step(float e, float x) { return x < e ? 0.f : 1.f; }
+__device__ inline float smoothstep(float e0, float e1, float x) {
+    float t = mx_clampf((x - e0) / (e1 - e0), 0.f, 1.f);
+    return t * t * (3.f - 2.f * t);
+}
+__device__ inline float mx_atan2(float y, float x) { return atan2f(y, x); }
 
 __device__ inline vec3 pow(vec3 x, vec3 y) { return vec3(powf(x.x,y.x), powf(x.y,y.y), powf(x.z,y.z)); }
 __device__ inline vec3 pow(vec3 x, float y) { return vec3(powf(x.x,y), powf(x.y,y), powf(x.z,y)); }
@@ -274,6 +335,56 @@ MxCudaAdapterResult buildCudaAdapter(const MxGeneratedShader& gen, const std::st
     body = stripLinesStartingWith(body, "uniform ");
     body = stripLinesStartingWith(body, "#define mx_");
 
+    // GLSL `out`/`inout` parameter qualifiers → C++ reference parameters.
+    // GLSL: `void f(float x, out int i)` → C++: `void f(float x, int& i)`.
+    // Handled with a simple regex-ish pass since MaterialX-emitted syntax is
+    // consistent (single space between qualifier / type / name).  We only
+    // touch occurrences preceded by `(` or `,` (parameter list positions),
+    // avoiding stray hits on identifiers that happen to end in `out`.
+    auto rewriteParamQualifier = [&](const std::string& qualifier) {
+        std::string needleP = "(" + qualifier + " ";
+        std::string needleC = ", " + qualifier + " ";
+        auto doPass = [&](const std::string& needle, const std::string& prefix) {
+            size_t pos = 0;
+            while ((pos = body.find(needle, pos)) != std::string::npos) {
+                size_t typeStart = pos + needle.size();
+                size_t typeEnd   = body.find(' ', typeStart);
+                if (typeEnd == std::string::npos) { pos = typeStart; continue; }
+                std::string typeTok = body.substr(typeStart, typeEnd - typeStart);
+                std::string replacement = prefix + typeTok + "& ";
+                body.replace(pos, typeEnd - pos + 1, replacement);
+                pos += replacement.size();
+            }
+        };
+        doPass(needleP, "(");
+        doPass(needleC, ", ");
+    };
+    rewriteParamQualifier("out");
+    rewriteParamQualifier("inout");
+
+    // GLSL swizzles used as fields (`vd.texcoord_0.xy`) — in this prelude
+    // they're methods on vec3/vec4/vec2, so a bare `.xy` reads as a bound
+    // function pointer.  Append `()` to any swizzle-suffix that isn't
+    // already a call.  The set here matches what our prelude defines.
+    static const char* kSwizzles[] = { "xyz", "rgb", "xy", "xz", "yz", "yx" };
+    for (const char* sw : kSwizzles) {
+        std::string needle = std::string(".") + sw;
+        size_t pos = 0;
+        while ((pos = body.find(needle, pos)) != std::string::npos) {
+            size_t after = pos + needle.size();
+            // Skip if next char is `(` (already a call) or an identifier
+            // continuation (avoid mutating identifiers containing the token,
+            // e.g. `.xyz_thing`).
+            char c = (after < body.size()) ? body[after] : '\0';
+            if (c == '(' || std::isalnum(static_cast<unsigned char>(c)) || c == '_') {
+                pos = after;
+                continue;
+            }
+            body.insert(after, "()");
+            pos = after + 2;
+        }
+    }
+
     // MaterialX declares per-fragment varyings (UV, etc.) as a GLSL interface
     // block (`in VertexData { vec2 texcoord_0; } vd;`) — not valid CUDA C++
     // at all. Excise it; a local `vd` with the same field(s), populated from
@@ -350,8 +461,21 @@ MxCudaAdapterResult buildCudaAdapter(const MxGeneratedShader& gen, const std::st
     epilogue << "    return make_float4(" << gen.outputVarName << ".x, " << gen.outputVarName << ".y, "
               << gen.outputVarName << ".z, " << gen.outputVarName << ".w);\n";
 
+    // Wrap MaterialX's helper functions (mx_square/mx_bilerp/mx_hash_int/
+    // mx_perlin_noise/... — every genglsl helper the generator inlined into
+    // this shader) in an anonymous namespace so each callable module owns a
+    // private copy.  Without this, `-rdc=true` gives them external linkage
+    // and OptiX's pipeline linker fails when it sees the same symbol defined
+    // in every one of the 900+ callable modules
+    // (OPTIX_ERROR_PIPELINE_LINK_ERROR: "Symbol '...' was defined multiple
+    // times").  The entry function stays at global scope after the closing
+    // `}` so its `extern "C"` linkage survives — that's the symbol OptiX
+    // resolves via optixProgramGroupCreate's entryFunctionNameDC.
     std::string adaptedBody =
-        body.substr(0, mainPos) + sig.str() + "\n" +
+        std::string("namespace {\n") +
+        body.substr(0, mainPos) +
+        std::string("\n} // anon-ns\n") +
+        sig.str() + "\n" +
         body.substr(bracePos, 1) + prologue.str() +
         body.substr(bracePos + 1, lastBrace - bracePos - 1) +
         epilogue.str() +

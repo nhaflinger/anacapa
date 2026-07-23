@@ -14,16 +14,64 @@ include(FetchContent)
 
 # ---------------------------------------------------------------------------
 # spdlog — header-only structured logging (bundles fmt)
+#
+# spdlog 1.15 bundles fmt 11; OIIO 2.5.x bundles fmt 10 in its detail/
+# header tree.  When both land in the same translation unit (any file that
+# includes both spdlog and OIIO — MaterialXCodegen, USDLoader, etc.) the two
+# incompatible fmt namespaces collide.  Newer OIIO (2.6+) bundles fmt 11 and
+# matches spdlog 1.15; older installs (e.g. our Linux graphics stack at
+# ~/oiio 2.5.16, which bundles fmt exactly 10.0.0) don't.
+#
+# On systems where OIIO bundles fmt 10, we FetchContent standalone fmt 10.0.0
+# and tell spdlog to use it externally (SPDLOG_FMT_EXTERNAL) — that way both
+# spdlog and OIIO see the same v10 symbol set instead of two slightly
+# different v10 headers stepping on each other (int_checker, buffer_appender,
+# and other internals moved between fmt 10.0 and 10.2).
 # ---------------------------------------------------------------------------
+set(_anacapa_use_external_fmt OFF)
+if(NOT APPLE AND EXISTS "$ENV{HOME}/oiio/include/OpenImageIO/detail/fmt/core.h")
+    file(READ "$ENV{HOME}/oiio/include/OpenImageIO/detail/fmt/core.h" _oiio_fmt_core
+         LIMIT 4096)
+    if(_oiio_fmt_core MATCHES "FMT_VERSION 100000")
+        set(_anacapa_use_external_fmt ON)
+        message(STATUS "fmt pinned to 10.0.0 externally (matches OIIO 2.5.x bundled fmt 10.0.0)")
+    endif()
+endif()
+
+if(_anacapa_use_external_fmt)
+    FetchContent_Declare(
+        fmt
+        GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+        GIT_TAG        10.0.0
+        GIT_SHALLOW    TRUE
+    )
+    set(FMT_INSTALL OFF CACHE BOOL "" FORCE)
+    set(FMT_TEST    OFF CACHE BOOL "" FORCE)
+    set(FMT_DOC     OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(fmt)
+endif()
+
+# spdlog 1.15 needs fmt >= 11 (uses fmt/base.h).  When we pin external fmt
+# to 10.0.0 for OIIO compatibility, drop spdlog to 1.14.1 (last release that
+# supports fmt 10).  Mac / newer stacks keep 1.15.3.
+if(_anacapa_use_external_fmt)
+    set(_anacapa_spdlog_tag "v1.14.1")
+else()
+    set(_anacapa_spdlog_tag "v1.15.3")
+endif()
 FetchContent_Declare(
     spdlog
     GIT_REPOSITORY https://github.com/gabime/spdlog.git
-    GIT_TAG        v1.15.3
+    GIT_TAG        ${_anacapa_spdlog_tag}
     GIT_SHALLOW    TRUE
 )
 set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
-set(SPDLOG_FMT_EXTERNAL  OFF CACHE BOOL "" FORCE)
+if(_anacapa_use_external_fmt)
+    set(SPDLOG_FMT_EXTERNAL ON  CACHE BOOL "" FORCE)
+else()
+    set(SPDLOG_FMT_EXTERNAL OFF CACHE BOOL "" FORCE)
+endif()
 FetchContent_MakeAvailable(spdlog)
 
 # ---------------------------------------------------------------------------
@@ -159,24 +207,40 @@ endif()
 # bundled MaterialX already covers .osl generation for the CPU path).
 # ---------------------------------------------------------------------------
 if(ANACAPA_ENABLE_MATERIALX)
-    FetchContent_Declare(
-        materialx
-        GIT_REPOSITORY https://github.com/AcademySoftwareFoundation/MaterialX.git
-        GIT_TAG        v1.39.3
-        GIT_SHALLOW    TRUE
-    )
-    set(MATERIALX_BUILD_PYTHON  OFF CACHE BOOL "" FORCE)
-    set(MATERIALX_BUILD_VIEWER  OFF CACHE BOOL "" FORCE)
-    set(MATERIALX_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
-    set(MATERIALX_BUILD_DOCS    OFF CACHE BOOL "" FORCE)
-    set(MATERIALX_BUILD_RENDER  OFF CACHE BOOL "" FORCE)
-    set(MATERIALX_BUILD_GEN_OSL OFF CACHE BOOL "" FORCE)
-    set(MATERIALX_BUILD_GEN_MDL OFF CACHE BOOL "" FORCE)
-    set(MATERIALX_BUILD_GEN_GLSL ON  CACHE BOOL "" FORCE)
-    set(MATERIALX_BUILD_GEN_MSL  ON  CACHE BOOL "" FORCE)
-    set(MATERIALX_INSTALL_INCLUDE_PATH "" CACHE STRING "" FORCE)
-    set(MATERIALX_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(materialx)
+    # When USD is built with MaterialX support, pxrConfig.cmake already ran
+    # `find_package(MaterialX REQUIRED)` above (in the pxr find_package call),
+    # importing MaterialXCore/Format/etc. as targets from USD's bundled
+    # install.  Trying to FetchContent our own copy of MaterialX in that case
+    # collides on the target names (add_library sees the imported target and
+    # errors out).  Detect the imported case and skip FetchContent — the
+    # already-imported targets are what our code will link against.
+    #
+    # The trade-off is that USD's bundled MaterialX is often an older release
+    # than v1.39.3 (e.g. USD 24.08 bundles 1.38.10).  If MaterialXCodegen /
+    # MxGlslToCuda use v1.39-only API this will surface as a compile error
+    # rather than a link/runtime surprise.
+    if(TARGET MaterialXCore)
+        message(STATUS "MaterialX already imported by USD — skipping FetchContent")
+    else()
+        FetchContent_Declare(
+            materialx
+            GIT_REPOSITORY https://github.com/AcademySoftwareFoundation/MaterialX.git
+            GIT_TAG        v1.39.3
+            GIT_SHALLOW    TRUE
+        )
+        set(MATERIALX_BUILD_PYTHON  OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_VIEWER  OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_DOCS    OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_RENDER  OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_GEN_OSL OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_GEN_MDL OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_GEN_GLSL ON  CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_GEN_MSL  ON  CACHE BOOL "" FORCE)
+        set(MATERIALX_INSTALL_INCLUDE_PATH "" CACHE STRING "" FORCE)
+        set(MATERIALX_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(materialx)
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------

@@ -117,11 +117,17 @@ if(ANACAPA_ENABLE_MATERIALX)
     target_compile_definitions(anacapa_lib PUBLIC ANACAPA_ENABLE_MATERIALX)
 
     # MaterialX's stdlib .mtlx documents (nodedefs, nodegraphs, target defs)
-    # must be loadable at runtime by MaterialXCodegen — point at the fetched
-    # source tree's libraries/ directory rather than copying it.
-    FetchContent_GetProperties(materialx SOURCE_DIR MATERIALX_SOURCE_DIR)
+    # must be loadable at runtime by MaterialXCodegen.  Prefer MATERIALX_STDLIB_DIR
+    # (set by MaterialXConfig.cmake when we take the USD-imported path); else fall
+    # back to the FetchContent'd source tree's libraries/ directory.
+    if(DEFINED MATERIALX_STDLIB_DIR)
+        set(_ANACAPA_MATERIALX_LIB "${MATERIALX_STDLIB_DIR}")
+    else()
+        FetchContent_GetProperties(materialx SOURCE_DIR MATERIALX_SOURCE_DIR)
+        set(_ANACAPA_MATERIALX_LIB "${MATERIALX_SOURCE_DIR}/libraries")
+    endif()
     target_compile_definitions(anacapa_lib PUBLIC
-        ANACAPA_MATERIALX_LIBRARIES_DIR="${MATERIALX_SOURCE_DIR}/libraries"
+        ANACAPA_MATERIALX_LIBRARIES_DIR="${_ANACAPA_MATERIALX_LIB}"
     )
 endif()
 
@@ -144,7 +150,10 @@ if(ANACAPA_ENABLE_OIDN)
 endif()
 
 if(ANACAPA_ENABLE_CUDA)
-    set(CMAKE_CUDA_STANDARD 17)
+    # OIIO 2.5+ vecparam.h uses C++20-only unevaluated lambdas, and its
+    # ustring.h uses C++20 constexpr helpers.  nvcc 12+ supports C++20; on
+    # nvcc 11 we fall back to C++17 and lose CUDA support for the newer OIIO.
+    set(CMAKE_CUDA_STANDARD 20)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     # Use shared cudart globally — avoids nvlink trying to open the stub librt.a
     # that modern glibc ships (librt functions are merged into libc).
@@ -154,9 +163,22 @@ if(ANACAPA_ENABLE_CUDA)
     set(CUDA_ARCH "75" CACHE STRING "CUDA SM architecture (e.g. 75, 86)")
     set_target_properties(anacapa_lib PROPERTIES
         CUDA_ARCHITECTURES "${CUDA_ARCH}"
-        CUDA_STANDARD 17
+        CUDA_STANDARD 20
         CUDA_STANDARD_REQUIRED ON)
     target_compile_definitions(anacapa_lib PUBLIC ANACAPA_ENABLE_CUDA)
+    # OIIO 2.5+ uses constexpr helpers marked __host__ that inline into
+    # __device__ contexts (via ustring.h → ustringhash) — nvcc needs
+    # --expt-relaxed-constexpr to accept the cross-call.
+    target_compile_options(anacapa_lib PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+    # Skip GCC 11's serializeintrin.h when compiling with older nvcc that
+    # doesn't recognise __builtin_ia32_serialize (Intel SERIALIZE, GCC 11+).
+    # Defining the header guard makes it a no-op — no code in our TUs uses
+    # _serialize() directly.
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.0)
+        target_compile_definitions(anacapa_lib PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:_SERIALIZE_H_INCLUDED>)
+    endif()
     add_subdirectory(src/gpu/cuda)
 endif()
 

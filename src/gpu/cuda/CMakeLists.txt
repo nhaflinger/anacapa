@@ -32,6 +32,7 @@ target_sources(anacapa_lib PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/CudaContext.cu"
     "${CMAKE_CURRENT_SOURCE_DIR}/CudaAccelStructure.cu"
     "${CMAKE_CURRENT_SOURCE_DIR}/CudaPathIntegrator.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/CudaImageLoader.cpp"
 )
 
 target_include_directories(anacapa_lib PRIVATE

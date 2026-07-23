@@ -150,12 +150,30 @@ def is_viewer_running():
 
 
 def launch_viewer(viewer_path):
-    """Kill any stale viewer process, start a fresh one, wait up to 3 s."""
+    """Kill any stale viewer process, start a fresh one, wait up to 3 s.
+    Passes Blender's own OCIO config in the subprocess env so the viewer's
+    color-management panel has Filmic / AgX / Standard / etc. (OCIO's built-in
+    studio and CG configs only ship ACES views — Filmic/AgX are Blender's own
+    additions and live in its bundled config.ocio)."""
     global _viewer_proc
-    import subprocess, time
+    import subprocess, time, os
     if _viewer_proc and _viewer_proc.poll() is None:
         _viewer_proc.terminate()
-    _viewer_proc = subprocess.Popen([viewer_path, "--listen"])
+
+    env = os.environ.copy()
+    if 'OCIO' not in env:
+        # Blender ships its config at <blender>/<ver>/datafiles/colormanagement/config.ocio
+        blender_dir = os.path.dirname(bpy.app.binary_path)
+        for candidate in (
+            os.path.join(blender_dir, f"{bpy.app.version[0]}.{bpy.app.version[1]}",
+                         "datafiles", "colormanagement", "config.ocio"),
+            # Fallback: search a couple version dirs
+        ):
+            if os.path.isfile(candidate):
+                env['OCIO'] = candidate
+                break
+
+    _viewer_proc = subprocess.Popen([viewer_path, "--listen"], env=env)
     deadline = time.time() + 3.0
     while time.time() < deadline:
         if is_viewer_running():

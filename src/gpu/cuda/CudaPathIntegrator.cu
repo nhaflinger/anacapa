@@ -29,6 +29,9 @@
 #include "../../shading/MxGlslToCuda.h"
 #include <nvrtc.h>
 #endif
+#ifdef ANACAPA_ENABLE_OSL
+#include "../../shading/OslMaterial.h"
+#endif
 
 #include <cuda_runtime.h>
 
@@ -38,10 +41,11 @@
 #include <optix_stack_size.h>
 #endif
 
+#include "CudaImageLoader.h"
+
 #include <algorithm>
 #include <cstring>
 #include <random>
-#include <spdlog/spdlog.h>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -50,7 +54,6 @@
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
-#include <OpenImageIO/imageio.h>
 
 #define CUDA_CHECK(call) do { \
     cudaError_t _e = (call); \
@@ -93,19 +96,9 @@ static int32_t loadOrCacheTexture(const std::string& path, bool linearize,
         return -1;
     }
 
-    auto in = OIIO::ImageInput::open(path);
-    if (!in) {
-        fprintf(stderr, "[warn] CudaPathIntegrator: failed to open texture '%s'\n", path.c_str());
-        cache[path] = -1;
-        return -1;
-    }
-    const OIIO::ImageSpec& spec = in->spec();
-    int w = spec.width, h = spec.height, nchans = spec.nchannels;
-    std::vector<float> pixels(size_t(w) * size_t(h) * size_t(nchans));
-    bool ok = in->read_image(0, 0, 0, nchans, OIIO::TypeDesc::FLOAT, pixels.data());
-    in->close();
-    if (!ok || w <= 0 || h <= 0) {
-        fprintf(stderr, "[warn] CudaPathIntegrator: failed to read texture '%s'\n", path.c_str());
+    std::vector<float> pixels;
+    int w = 0, h = 0, nchans = 0;
+    if (!readCudaImagePixels(path, pixels, w, h, nchans)) {
         cache[path] = -1;
         return -1;
     }
@@ -206,28 +199,12 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat,
         return gm;
     }
 
-#ifdef ANACAPA_ENABLE_MATERIALX
-    // MaterialX-codegen'd procedural material — literal fallback values come
-    // from MaterialXMaterial's own CPU-fallback fields; the GPU path
-    // overrides base_color/roughness/metalness at shade time via
-    // mxDispatchIdx when procedural (see the kMatMaterialX resolve block in
-    // Shade.cu). Mirrors the Metal backend's extractGpuMaterial() exactly.
-    if (const auto* mxMat = dynamic_cast<const MaterialXMaterial*>(mat)) {
-        gm.type = kMatMaterialX;
-        SurfaceInteraction si; si.n = si.ng = {0,0,1};
-        ShadingContext ctx(si, {0,0,1});
-        Spectrum alb = mxMat->reflectance(ctx);
-        gm.baseColor = {alb.x, alb.y, alb.z};
-        gm.roughness = mxMat->roughness();
-        gm.metalness = mxMat->metalness();
-        if (mxDispatchMap) {
-            auto it = mxDispatchMap->find(materialIdx);
-            if (it != mxDispatchMap->end())
-                gm.mxDispatchIdx = static_cast<int32_t>(it->second);
-        }
-        return gm;
-    }
-#endif
+    // NOTE: MaterialX-counterpart reclassification lives AFTER the emission /
+    // translucent / glass checks below.  Placing it here (before those) would
+    // reclassify e.g. glass bottles that carry procedural roughness as opaque
+    // kMatMaterialX → kMatGGX and silently discard their transmission — the
+    // exact symptom that motivated moving it.  Mirrors Metal's placement in
+    // MetalPathIntegrator::extractGpuMaterial().
 
     // Sample emission and reflectance up front for every material — UsdPreview-
     // Surface lights load as StandardSurfaceMaterial with emissive_color set, not
@@ -262,6 +239,25 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat,
             gm.baseColor = {tint.x, tint.y, tint.z};
             gm.scatter   = ssm->params().scatter;
             return gm;
+        }
+        // OslMaterial equivalent: an OSL shader whose dominant lobe is
+        // translucent_bsdf (Blender's Translucent BSDF → DiffuseTrans lobe)
+        // sets transmittanceColor() to non-black but leaves transmissionWeight()
+        // at 0 (that's only fed by GGXTrans/GGXBoth glass lobes).  The
+        // per-tri OSL executor does the right thing on CPU because closures
+        // run natively; on GPU we need to route this to kMatTranslucent
+        // explicitly or the fallback path renders it as opaque Lambert.
+        if (!ssm) {
+            SurfaceInteraction si; si.n = si.ng = {0,0,1};
+            ShadingContext ctx(si, {0,0,-1});
+            Spectrum tint = mat->transmittanceColor(ctx);
+            const bool hasTransmittance = (tint.x > 0.01f || tint.y > 0.01f || tint.z > 0.01f);
+            const bool hasGlassLobe     = (mat->transmissionWeight() > 0.1f);
+            if (hasTransmittance && !hasGlassLobe) {
+                gm.type = kMatTranslucent;
+                gm.baseColor = {tint.x, tint.y, tint.z};
+                return gm;
+            }
         }
     }
 
@@ -307,6 +303,59 @@ static GpuMaterial extractGpuMaterial(const IMaterial* mat,
             return gm;
         }
     }
+
+#ifdef ANACAPA_ENABLE_MATERIALX
+    // MaterialX-codegen'd procedural material.  Two arrival paths:
+    //   1. mat is a MaterialXMaterial directly (OSL disabled / no .osl on
+    //      disk / --skip-osl).  Static base/rough/metalness fall back to
+    //      MaterialXMaterial's own stub defaults.
+    //   2. mat is an OslMaterial with an attached MaterialXMaterial counterpart
+    //      (USDLoader Phase 4b — the common case when OSL succeeds for CPU).
+    //      Only qualifies when at least one of base_color / specular_roughness
+    //      / base_metalness is actually procedural in the .mtlx — otherwise
+    //      the counterpart's literals are strictly worse than OslMaterial's
+    //      real probed values.
+    //
+    // Placed AFTER the emission / translucent / glass checks so those still
+    // take priority using mat's real Le() / transmittanceColor() — a glass
+    // bottle whose base_color happens to be procedural must still classify
+    // as kMatGlass, not opaque kMatMaterialX.  Mirrors Metal's placement.
+    //
+    // Static base/rough/metalness come from `mat` (OslMaterial's probed values
+    // — the counterpart's are stub defaults) so any procedural input whose
+    // codegen didn't compile still falls back to something meaningful.
+    {
+        const MaterialXMaterial* mxMat = dynamic_cast<const MaterialXMaterial*>(mat);
+#ifdef ANACAPA_ENABLE_OSL
+        if (!mxMat) {
+            if (const IMaterial* counterpart = oslGetMaterialXCounterpart(mat)) {
+                if (const auto* cp = dynamic_cast<const MaterialXMaterial*>(counterpart)) {
+                    if (cp->generated("base_color") || cp->generated("specular_roughness") ||
+                        cp->generated("base_metalness")) {
+                        mxMat = cp;
+                    }
+                }
+            }
+        }
+#endif
+        if (mxMat) {
+            gm.type = kMatMaterialX;
+            SurfaceInteraction si; si.n = si.ng = {0,0,1};
+            ShadingContext ctx(si, {0,0,1});
+            Spectrum alb = mat->reflectance(ctx);
+            gm.baseColor = {alb.x, alb.y, alb.z};
+            gm.roughness = mat->roughness();
+            gm.metalness = mat->metalness();
+            if (mxDispatchMap) {
+                auto it = mxDispatchMap->find(materialIdx);
+                if (it != mxDispatchMap->end())
+                    gm.mxDispatchIdx = static_cast<int32_t>(it->second);
+            }
+            return gm;
+        }
+    }
+#endif
+
     // Any StandardSurfaceMaterial (including diffuse-flagged ones — Cornell
     // walls land here) goes through the GGX layered model so the GPU shader
     // can apply the same spec/diff balance + Disney retro-reflection +
@@ -464,6 +513,11 @@ struct CudaPathIntegrator::Impl {
     CudaBuffer<GpuAccumPixel> d_accum;
     uint32_t                  accumWidth  = 0;
     uint32_t                  accumHeight = 0;
+
+    // Persistent wavefront ray-state buffer for renderFrameWavefront().
+    // Sized filmW*filmH*kBatchSize; resized on dimension change.
+    CudaBuffer<WfRayState>    d_wfRays;
+    uint32_t                  wfRayCount  = 0;
 
     cudaArray_t         envArray   = nullptr;
     cudaTextureObject_t envTex     = 0;
@@ -687,8 +741,23 @@ bool nvrtcCompileToPtx(const std::string& src, const std::string& name, std::str
     if (nvrtcCreateProgram(&prog, src.c_str(), name.c_str(), 0, nullptr, nullptr) != NVRTC_SUCCESS)
         return false;
     std::string archOpt = std::string("--gpu-architecture=compute_") + ANACAPA_CUDA_ARCH;
-    const char* opts[] = { archOpt.c_str() };
-    nvrtcResult compileRes = nvrtcCompileProgram(prog, 1, opts);
+    // MaterialX's genglsl helper functions (mx_square, mx_floorfrac, ...) come
+    // in without any __device__ annotation because GLSL has no such concept.
+    // -default-device tells nvrtc to treat every unannotated function as
+    // __device__ — otherwise every helper triggers "host functions are not
+    // allowed in JIT mode" and nothing compiles.
+    //
+    // -rdc=true + --keep-device-functions: our OptiX direct callable is a
+    // `__device__` function with no `__global__` caller in this translation
+    // unit.  Without these flags nvrtc treats it as unreferenced and strips
+    // the whole module (optixModuleCreate then rejects it with
+    // OPTIX_ERROR_INVALID_INPUT and prints '0 basic blocks').
+    const char* opts[] = {
+        archOpt.c_str(),
+        "-default-device",
+        "-rdc=true",  // preserve extern-linkage __device__ funcs (our callable)
+    };
+    nvrtcResult compileRes = nvrtcCompileProgram(prog, 3, opts);
     if (compileRes != NVRTC_SUCCESS) {
         size_t logSize = 0;
         nvrtcGetProgramLogSize(prog, &logSize);
@@ -762,7 +831,25 @@ MxCudaBuild buildMaterialXCallables(OptixDeviceContext ctx,
     };
 
     for (uint32_t i = 0; i < materials.size(); ++i) {
-        const auto* mxMat = dynamic_cast<const MaterialXMaterial*>(materials[i]);
+        const MaterialXMaterial* mxMat = dynamic_cast<const MaterialXMaterial*>(materials[i]);
+#ifdef ANACAPA_ENABLE_OSL
+        if (!mxMat) {
+            // OslMaterial with an attached MaterialX GPU counterpart
+            // (USDLoader Phase 4b — OSL succeeded for CPU, counterpart gives
+            // GPU real per-pixel procedural shading).  Only counts when at
+            // least one input is actually procedural; must match the identical
+            // gate in extractGpuMaterial() above, or materials it decides NOT
+            // to reclassify would still consume a dispatch slot here.
+            if (const IMaterial* counterpart = oslGetMaterialXCounterpart(materials[i])) {
+                if (const auto* cp = dynamic_cast<const MaterialXMaterial*>(counterpart)) {
+                    if (cp->generated("base_color") || cp->generated("specular_roughness") ||
+                        cp->generated("base_metalness")) {
+                        mxMat = cp;
+                    }
+                }
+            }
+        }
+#endif
         if (!mxMat) continue;
 
         MxDispatchEntry entry{};
@@ -796,6 +883,13 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx,
 #ifdef ANACAPA_ENABLE_MATERIALX
     for (const IMaterial* m : materials) {
         if (dynamic_cast<const MaterialXMaterial*>(m)) { hasMx = true; break; }
+#ifdef ANACAPA_ENABLE_OSL
+        // OslMaterial with an attached MaterialX GPU counterpart also
+        // qualifies — the common USDLoader Phase 4b arrival path.
+        if (const IMaterial* cp = oslGetMaterialXCounterpart(m)) {
+            if (dynamic_cast<const MaterialXMaterial*>(cp)) { hasMx = true; break; }
+        }
+#endif
     }
 #endif
     if (optixReady) {
@@ -904,10 +998,20 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx,
 #ifdef ANACAPA_ENABLE_MATERIALX
     allPgs.insert(allPgs.end(), mxPgs.begin(), mxPgs.end());
 #endif
-    logSize = sizeof(log);
-    OPTIX_CHECK(optixPipelineCreate(ctx, &pipeOpts, &linkOpts,
-                                    allPgs.data(), static_cast<unsigned int>(allPgs.size()),
-                                    log, &logSize, &wfPipeline));
+    // Enlarged log buffer — OptiX truncates its link error to whatever we
+    // pass, and with hundreds of MaterialX callables the log grows past 4KB.
+    std::vector<char> linkLog(64 * 1024, 0);
+    size_t linkLogSize = linkLog.size();
+    OptixResult pipeRes = optixPipelineCreate(
+        ctx, &pipeOpts, &linkOpts,
+        allPgs.data(), static_cast<unsigned int>(allPgs.size()),
+        linkLog.data(), &linkLogSize, &wfPipeline);
+    if (pipeRes != OPTIX_SUCCESS) {
+        fprintf(stderr, "[error] OptiX %d (%s) at %s:%d\n%s\n",
+                int(pipeRes), optixGetErrorName(pipeRes), __FILE__, __LINE__,
+                linkLog.data());
+        return false;
+    }
 
     OptixStackSizes wfStack{};
     for (OptixProgramGroup pg : allPgs)
@@ -924,6 +1028,13 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx,
                                                /*maxCCDepth=*/0,
                                                maxDCDepth,
                                                &dcStackTrav2, &dcStackState2, &contStack2));
+        // OptiX rejects per-category stack sizes above its internal limit
+        // (64 KB); with hundreds of MaterialX callables the computed size can
+        // overshoot.  Cap well under so optixPipelineSetStackSize succeeds.
+        const uint32_t kMaxStack = 32 * 1024;
+        if (dcStackTrav2  > kMaxStack) dcStackTrav2  = kMaxStack;
+        if (dcStackState2 > kMaxStack) dcStackState2 = kMaxStack;
+        if (contStack2    > kMaxStack) contStack2    = kMaxStack;
         OPTIX_CHECK(optixPipelineSetStackSize(wfPipeline,
                                               dcStackTrav2, dcStackState2, contStack2,
                                               /*maxTraversableDepth=*/2));
@@ -1441,6 +1552,17 @@ bool CudaPathIntegrator::Impl::renderFrameWavefront(
                 tb.add(px, py, p.r / w, p.g / w, p.b / w, w);
                 tb.addLumSq(px, py, p.sumLumSq);
                 tb.addAlpha(px, py, p.alpha / w, w);
+                // Denoise-guide AOVs — Shade.cu atomic-adds first-hit
+                // albedo/normal into the accum and counts contributing
+                // samples in aovCount.  Skipping this readback left Film's
+                // m_albedo/m_normals empty, so RenderSession sent no
+                // AOV_IMAGE for kAovAlbedo/kAovNormals and the viewer
+                // couldn't show them.
+                if (p.aovCount > 0.f) {
+                    float inv = 1.f / p.aovCount;
+                    tb.addAlbedo(px, py, {p.albedoR * inv, p.albedoG * inv, p.albedoB * inv});
+                    tb.addNormal(px, py, {p.normalR * inv, p.normalG * inv, p.normalB * inv});
+                }
             }
         }
         film.mergeTile(tb);
@@ -1581,6 +1703,12 @@ void CudaPathIntegrator::Impl::renderTileWavefront(
             out.add(tx, ty, p.r / w, p.g / w, p.b / w, w);
             out.addLumSq(tx, ty, p.sumLumSq);
             out.addAlpha(tx, ty, p.alpha / w, w);
+            // See renderFrameWavefront's flushToFilm — same AOV readback.
+            if (p.aovCount > 0.f) {
+                float inv = 1.f / p.aovCount;
+                out.addAlbedo(tx, ty, {p.albedoR * inv, p.albedoG * inv, p.albedoB * inv});
+                out.addNormal(tx, ty, {p.normalR * inv, p.normalG * inv, p.normalB * inv});
+            }
         }
     }
 }
@@ -1658,8 +1786,8 @@ void CudaPathIntegrator::prepare(const SceneView& scene) {
         m_impl->d_materialTextures = CudaBuffer<cudaTextureObject_t>(m_impl->materialTexObjects.size());
         m_impl->d_materialTextures.upload(m_impl->materialTexObjects);
     }
-    spdlog::info("CudaPathIntegrator::prepare — {} material textures loaded into atlas",
-                 m_impl->materialTexObjects.size());
+    printf("[info]  CudaPathIntegrator::prepare — %zu material textures loaded into atlas\n",
+           m_impl->materialTexObjects.size());
 
     // Hair materials — one slot per scene material, even on non-hair slots
     // (the raygen indexes by the strand's material index, not by GpuMaterial type).
@@ -1709,8 +1837,8 @@ void CudaPathIntegrator::prepare(const SceneView& scene) {
             m_impl->d_haloPrimIdx = CudaBuffer<uint32_t>(primIdx.size());
             m_impl->d_haloPrimIdx.upload(primIdx);
         }
-        spdlog::info("CudaPathIntegrator: uploaded {} halo particles ({} BVH nodes)",
-                     gpuHalos.size(), nodes.size());
+        printf("[info]  CudaPathIntegrator: uploaded %zu halo particles (%zu BVH nodes)\n",
+               gpuHalos.size(), nodes.size());
     }
 
     // Lights

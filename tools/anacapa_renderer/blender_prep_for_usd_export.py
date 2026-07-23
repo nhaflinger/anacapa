@@ -4740,13 +4740,34 @@ def _export_materialx_graphs(out_dir: str):
     print()
     print(f"  Exporting MaterialX graphs → {out_dir}")
 
+    # Any BSDF type _MtlxBuilder knows how to translate is fair game as the
+    # terminal shader — _MtlxBuilder.build() follows Material Output → Surface
+    # so a material whose root is e.g. BSDF_GLASS (glass bottles) no longer
+    # gets skipped and rendered with a default UsdPreviewSurface.
+    _SUPPORTED_BSDF_TYPES = {
+        'BSDF_PRINCIPLED', 'BSDF_DIFFUSE', 'BSDF_GLOSSY', 'BSDF_METALLIC',
+        'BSDF_GLASS', 'BSDF_REFRACTION', 'BSDF_TRANSPARENT', 'BSDF_TRANSLUCENT',
+        'BSDF_TOON', 'BSDF_SHEEN', 'BSDF_HAIR_PRINCIPLED', 'BSDF_HAIR',
+        'EMISSION', 'MIX_SHADER', 'ADD_SHADER',
+    }
     for mat in bpy.data.materials:
         if not mat.use_nodes or not mat.node_tree:
             skipped += 1
             continue
-        bsdf = next((n for n in mat.node_tree.nodes
-                     if n.type == 'BSDF_PRINCIPLED'), None)
-        if bsdf is None:
+        # First look at the Material Output → Surface terminal (matches what
+        # _MtlxBuilder.build() picks) — so non-Principled roots aren't dropped.
+        output_node = next((n for n in mat.node_tree.nodes
+                            if n.type == 'OUTPUT_MATERIAL'), None)
+        terminal = None
+        if output_node:
+            surf_sock = output_node.inputs.get('Surface')
+            if surf_sock and surf_sock.is_linked:
+                terminal = surf_sock.links[0].from_node
+        # Legacy fallback: any Principled BSDF in the graph.
+        if terminal is None:
+            terminal = next((n for n in mat.node_tree.nodes
+                             if n.type == 'BSDF_PRINCIPLED'), None)
+        if terminal is None or terminal.type not in _SUPPORTED_BSDF_TYPES:
             skipped += 1
             continue
         try:
@@ -4833,6 +4854,10 @@ def _generate_osl_from_mtlx_dir(mtlx_dir: str, mx_lib_path: str):
     osl_errors   = 0
     # Maps mtlx filename → raw generated OSL source, collected before writing
     generated: list = []  # [(osl_path, osl_source), ...]
+    # Dedupe the per-file validation warnings — the same nodedef error can fire
+    # once per material and produce hundreds of identical lines that drown out
+    # everything else in the render log.  Track message→file-count instead.
+    _validation_msg_files: dict = {}
 
     for fname in sorted(os.listdir(mtlx_dir)):
         if not fname.endswith('.mtlx'):
@@ -4847,7 +4872,7 @@ def _generate_osl_from_mtlx_dir(mtlx_dir: str, mx_lib_path: str):
 
             valid, msg = doc.validate()
             if not valid:
-                print(f"  [osl gen] WARNING: {fname} validation errors: {msg}")
+                _validation_msg_files.setdefault(msg.strip(), []).append(fname)
 
             mat_nodes = [n for n in doc.getNodes()
                          if n.getCategory() == 'surfacematerial']
@@ -4872,6 +4897,12 @@ def _generate_osl_from_mtlx_dir(mtlx_dir: str, mx_lib_path: str):
             except Exception:
                 pass
             osl_errors += 1
+
+    # Emit a single-line summary per unique validation message rather than one
+    # line per file (see _validation_msg_files above).
+    for _msg, _files in _validation_msg_files.items():
+        _snippet = _msg[:120] + ("…" if len(_msg) > 120 else "")
+        print(f"  [osl gen] WARNING: {len(_files)} material(s) failed validation: {_snippet}")
 
     if not generated:
         print(f"  [osl gen] Generated 0 OSL shader(s)"
