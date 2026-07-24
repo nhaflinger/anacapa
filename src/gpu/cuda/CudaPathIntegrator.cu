@@ -736,6 +736,19 @@ struct MxCudaBuild {
     std::unordered_map<uint32_t, uint32_t> dispatchIndexForMaterial;
 };
 
+// Gate for per-material / per-shader-compile chatter (unsupported uniforms,
+// nvrtc failures, optixModule/optixProgramGroup failures, pipeline-ready
+// info line, MaterialX GPU summary, etc.).  Silent by default so a scene
+// with hundreds of MaterialX materials doesn't spam the console; opt in with
+// `ANACAPA_DEBUG_MATERIALS=1` (any nonempty value) when diagnosing.
+static bool materialDebugOn() {
+    static const bool on = [] {
+        const char* v = std::getenv("ANACAPA_DEBUG_MATERIALS");
+        return v && v[0] != '\0';
+    }();
+    return on;
+}
+
 bool nvrtcCompileToPtx(const std::string& src, const std::string& name, std::string& outPtx) {
     nvrtcProgram prog;
     if (nvrtcCreateProgram(&prog, src.c_str(), name.c_str(), 0, nullptr, nullptr) != NVRTC_SUCCESS)
@@ -759,12 +772,14 @@ bool nvrtcCompileToPtx(const std::string& src, const std::string& name, std::str
     };
     nvrtcResult compileRes = nvrtcCompileProgram(prog, 3, opts);
     if (compileRes != NVRTC_SUCCESS) {
-        size_t logSize = 0;
-        nvrtcGetProgramLogSize(prog, &logSize);
-        std::string log(logSize, '\0');
-        if (logSize > 0) nvrtcGetProgramLog(prog, &log[0]);
-        fprintf(stderr, "[warn]  CudaPathIntegrator: nvrtc compile failed for '%s':\n%s\n",
-                name.c_str(), log.c_str());
+        if (materialDebugOn()) {
+            size_t logSize = 0;
+            nvrtcGetProgramLogSize(prog, &logSize);
+            std::string log(logSize, '\0');
+            if (logSize > 0) nvrtcGetProgramLog(prog, &log[0]);
+            fprintf(stderr, "[warn]  CudaPathIntegrator: nvrtc compile failed for '%s':\n%s\n",
+                    name.c_str(), log.c_str());
+        }
         nvrtcDestroyProgram(&prog);
         return false;
     }
@@ -801,8 +816,9 @@ MxCudaBuild buildMaterialXCallables(OptixDeviceContext ctx,
         OptixResult r = optixModuleCreate(ctx, &modOpts, &pipeOpts,
                                           ptx.c_str(), ptx.size(), log, &logSize, &mod);
         if (r != OPTIX_SUCCESS) {
-            fprintf(stderr, "[warn]  CudaPathIntegrator: optixModuleCreate failed for '%s': %s\n",
-                    wrapperName.c_str(), log);
+            if (materialDebugOn())
+                fprintf(stderr, "[warn]  CudaPathIntegrator: optixModuleCreate failed for '%s': %s\n",
+                        wrapperName.c_str(), log);
             return {ANACAPA_MX_NO_FUNCTION, 0u};
         }
         build.modules.push_back(mod);
@@ -816,8 +832,9 @@ MxCudaBuild buildMaterialXCallables(OptixDeviceContext ctx,
         logSize = sizeof(log);
         r = optixProgramGroupCreate(ctx, &pgDesc, 1, &pgOpts, log, &logSize, &pg);
         if (r != OPTIX_SUCCESS) {
-            fprintf(stderr, "[warn]  CudaPathIntegrator: optixProgramGroupCreate failed for '%s': %s\n",
-                    wrapperName.c_str(), log);
+            if (materialDebugOn())
+                fprintf(stderr, "[warn]  CudaPathIntegrator: optixProgramGroupCreate failed for '%s': %s\n",
+                        wrapperName.c_str(), log);
             return {ANACAPA_MX_NO_FUNCTION, 0u};
         }
 
@@ -866,9 +883,10 @@ MxCudaBuild buildMaterialXCallables(OptixDeviceContext ctx,
         build.dispatchEntries.push_back(entry);
     }
 
-    printf("[info]  CudaPathIntegrator: MaterialX GPU shading — %zu generated function(s), "
-           "%zu material(s) using procedural inputs\n",
-           build.pgs.size(), build.dispatchIndexForMaterial.size());
+    if (materialDebugOn())
+        printf("[info]  CudaPathIntegrator: MaterialX GPU shading — %zu generated function(s), "
+               "%zu material(s) using procedural inputs\n",
+               build.pgs.size(), build.dispatchIndexForMaterial.size());
 
     return build;
 }
@@ -1111,7 +1129,8 @@ bool CudaPathIntegrator::Impl::buildOptixPipeline(OptixDeviceContext ctx,
     d_launchParams = CudaBuffer<LaunchParams>(1);
 
     optixReady = true;
-    printf("[info]  CudaPathIntegrator: OptiX pipeline ready\n");
+    if (materialDebugOn())
+        printf("[info]  CudaPathIntegrator: OptiX pipeline ready\n");
     return true;
 }
 

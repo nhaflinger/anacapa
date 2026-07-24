@@ -54,6 +54,17 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace anacapa {
 
+// Gate per-material USD/OSL loader spam behind ANACAPA_DEBUG_MATERIALS.
+// Same env var CudaPathIntegrator + MxGlslToCuda use so a single toggle
+// controls all "material N of M …" chatter across the pipeline.
+static bool materialDebugOn() {
+    static const bool on = [] {
+        const char* v = std::getenv("ANACAPA_DEBUG_MATERIALS");
+        return v && v[0] != '\0';
+    }();
+    return on;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers — convert Gf types to anacapa types
 // ---------------------------------------------------------------------------
@@ -643,9 +654,10 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
             GfVec3f cv;
             if (mat.GetPrim().GetAttribute(TfToken("anacapa:translucency:color")).Get(&cv))
                 color = {cv[0], cv[1], cv[2]};
-            spdlog::info("USDLoader: material '{}' → translucent (anacapa flag, "
-                         "color=({:.2f},{:.2f},{:.2f}))",
-                         mat.GetPath().GetString(), color.x, color.y, color.z);
+            if (materialDebugOn())
+                spdlog::info("USDLoader: material '{}' → translucent (anacapa flag, "
+                             "color=({:.2f},{:.2f},{:.2f}))",
+                             mat.GetPath().GetString(), color.x, color.y, color.z);
             StandardSurfaceMaterial::Params p;
             p.base               = 0.f;
             p.translucency       = 1.f;
@@ -675,9 +687,10 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                 float s;
                 if (strengthIn.GetAttr().Get(&s)) scatter = std::max(0.f, std::min(1.f, s));
             }
-            spdlog::info("USDLoader: material '{}' → translucent "
-                         "(color=({:.2f},{:.2f},{:.2f}) scatter={:.2f})",
-                         mat.GetPath().GetString(), color.x, color.y, color.z, scatter);
+            if (materialDebugOn())
+                spdlog::info("USDLoader: material '{}' → translucent "
+                             "(color=({:.2f},{:.2f},{:.2f}) scatter={:.2f})",
+                             mat.GetPath().GetString(), color.x, color.y, color.z, scatter);
             StandardSurfaceMaterial::Params p;
             p.base               = 0.f;
             p.translucency       = 1.f;
@@ -717,7 +730,8 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                     needCompile = true;
                 }
                 if (needCompile) {
-                    spdlog::info("USDLoader: compiling OSL shader '{}'", oslPath);
+                    if (materialDebugOn())
+                        spdlog::info("USDLoader: compiling OSL shader '{}'", oslPath);
                     if (!oslCompileShader(oslPath, osoPath, matDir)) return nullptr;
                 }
             }
@@ -729,8 +743,9 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                 s_registeredDir = matDir;
             }
 
-            spdlog::info("USDLoader: material '{}' → OslMaterial ('{}')",
-                         mat.GetPath().GetString(), name);
+            if (materialDebugOn())
+                spdlog::info("USDLoader: material '{}' → OslMaterial ('{}')",
+                             mat.GetPath().GetString(), name);
             auto m = makeOslMaterial(name);
             if (!m)
                 spdlog::warn("USDLoader: OslMaterial load failed for '{}'; "
@@ -793,8 +808,9 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                         preview.GetInput(TfToken("anacapa_subsurface_strength")), 1.0f, stageDir).value;
                     if (strength <= 0.f) strength = 1.f;
                     oslSetSubsurfaceParams(osl.get(), sssWeight, sssColor.value, radius, aniso, strength);
-                    spdlog::info("USDLoader: OSL material '{}' SSS weight={:.3f} radius={:.4f}",
-                                 mat.GetPrim().GetName().GetString(), sssWeight, radius);
+                    if (materialDebugOn())
+                        spdlog::info("USDLoader: OSL material '{}' SSS weight={:.3f} radius={:.4f}",
+                                     mat.GetPrim().GetName().GetString(), sssWeight, radius);
                 }
             }
 #ifdef ANACAPA_ENABLE_MATERIALX
@@ -816,8 +832,9 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
                     std::string mtlxPath = matDir + "/" + name + ".mtlx";
                     if (!std::filesystem::exists(mtlxPath)) return false;
                     oslSetMaterialXCounterpart(osl.get(), std::make_unique<MaterialXMaterial>(mtlxPath));
-                    spdlog::info("USDLoader: material '{}' OSL + MaterialX GPU counterpart ('{}')",
-                                 mat.GetPath().GetString(), name);
+                    if (materialDebugOn())
+                        spdlog::info("USDLoader: material '{}' OSL + MaterialX GPU counterpart ('{}')",
+                                     mat.GetPath().GetString(), name);
                     return true;
                 };
                 bool foundMtlx = tryMtlxCounterpart(blenderName);
@@ -848,8 +865,9 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
             std::string matDir   = stageDir + "/materials";
             std::string mtlxPath = matDir + "/" + name + ".mtlx";
             if (!std::filesystem::exists(mtlxPath)) return nullptr;
-            spdlog::info("USDLoader: material '{}' → MaterialXMaterial ('{}')",
-                         mat.GetPath().GetString(), name);
+            if (materialDebugOn())
+                spdlog::info("USDLoader: material '{}' → MaterialXMaterial ('{}')",
+                             mat.GetPath().GetString(), name);
             return std::make_unique<MaterialXMaterial>(mtlxPath);
         };
 
@@ -962,8 +980,9 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
 
     UsdShadeShader surface = mat.ComputeSurfaceSource();
     if (!surface) {
-        spdlog::info("USDLoader: mat '{}' → no surface shader found",
-                     mat.GetPrim().GetName().GetString());
+        if (materialDebugOn())
+            spdlog::info("USDLoader: mat '{}' → no surface shader found",
+                         mat.GetPrim().GetName().GetString());
         // No surface shader exported — check if the material name implies glass.
         // Blender's Glass BSDF nodes are not translated by the USD exporter and
         // result in an empty material shell. Detect by name and substitute glass.
@@ -975,9 +994,10 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
         if (nameAttr) nameAttr.Get(&blenderName);
 
         if (isGlassName(matName) || isGlassName(blenderName)) {
-            spdlog::info("USDLoader: material '{}' has no surface shader — "
-                         "name suggests glass, substituting glass material",
-                         mat.GetPath().GetString());
+            if (materialDebugOn())
+                spdlog::info("USDLoader: material '{}' has no surface shader — "
+                             "name suggests glass, substituting glass material",
+                             mat.GetPath().GetString());
             return makeGlassMaterial(1.5f);
         }
         return std::make_unique<LambertianMaterial>(Spectrum{0.5f, 0.5f, 0.5f});
@@ -986,12 +1006,14 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
     TfToken shaderId;
     surface.GetShaderId(&shaderId);
 
-    spdlog::info("USDLoader: mat '{}' → UsdPreviewSurface path (shaderId='{}')",
-                 mat.GetPrim().GetName().GetString(), shaderId.GetString());
+    if (materialDebugOn())
+        spdlog::info("USDLoader: mat '{}' → UsdPreviewSurface path (shaderId='{}')",
+                     mat.GetPrim().GetName().GetString(), shaderId.GetString());
 
     if (shaderId != TfToken("UsdPreviewSurface")) {
-        spdlog::info("USDLoader: mat '{}' → shaderId mismatch → Lambertian(0.5)",
-                     mat.GetPrim().GetName().GetString());
+        if (materialDebugOn())
+            spdlog::info("USDLoader: mat '{}' → shaderId mismatch → Lambertian(0.5)",
+                         mat.GetPrim().GetName().GetString());
         return std::make_unique<LambertianMaterial>(Spectrum{0.5f, 0.5f, 0.5f});
     }
 
@@ -1126,7 +1148,8 @@ static std::unique_ptr<IMaterial> resolveMaterial(const UsdShadeMaterial& mat,
         p.caustic_radius = crVal;
     }
 
-    spdlog::info("USDLoader: mat '{}' → StandardSurface "
+    if (materialDebugOn())
+        spdlog::info("USDLoader: mat '{}' → StandardSurface "
                  "diffuse=({:.3f},{:.3f},{:.3f}) sss={:.3f} sss_color=({:.3f},{:.3f},{:.3f}) "
                  "rough={:.3f} spec={:.3f} metal={:.3f} opacity={:.3f}",
                  mat.GetPrim().GetName().GetString(),
@@ -1616,8 +1639,9 @@ LoadedScene loadUSD(const std::string& path,
         if (sidecarFile.is_open()) {
             try {
                 nlohmann::json sidecar = nlohmann::json::parse(sidecarFile);
-                spdlog::info("USDLoader: MaterialX sidecar loaded — {} material(s) in '{}'",
-                             static_cast<int>(sidecar.size()), sidecarPath);
+                if (materialDebugOn())
+                    spdlog::info("USDLoader: MaterialX sidecar loaded — {} material(s) in '{}'",
+                                 static_cast<int>(sidecar.size()), sidecarPath);
                 for (auto& [matPath, matData] : sidecar.items()) {
                     SidecarMat sm;
                     if (matData.contains("root") && matData.contains("nodes")) {
@@ -1798,8 +1822,9 @@ LoadedScene loadUSD(const std::string& path,
             std::vector<MotionKey> motionKeys;
             if (enableMotionBlur && hasMotion) {
                 motionKeys = collectMotionKeys(prim, tcOpenVal, tcCloseVal, zUp);
-                spdlog::info("USDLoader: animated mesh '{}' — {} motion key(s)",
-                             prim.GetPath().GetString(), motionKeys.size());
+                if (materialDebugOn())
+                    spdlog::info("USDLoader: animated mesh '{}' — {} motion key(s)",
+                                 prim.GetPath().GetString(), motionKeys.size());
             } else if (enableMotionBlur) {
                 spdlog::debug("USDLoader: mesh '{}' has no motion in [{:.3f}, {:.3f}]",
                               prim.GetPath().GetString(), tcOpenVal, tcCloseVal);
@@ -1945,9 +1970,10 @@ LoadedScene loadUSD(const std::string& path,
                         }
                     }
 
-                    spdlog::info("USDLoader: mesh '{}' subset residual: {} → {} tris",
-                                 fullMesh.name, fullMesh.numTriangles(),
-                                 residual.numTriangles());
+                    if (materialDebugOn())
+                        spdlog::info("USDLoader: mesh '{}' subset residual: {} → {} tris",
+                                     fullMesh.name, fullMesh.numTriangles(),
+                                     residual.numTriangles());
                     result.geomPool.replaceMesh(meshID, std::move(residual));
                 }
             }
@@ -2021,9 +2047,10 @@ LoadedScene loadUSD(const std::string& path,
                     result.haloPool.addHalo(h);
                     ++haloCount;
                 }
-                spdlog::info(
-                    "USDLoader: instancer '{}' → {} halo discs (no prototype geometry)",
-                    prim.GetPath().GetString(), haloCount);
+                if (materialDebugOn())
+                    spdlog::info(
+                        "USDLoader: instancer '{}' → {} halo discs (no prototype geometry)",
+                        prim.GetPath().GetString(), haloCount);
             };
 
             SdfPathVector protoPaths;
@@ -2186,8 +2213,9 @@ LoadedScene loadUSD(const std::string& path,
                         spp.color            = sit->second.emission;
                         spp.emissionStrength = 1.f;
                         spp.opacity          = sit->second.opacity;
-                        spdlog::info("USDLoader: particle sidecar → color=({:.2f},{:.2f},{:.2f}) opacity={:.2f}",
-                                     spp.color.x, spp.color.y, spp.color.z, spp.opacity);
+                        if (materialDebugOn())
+                            spdlog::info("USDLoader: particle sidecar → color=({:.2f},{:.2f},{:.2f}) opacity={:.2f}",
+                                         spp.color.x, spp.color.y, spp.color.z, spp.opacity);
                         return true;
                     }
                     return false;
@@ -2226,7 +2254,7 @@ LoadedScene loadUSD(const std::string& path,
                     }
                 }
 
-                if (!found)
+                if (!found && materialDebugOn())
                     spdlog::info("USDLoader: GeomPoints '{}' — no sidecar material, using defaults",
                                  prim.GetPath().GetString());
 
@@ -2284,8 +2312,9 @@ LoadedScene loadUSD(const std::string& path,
                 result.haloPool.addHalo(h);
                 ++addedCount;
             }
-            spdlog::info("USDLoader: GeomPoints '{}' → {} halo discs",
-                         prim.GetPath().GetString(), addedCount);
+            if (materialDebugOn())
+                spdlog::info("USDLoader: GeomPoints '{}' → {} halo discs",
+                             prim.GetPath().GetString(), addedCount);
         }
 
         // ---- RectLight ----

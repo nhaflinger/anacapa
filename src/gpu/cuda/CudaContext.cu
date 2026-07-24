@@ -97,7 +97,10 @@ std::unique_ptr<CudaContext> CudaContext::create() {
     }
     OptixDeviceContextOptions opts{};
     opts.logCallbackFunction = &optixLogCallback;
-    opts.logCallbackLevel    = 4;  // info and below
+    // Level 3 = warnings and errors.  Level 4 (info) also fires per-module
+    // DISKCACHE hit/miss lines and COMPILER "Compile Summary" blurbs; with
+    // hundreds of MaterialX callable modules that floods the console.
+    opts.logCallbackLevel    = 3;
     // Validation mode adds runtime checks (SBT, AS sanity, etc.) at the cost
     // of throughput.  Turn on for development; off in release.
 #ifndef NDEBUG

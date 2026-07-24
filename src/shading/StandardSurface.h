@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 namespace anacapa {
 
@@ -366,11 +367,18 @@ public:
             hp.beta_n = std::clamp(m_p.roughness.value * 1.5f, 0.30f, 0.90f);
             if (m_p.specular_IOR > 1.f) hp.eta = m_p.specular_IOR;
             m_hairFallback = MarschnerHairMaterial(hp);
-            fprintf(stderr,
-                "[StandardSurface hair] baseColor=(%.3f,%.3f,%.3f) "
-                "chroma=%.3f sigma_a=(%.3f,%.3f,%.3f)\n",
-                bc.x, bc.y, bc.z, bcMax - bcMin,
-                hp.sigma_a.x, hp.sigma_a.y, hp.sigma_a.z);
+            // Silent unless ANACAPA_DEBUG_MATERIALS is set — see the same
+            // gate in OslMaterial.cpp / USDLoader.cpp / CudaPathIntegrator.cu.
+            static const bool _matDbg = [] {
+                const char* v = std::getenv("ANACAPA_DEBUG_MATERIALS");
+                return v && v[0] != '\0';
+            }();
+            if (_matDbg)
+                fprintf(stderr,
+                    "[StandardSurface hair] baseColor=(%.3f,%.3f,%.3f) "
+                    "chroma=%.3f sigma_a=(%.3f,%.3f,%.3f)\n",
+                    bc.x, bc.y, bc.z, bcMax - bcMin,
+                    hp.sigma_a.x, hp.sigma_a.y, hp.sigma_a.z);
         }
     }
 

@@ -10,6 +10,16 @@ namespace anacapa {
 
 namespace {
 
+// See CudaPathIntegrator.cu — same env var gates all material-pipeline
+// chatter across the MaterialX GPU codegen path.  Silent by default.
+static bool materialDebugOn() {
+    static const bool on = [] {
+        const char* v = std::getenv("ANACAPA_DEBUG_MATERIALS");
+        return v && v[0] != '\0';
+    }();
+    return on;
+}
+
 // ---------------------------------------------------------------------------
 // GLSL-compatible vector types + builtins for CUDA. MaterialX's raw GLSL
 // output uses GLSL's native vec2/vec3/vec4 constructor-call syntax and a
@@ -313,9 +323,10 @@ MxCudaAdapterResult buildCudaAdapter(const MxGeneratedShader& gen, const std::st
         int n = componentCount(u.type);
         std::string t = glslType(u.type);
         if (n < 0 || t.empty()) {
-            spdlog::warn("MxGlslToCuda: unsupported uniform type '{}' for '{}' — "
-                         "falling back to the literal GPU material path for this input",
-                         u.type, u.name);
+            if (materialDebugOn())
+                spdlog::warn("MxGlslToCuda: unsupported uniform type '{}' for '{}' — "
+                             "falling back to the literal GPU material path for this input",
+                             u.type, u.name);
             return result;
         }
         unpackDecls.push_back("    " + t + " " + u.name + " = " + unpackExpr(u.type, floatOffset) + ";");
@@ -403,14 +414,16 @@ MxCudaAdapterResult buildCudaAdapter(const MxGeneratedShader& gen, const std::st
     std::string outDecl = "out vec4 " + gen.outputVarName + ";";
     size_t outPos = body.find(outDecl);
     if (outPos == std::string::npos) {
-        spdlog::warn("MxGlslToCuda: expected 'out vec4 {}' declaration not found in generated GLSL", gen.outputVarName);
+        if (materialDebugOn())
+            spdlog::warn("MxGlslToCuda: expected 'out vec4 {}' declaration not found in generated GLSL", gen.outputVarName);
         return result;
     }
     body.erase(outPos, outDecl.size());
 
     size_t mainPos = body.find("void main()");
     if (mainPos == std::string::npos) {
-        spdlog::warn("MxGlslToCuda: 'void main()' not found in generated GLSL for '{}'", wrapperFnName);
+        if (materialDebugOn())
+            spdlog::warn("MxGlslToCuda: 'void main()' not found in generated GLSL for '{}'", wrapperFnName);
         return result;
     }
     size_t bracePos = body.find('{', mainPos);

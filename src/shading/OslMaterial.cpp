@@ -32,6 +32,16 @@
 
 namespace anacapa {
 
+// Same env-var gate CudaPathIntegrator / MxGlslToCuda / USDLoader use.
+// Silences per-material diagnostics unless ANACAPA_DEBUG_MATERIALS=1.
+static bool materialDebugOn() {
+    static const bool on = [] {
+        const char* v = std::getenv("ANACAPA_DEBUG_MATERIALS");
+        return v && v[0] != '\0';
+    }();
+    return on;
+}
+
 // reflect(I, N) = I - 2*dot(N,I)*N
 inline Vec3f oslReflect(Vec3f I, Vec3f N) {
     return I - N * (2.f * dot(N, I));
@@ -573,6 +583,22 @@ static void registerOslClosures(OSL::ShadingSystem* sys) {
         CLOSURE_FINISH_PARAM(OslMarschnerParams) });
 }
 
+// OSL emits WARNING/INFO through an OIIO::ErrorHandler that defaults to
+// stderr — every scene generates dozens of "Unsupported closure keyword
+// arg 'thinfilm_ior' for dielectric_bsdf" lines and similar because our
+// closure registrations don't declare those OpenPBR-side keyword args.
+// This handler drops WARNING/INFO/MESSAGE unless the material-debug flag
+// is on; ERROR/SEVERE always pass through so real failures still surface.
+class AnacapaOslErrorHandler : public OIIO::ErrorHandler {
+public:
+    void operator()(int errcode, const std::string& msg) override {
+        const int cat = errcode & 0xffff0000;
+        const bool alwaysShow = (cat == EH_ERROR) || (cat == EH_SEVERE);
+        if (alwaysShow || materialDebugOn())
+            OIIO::ErrorHandler::operator()(errcode, msg);
+    }
+};
+
 // ===========================================================================
 // OslShadingSystem — singleton
 // ===========================================================================
@@ -617,7 +643,7 @@ private:
         OSL::TextureSystem* texRaw =
             assignTexSys(this, OSL::TextureSystem::create(true));
         m_services = OslRendererServices(texRaw);
-        m_sys = new OSL::ShadingSystem(&m_services, texRaw);
+        m_sys = new OSL::ShadingSystem(&m_services, texRaw, &m_errorHandler);
         registerOslClosures(m_sys);
     }
     ~OslShadingSystem() {
@@ -637,6 +663,7 @@ private:
     std::string          m_searchPaths;
     std::shared_ptr<OSL::TextureSystem> m_textureSystem;  // owned in OIIO 3+
     OSL::TextureSystem*                 m_texRaw = nullptr;  // owned in OIIO 2.x
+    AnacapaOslErrorHandler              m_errorHandler;
 };
 
 // ===========================================================================
@@ -1425,12 +1452,13 @@ public:
             m_hairFallback = MarschnerHairMaterial(hp);
             // Diagnostic: print probed base color and resulting sigma_a so we can
             // verify the correct color is flowing through from the OSL shader.
-            fprintf(stderr,
-                "[OslMaterial hair] shader='%s' baseColor=(%.3f,%.3f,%.3f) "
-                "sigma_a=(%.3f,%.3f,%.3f)\n",
-                m_shaderName.c_str(),
-                m_baseColor.x, m_baseColor.y, m_baseColor.z,
-                hp.sigma_a.x, hp.sigma_a.y, hp.sigma_a.z);
+            if (materialDebugOn())
+                fprintf(stderr,
+                    "[OslMaterial hair] shader='%s' baseColor=(%.3f,%.3f,%.3f) "
+                    "sigma_a=(%.3f,%.3f,%.3f)\n",
+                    m_shaderName.c_str(),
+                    m_baseColor.x, m_baseColor.y, m_baseColor.z,
+                    hp.sigma_a.x, hp.sigma_a.y, hp.sigma_a.z);
         }
     }
 
